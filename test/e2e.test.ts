@@ -542,7 +542,7 @@ describe('4. Failover on Errors', () => {
 
       expect(res.status).toBe(502);
       const body = await res.json() as Record<string, unknown>;
-      expect(body.error).toContain('Upstream error');
+      expect(body.error).toBe('Bad Gateway');
     });
   });
 

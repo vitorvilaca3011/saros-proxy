@@ -84,9 +84,93 @@ npm run build
 
 ---
 
+## Docker
+
+Run the proxy in a clean Linux container without installing Node.js locally.
+
+### Prerequisites
+
+- [Docker](https://docs.docker.com/get-docker/) (with Compose v2)
+
+### Quick start
+
+```bash
+# 1. Create config.yaml from the example (edit with your API keys)
+cp config.example.yaml config.yaml
+
+# 2. Build the image
+npm run docker:build
+
+# 3. Start the proxy
+npm run docker:run
+```
+
+The proxy is now available at `http://127.0.0.1:3000`.
+
+### Run tests in Docker
+
+```bash
+# Run the full test suite inside a Linux container
+npm run docker:test
+```
+
+### Manual Docker commands
+
+```bash
+# Build
+docker compose build proxy
+
+# Run in foreground
+docker compose up proxy
+
+# Run in background (detached)
+docker compose up -d proxy
+
+# View logs
+docker compose logs -f proxy
+
+# Stop
+docker compose down
+
+# Run tests
+docker compose run --rm test
+```
+
+### Configuration with Docker
+
+Mount a custom `config.yaml` or use environment variables:
+
+```bash
+# Using environment variables (no config.yaml needed)
+docker compose run --rm -e OPENCODE_GO_KEYS="home:sk-xxx,work:sk-yyy" proxy
+
+# Or edit docker-compose.yml to set env vars directly, then:
+docker compose up proxy
+```
+
+---
+
 ## Quick Start
 
-### 1. Create a configuration file
+### Option A: Interactive Setup (Recommended)
+
+```bash
+# Run the setup wizard — it will guide you through everything
+npx opencode-go-proxy setup
+
+# Or if installed globally:
+opencode-go-proxy setup
+```
+
+The wizard will:
+1. Ask for your proxy port (default: 3000)
+2. Ask for your API keys (name + key value)
+3. Generate `config.yaml` automatically
+4. Run a smoke test to verify everything works
+
+### Option B: Manual Setup
+
+#### 1. Create a configuration file
 
 ```yaml
 # config.yaml
@@ -103,7 +187,7 @@ circuitBreakerCooldownMs: 60000
 requestTimeoutMs: 30000
 ```
 
-### 2. Run the proxy
+#### 2. Run the proxy
 
 ```bash
 # Using tsx (development)
@@ -113,7 +197,7 @@ npx tsx src/index.ts
 node dist/index.js
 ```
 
-### 3. Test it
+#### 3. Test it
 
 ```bash
 curl http://127.0.0.1:3000/health
@@ -211,16 +295,66 @@ nohup npx tsx src/index.ts > proxy.log 2>&1 &
 
 ## OpenCode Integration
 
-Configure OpenCode to use the proxy as its API endpoint:
+Configure OpenCode to route API requests through the proxy. Create or edit your OpenCode config file:
 
-```yaml
-# In your OpenCode configuration (e.g. ~/.config/opencode/config.yaml)
-api:
-  baseUrl: http://127.0.0.1:3000  # Point to the proxy
-  # Do NOT set an API key here — the proxy handles key selection
+**Location:** `~/.config/opencode/opencode.json` (global) or `opencode.json` in your project root
+
+```jsonc
+{
+  "$schema": "https://opencode.ai/config.json",
+  "provider": {
+    "opencode-go-proxy": {
+      "npm": "@ai-sdk/openai-compatible",
+      "name": "OpenCode-Go Proxy",
+      "options": {
+        "baseURL": "http://127.0.0.1:3000/zen/go/v1",
+        "apiKey": "not-used"
+      },
+      "models": {
+        "glm-5": { "name": "GLM-5" },
+        "kimi-k2.5": { "name": "Kimi K2.5" },
+        "qwen3.7-plus": { "name": "Qwen 3.7 Plus" }
+      }
+    }
+  }
+}
 ```
 
-All requests from OpenCode to `*/zen/go/v1/*` will be forwarded through the proxy with automatic key management.
+**Key points:**
+- `baseURL` must end at `/v1` — OpenCode appends route paths internally
+- `apiKey` can be any placeholder — the proxy handles real key selection
+- Model IDs must match what the upstream API expects (e.g., `glm-5`, not `opencode-go/glm-5`)
+- After editing the config, restart OpenCode
+
+**Alternative: Environment variable substitution**
+
+```jsonc
+{
+  "provider": {
+    "opencode-go-proxy": {
+      "npm": "@ai-sdk/openai-compatible",
+      "name": "OpenCode-Go Proxy",
+      "options": {
+        "baseURL": "{env:OPENCODE_PROXY_URL}",
+        "apiKey": "{env:OPENCODE_PROXY_KEY}"
+      }
+    }
+  }
+}
+```
+
+Then set: `export OPENCODE_PROXY_URL=http://127.0.0.1:3000/zen/go/v1`
+
+**Using the proxy in OpenCode:**
+
+Once configured, select the proxy provider in OpenCode's model picker, or set it as default:
+
+```jsonc
+{
+  "provider": { /* ... as above ... */ },
+  "model": "opencode-go-proxy/glm-5"
+}
+```
 
 ---
 
@@ -295,6 +429,8 @@ src/
   proxy-logic.test.ts — Unit tests for proxy logic
   config.ts         — Configuration loading from YAML, env vars, CLI
   logger.ts         — Structured logging with Pino + key masking
+  cli/
+    setup.ts        — Interactive setup wizard
 test/
   e2e.test.ts       — End-to-end tests with mock upstream
 ```

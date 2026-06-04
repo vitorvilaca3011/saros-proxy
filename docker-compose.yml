@@ -1,0 +1,54 @@
+version: "3.9"
+
+services:
+  proxy:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: opencode-proxy
+    ports:
+      - "3000:3000"
+    volumes:
+      # Mount config from host (create config.yaml from config.example.yaml first)
+      - ./config.yaml:/app/config.yaml:ro
+    environment:
+      - NODE_ENV=production
+      # Override config via env vars when needed (takes precedence over YAML)
+      # - PROXY_PORT=3000
+      # - PROXY_HOST=0.0.0.0
+      # - UPSTREAM_BASE_URL=https://opencode.ai
+      # - OPENCODE_GO_KEYS=label1:sk-xxx,label2:sk-yyy
+      # - CIRCUIT_BREAKER_THRESHOLD=3
+      # - CIRCUIT_BREAKER_COOLDOWN_MS=60000
+      # - REQUEST_TIMEOUT_MS=30000
+      # - LOG_LEVEL=info
+    restart: unless-stopped
+    networks:
+      - opencode-net
+
+  # ── Test service ─────────────────────────────────────────────────────────
+  # Runs the test suite inside a clean Linux container.
+  # Usage: docker compose run --rm test
+  test:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: build
+    container_name: opencode-proxy-test
+    volumes:
+      # Mount source so tests reflect current code without rebuild
+      - ./src:/app/src:ro
+      - ./test:/app/test:ro
+      - ./tsconfig.json:/app/tsconfig.json:ro
+    environment:
+      - NODE_ENV=test
+      - CI=true
+    command: ["npx", "vitest", "run", "--reporter=verbose"]
+    networks:
+      - opencode-net
+    profiles:
+      - test
+
+networks:
+  opencode-net:
+    driver: bridge

@@ -5,6 +5,7 @@
  *   tsx src/index.ts
  *   tsx src/index.ts --config my-config.yaml
  *   tsx src/index.ts --port 4000 --host 0.0.0.0
+ *   tsx src/index.ts setup                     # Run the interactive setup wizard
  */
 
 import { serve } from '@hono/node-server';
@@ -12,6 +13,16 @@ import type { ServerType } from '@hono/node-server';
 import { loadConfig, type ProxyConfig } from './config.js';
 import { createProxyApp } from './proxy.js';
 import { logger, maskKey } from './logger.js';
+
+// ---------------------------------------------------------------------------
+// Subcommand: 'setup' — delegate to the interactive setup wizard
+// ---------------------------------------------------------------------------
+
+if (process.argv[2] === 'setup') {
+  const { setup } = await import('./cli/setup.js');
+  await setup();
+  process.exit(0);
+}
 
 // ---------------------------------------------------------------------------
 // Configuration

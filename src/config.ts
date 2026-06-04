@@ -65,8 +65,8 @@ export function validateConfig(config: Partial<ProxyConfig>): ProxyConfig {
 
   // --- Host ---
   let host = config.host ?? '127.0.0.1';
-  const hostRegex =
-    /^[a-zA-Z0-9]([a-zA-Z0-9-]*[a-zA-Z0-9])?(\.[a-zA-Z0-9]([a-zA-Z0-9-]*[a-zA-Z0-9])?)*$|^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$|^\[[0-9a-fA-F:]+\]$/;
+  // Simple validation: only allow alphanumeric, dots, hyphens, colons (for IPv6), brackets
+  const hostRegex = /^[a-zA-Z0-9._:\-[\]]+$/;
   if (!hostRegex.test(host)) {
     logger.warn('Invalid host "%s", defaulting to 127.0.0.1', host);
     host = '127.0.0.1';

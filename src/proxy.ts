@@ -7,6 +7,7 @@
 
 import { Hono } from 'hono';
 import { cors } from 'hono/cors';
+import { rateLimiter } from 'hono-rate-limiter';
 import type { Context } from 'hono';
 import crypto from 'node:crypto';
 
@@ -23,6 +24,8 @@ import {
 } from './proxy-logic.js';
 import type { ProxyConfig } from './config.js';
 import { logger, maskKey } from './logger.js';
+
+const MAX_BODY_SIZE = 10 * 1024 * 1024; // 10MB — prevent DoS via oversized request bodies
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -207,9 +210,20 @@ async function handleWithFailover(
       if (errorType === 'RequestFault') {
         // Client error — don't retry, don't penalise the key
         completeRequest(state, requestId, false);
-        return new Response(errorBody, {
+        // Sanitize upstream error - don't leak internal details
+        let safeError;
+        try {
+          const parsed = JSON.parse(errorBody);
+          safeError = JSON.stringify({
+            error: parsed.error?.message || parsed.error || 'Bad Request',
+            requestId,
+          });
+        } catch {
+          safeError = JSON.stringify({ error: 'Bad Request', requestId });
+        }
+        return new Response(safeError, {
           status: response.status,
-          headers: response.headers,
+          headers: { 'content-type': 'application/json' },
         });
       }
 
@@ -250,13 +264,15 @@ async function handleWithFailover(
   // All retries exhausted
   completeRequest(state, requestId, false);
   logger.error(
-    { requestId },
+    { requestId, err: lastError },
     'All %d retries exhausted, returning 502',
     maxRetries,
   );
   return new Response(
     JSON.stringify({
-      error: `Upstream error after ${maxRetries} attempts: ${lastError?.message}`,
+      error: 'Bad Gateway',
+      message: 'Upstream service unavailable after multiple attempts',
+      requestId,
     }),
     {
       status: 502,
@@ -403,9 +419,16 @@ async function handleStreamingRequest(
   }
 
   completeRequest(state, requestId, false);
+  logger.error(
+    { requestId, err: lastError },
+    'Streaming failed after %d attempts',
+    maxRetries,
+  );
   return new Response(
     JSON.stringify({
-      error: `Streaming failed after ${maxRetries} attempts: ${lastError?.message}`,
+      error: 'Bad Gateway',
+      message: 'Streaming service unavailable after multiple attempts',
+      requestId,
     }),
     {
       status: 502,
@@ -494,16 +517,25 @@ export function createProxyApp(config: ProxyConfig): Hono {
 
   const app = new Hono();
 
+  // --- Rate limiting (prevent DoS and key exhaustion) ---
+  app.use('*', rateLimiter({
+    windowMs: 60 * 1000, // 1 minute
+    limit: 100, // 100 requests per minute per IP
+    standardHeaders: true, // Return rate limit info in headers
+    keyGenerator: (c) => c.req.header('x-forwarded-for') ?? c.req.header('x-real-ip') ?? 'unknown',
+    message: { error: 'Too many requests, please try again later' },
+  }));
+
   // --- CORS (configurable origins) ---
   app.use(
     '*',
     cors({
       origin: (origin: string) => {
-        if (!origin) return null; // Allow non-browser requests (null = reflect origin)
+        if (!origin) return null; // Non-browser requests (no Origin header) — skip CORS
         const allowed = config.allowedOrigins.some((pattern) => {
-          const regex = new RegExp(
-            '^' + pattern.replace(/\*/g, '.*') + '$',
-          );
+          // Escape regex special chars, then replace \* with .*
+          const escaped = pattern.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+          const regex = new RegExp('^' + escaped.replace(/\\\*/g, '.*') + '$');
           return regex.test(origin);
         });
         if (allowed) return origin;
@@ -539,8 +571,19 @@ export function createProxyApp(config: ProxyConfig): Hono {
     const path = c.req.path;
     const incomingHeaders = c.req.raw.headers;
 
+    // Reject oversized requests early via Content-Length header
+    const contentLength = c.req.header('content-length');
+    if (contentLength && parseInt(contentLength) > MAX_BODY_SIZE) {
+      return c.json({ error: 'Request body too large' }, 413);
+    }
+
     // Read the body text once (needed for streaming detection and forwarding)
     const bodyText = method === 'GET' || method === 'HEAD' ? '' : await c.req.text();
+
+    // Reject requests whose actual body exceeds the limit
+    if (bodyText.length > MAX_BODY_SIZE) {
+      return c.json({ error: 'Request body too large' }, 413);
+    }
 
     // Check for streaming mode
     if (bodyText && isStreamingRequest(bodyText)) {

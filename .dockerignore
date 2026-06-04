@@ -1,0 +1,40 @@
+# Dependencies
+node_modules/
+
+# Build output
+dist/
+
+# Version control
+.git/
+.gitignore
+.gitattributes
+
+# Sensitive configuration (contains API keys)
+config.yaml
+config.example.yaml
+api_keys.txt
+.env
+.env.example
+
+# Test files (not needed in production image)
+test/
+src/*.test.ts
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Logs
+*.log
+
+# TypeScript build info
+*.tsbuildinfo
+
+# Docker files (not needed inside build context layers)
+Dockerfile
+docker-compose.yml
+.dockerignore
+
+# IDE
+.idea/
+.vscode/
