@@ -1,0 +1,9 @@
+node_modules/
+dist/
+*.log
+.env
+api_keys.txt
+config.yaml
+test-output.txt
+.DS_Store
+*.tsbuildinfo

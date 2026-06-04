@@ -1,0 +1,28 @@
+# OpenCode-Go Multi-Account Proxy Configuration
+# Copy this file to config.yaml and customize.
+
+port: 3000
+host: 127.0.0.1
+
+# Upstream API base URL (must be HTTPS)
+upstreamBaseUrl: https://opencode.ai
+
+# Circuit breaker settings
+circuitBreakerThreshold: 3          # Consecutive failures before disabling a key (1-10)
+circuitBreakerCooldownMs: 60000     # Cooldown period (ms) before re-enabling a key (1000-3600000)
+
+# Request timeout in milliseconds (default: 30000, range: 1000-300000)
+requestTimeoutMs: 30000
+
+# Allowed CORS origins (default: localhost only)
+# Use "*" as wildcard — set empty list to allow all origins (not recommended)
+allowedOrigins:
+  - "http://localhost:*"
+  - "http://127.0.0.1:*"
+
+# API keys (must start with "sk-" and be at least 20 characters)
+keys:
+  - label: account1
+    key: sk-abc123...
+  - label: account2
+    key: sk-def456...

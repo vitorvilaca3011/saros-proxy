@@ -1,0 +1,35 @@
+[
+  {
+    "id": "proc_2026-06-04T0057_4a5b56",
+    "workspaceId": "mpyqxywn",
+    "title": "Proxy server test",
+    "command": "npx tsx src/index.ts",
+    "cwd": "D:\\Projetos\\PluginOpencode",
+    "status": "stopped",
+    "pid": 11520,
+    "startedAt": "2026-06-04T00:57:04.684Z",
+    "outputSizeBytes": 1768,
+    "terminalReason": "user_stopped",
+    "exitCode": 1,
+    "stoppedAt": "2026-06-04T00:57:31.569Z"
+  },
+  {
+    "id": "proc_2026-06-04T0058_6b9459",
+    "workspaceId": "mpyqxywn",
+    "title": "Proxy Server",
+    "command": "cd D:\\Projetos\\PluginOpencode && npx tsx src/index.ts",
+    "cwd": "D:\\Projetos\\PluginOpencode",
+    "status": "stopped",
+    "pid": 12816,
+    "startedAt": "2026-06-04T00:58:59.216Z",
+    "outputSizeBytes": 4748,
+    "notify": {
+      "sessionID": "ses_170000266ffe2ATUdCXlpXyvy8",
+      "directory": "D:\\Projetos\\PluginOpencode",
+      "sentAt": "2026-06-04T01:00:21.982Z"
+    },
+    "terminalReason": "user_stopped",
+    "exitCode": 1,
+    "stoppedAt": "2026-06-04T01:00:21.955Z"
+  }
+]

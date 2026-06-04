@@ -1,0 +1,75 @@
+[21:58:59.951] [32mINFO[39m (10332): [36mLoaded config from config.yaml[39m
+[21:58:59.952] [32mINFO[39m (10332): [36mLoaded 2 API key(s):[39m
+[21:58:59.952] [32mINFO[39m (10332): [36m  - velynz44: sk-1mycD...dtoJ[39m
+[21:58:59.952] [32mINFO[39m (10332): [36m  - vitorvilaca3011: sk-GaP8e...jy1c[39m
+[21:58:59.961] [32mINFO[39m (10332): [36mProxy listening on http://127.0.0.1:3000[39m
+[21:58:59.961] [32mINFO[39m (10332): [36mUpstream: https://opencode.ai[39m
+[21:58:59.961] [32mINFO[39m (10332): [36mAPI keys loaded: 2[39m
+[21:59:22.163] [32mINFO[39m (10332): [36mForwarding request to upstream using key sk-1mycD...dtoJ[39m
+    [35mrequestId[39m: "1e3a031e-355d-4635-9fbe-6192dff86419"
+    [35mkeyLabel[39m: "velynz44"
+    [35mattempt[39m: 0
+[21:59:22.584] [33mWARN[39m (10332): [36mUpstream returned error: {"type":"error","error":{"type":"error","message":"Internal server error"}}[39m
+    [35mrequestId[39m: "1e3a031e-355d-4635-9fbe-6192dff86419"
+    [35mkeyLabel[39m: "velynz44"
+    [35mstatus[39m: 500
+    [35merrorType[39m: "ServerFault"
+[21:59:22.584] [32mINFO[39m (10332): [36mForwarding request to upstream using key sk-GaP8e...jy1c[39m
+    [35mrequestId[39m: "1e3a031e-355d-4635-9fbe-6192dff86419"
+    [35mkeyLabel[39m: "vitorvilaca3011"
+    [35mattempt[39m: 1
+[21:59:22.993] [33mWARN[39m (10332): [36mUpstream returned error: {"type":"error","error":{"type":"error","message":"Internal server error"}}[39m
+    [35mrequestId[39m: "1e3a031e-355d-4635-9fbe-6192dff86419"
+    [35mkeyLabel[39m: "vitorvilaca3011"
+    [35mstatus[39m: 500
+    [35merrorType[39m: "ServerFault"
+[21:59:22.994] [31mERROR[39m (10332): [36mAll 2 retries exhausted, returning 502[39m
+    [35mrequestId[39m: "1e3a031e-355d-4635-9fbe-6192dff86419"
+[21:59:38.903] [32mINFO[39m (10332): [36mForwarding request to upstream using key sk-1mycD...dtoJ[39m
+    [35mrequestId[39m: "35be33ad-def6-44b4-a01f-019a2085ecc8"
+    [35mkeyLabel[39m: "velynz44"
+    [35mattempt[39m: 0
+[21:59:39.318] [33mWARN[39m (10332): [36mUpstream returned error: {"type":"error","error":{"type":"error","message":"Internal server error"}}[39m
+    [35mrequestId[39m: "35be33ad-def6-44b4-a01f-019a2085ecc8"
+    [35mkeyLabel[39m: "velynz44"
+    [35mstatus[39m: 500
+    [35merrorType[39m: "ServerFault"
+[21:59:39.318] [32mINFO[39m (10332): [36mForwarding request to upstream using key sk-GaP8e...jy1c[39m
+    [35mrequestId[39m: "35be33ad-def6-44b4-a01f-019a2085ecc8"
+    [35mkeyLabel[39m: "vitorvilaca3011"
+    [35mattempt[39m: 1
+[21:59:39.718] [33mWARN[39m (10332): [36mUpstream returned error: {"type":"error","error":{"type":"error","message":"Internal server error"}}[39m
+    [35mrequestId[39m: "35be33ad-def6-44b4-a01f-019a2085ecc8"
+    [35mkeyLabel[39m: "vitorvilaca3011"
+    [35mstatus[39m: 500
+    [35merrorType[39m: "ServerFault"
+[21:59:39.718] [31mERROR[39m (10332): [36mAll 2 retries exhausted, returning 502[39m
+    [35mrequestId[39m: "35be33ad-def6-44b4-a01f-019a2085ecc8"
+[21:59:57.691] [32mINFO[39m (10332): [36mForwarding request to upstream using key sk-1mycD...dtoJ[39m
+    [35mrequestId[39m: "77e5dd9d-d6be-4d3e-9db6-85f132d855e4"
+    [35mkeyLabel[39m: "velynz44"
+    [35mattempt[39m: 0
+[21:59:58.098] [32mINFO[39m (10332): [36mUpstream request succeeded[39m
+    [35mrequestId[39m: "77e5dd9d-d6be-4d3e-9db6-85f132d855e4"
+    [35mkeyLabel[39m: "velynz44"
+    [35mstatus[39m: 200
+[22:00:09.669] [32mINFO[39m (10332): [36mForwarding request to upstream using key sk-GaP8e...jy1c[39m
+    [35mrequestId[39m: "5d86752e-2f90-42bd-8ab8-0136fe542035"
+    [35mkeyLabel[39m: "vitorvilaca3011"
+    [35mattempt[39m: 0
+[22:00:10.079] [33mWARN[39m (10332): [36mUpstream returned error: {"type":"error","error":{"type":"error","message":"Internal server error"}}[39m
+    [35mrequestId[39m: "5d86752e-2f90-42bd-8ab8-0136fe542035"
+    [35mkeyLabel[39m: "vitorvilaca3011"
+    [35mstatus[39m: 500
+    [35merrorType[39m: "ServerFault"
+[22:00:10.079] [32mINFO[39m (10332): [36mForwarding request to upstream using key sk-1mycD...dtoJ[39m
+    [35mrequestId[39m: "5d86752e-2f90-42bd-8ab8-0136fe542035"
+    [35mkeyLabel[39m: "velynz44"
+    [35mattempt[39m: 1
+[22:00:10.494] [33mWARN[39m (10332): [36mUpstream returned error: {"type":"error","error":{"type":"error","message":"Internal server error"}}[39m
+    [35mrequestId[39m: "5d86752e-2f90-42bd-8ab8-0136fe542035"
+    [35mkeyLabel[39m: "velynz44"
+    [35mstatus[39m: 500
+    [35merrorType[39m: "ServerFault"
+[22:00:10.494] [31mERROR[39m (10332): [36mAll 2 retries exhausted, returning 502[39m
+    [35mrequestId[39m: "5d86752e-2f90-42bd-8ab8-0136fe542035"

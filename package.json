@@ -1,0 +1,57 @@
+{
+  "name": "opencode-go-proxy",
+  "version": "0.1.0",
+  "description": "Multi-account proxy for OpenCode-Go API with failover and streaming",
+  "type": "module",
+  "bin": {
+    "opencode-go-proxy": "./dist/index.js"
+  },
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
+  "scripts": {
+    "prototype": "tsx prototype/prototype.ts",
+    "dev": "tsx src/index.ts",
+    "build": "tsc",
+    "lint": "tsc --noEmit",
+    "prepublishOnly": "npm run build",
+    "test": "vitest"
+  },
+  "keywords": [
+    "opencode",
+    "proxy",
+    "multi-account",
+    "failover",
+    "load-balancer",
+    "api-gateway",
+    "circuit-breaker"
+  ],
+  "author": "OpenCode-Go Proxy Contributors",
+  "license": "MIT",
+  "engines": {
+    "node": ">=20.0.0"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/opencode-go/proxy.git"
+  },
+  "bugs": {
+    "url": "https://github.com/opencode-go/proxy/issues"
+  },
+  "homepage": "https://github.com/opencode-go/proxy#readme",
+  "devDependencies": {
+    "@types/node": "^25.9.1",
+    "tsx": "^4.22.4",
+    "typescript": "^6.0.3",
+    "vitest": "^4.1.8"
+  },
+  "dependencies": {
+    "@hono/node-server": "^2.0.4",
+    "hono": "^4.12.23",
+    "pino": "^10.3.1",
+    "pino-pretty": "^13.1.3",
+    "yaml": "^2.9.0"
+  }
+}

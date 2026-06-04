@@ -1,0 +1,12 @@
+test/
+prototype/
+.github/
+.slim/
+*.test.ts
+tsconfig.json
+.gitignore
+.env.example
+api_keys.txt
+config.example.yaml
+stderr_proto.txt
+stdout_proto.txt
