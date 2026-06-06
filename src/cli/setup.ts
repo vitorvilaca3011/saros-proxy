@@ -21,6 +21,12 @@ import { encryptKey } from '../key-encryption.js';
 import { extractFirefoxAuthCookie, extractFirefoxWorkspaceIds } from '../firefox-cookies.js';
 import { scrapeDashboard } from '../scraper.js';
 import {
+  getDefaultOpencodeConfigPath,
+  updateOpencodeConfig,
+  generateManualConfigSnippet,
+  type OpencodeConfigResult,
+} from './opencode-config.js';
+import {
   DEFAULT_PORT,
   DEFAULT_HOST,
   DEFAULT_UPSTREAM_URL,
@@ -615,7 +621,61 @@ export async function setup(configDir = dirname(getDefaultConfigPath()), skipSmo
     }
   }
 
-  // --- Step 7: Success ---
+  // --- Step 7: OpenCode client configuration ---
+  ui.step('OpenCode Client Configuration');
+
+  const defaultOpencodePath = getDefaultOpencodeConfigPath();
+  const opencodeExists = existsSync(defaultOpencodePath);
+
+  let opencodePath: string | undefined;
+
+  if (!opencodeExists) {
+    ui.info(`Default OpenCode config not found at ${defaultOpencodePath}`);
+    const customPath = ui.assertNotCancelled(await ui.text({
+      message: 'Path to opencode.json (or press Enter to skip)',
+      placeholder: 'Press Enter to skip',
+      validate: () => undefined,
+    }));
+
+    if (customPath && customPath.trim()) {
+      opencodePath = customPath.trim();
+    }
+  } else {
+    opencodePath = defaultOpencodePath;
+  }
+
+  if (opencodePath) {
+    const shouldConfigure = ui.assertNotCancelled(await ui.confirm({
+      message: 'Configure opencode.json to use this proxy?',
+      initialValue: true,
+    }));
+
+    if (shouldConfigure) {
+      const result = updateOpencodeConfig(port, { configPath: opencodePath });
+
+      if (result.success) {
+        if (result.created) {
+          ui.success(`Created opencode.json at ${result.path}`);
+        } else {
+          ui.success(`Updated opencode.json at ${result.path}`);
+          ui.info('A backup was saved to opencode.json.backup');
+        }
+        ui.info('If OpenCode is running, restart it to pick up the changes');
+      } else {
+        ui.warn(`Could not update opencode.json: ${result.error}`);
+        ui.info('You can manually add this to your opencode.json:');
+        console.log(chalk.dim(generateManualConfigSnippet(port)));
+      }
+    } else {
+      ui.info('Skipped automatic configuration. Add this to your opencode.json manually:');
+      console.log(chalk.dim(generateManualConfigSnippet(port)));
+    }
+  } else {
+    ui.info('Skipped OpenCode configuration. Add this to your opencode.json manually:');
+    console.log(chalk.dim(generateManualConfigSnippet(port)));
+  }
+
+  // --- Step 8: Success ---
   ui.printConfigSummary(cfg, encryptionKey !== undefined, envSaved);
   ui.printNextSteps(cfg.port);
   ui.outro('Setup complete');

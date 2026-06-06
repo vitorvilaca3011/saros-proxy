@@ -3,9 +3,26 @@
  */
 
 import { readFileSync, existsSync } from 'node:fs';
+import { homedir } from 'node:os';
+import { dirname, join } from 'node:path';
 import { parse as parseYaml } from 'yaml';
 import { logger, maskKey } from './logger.js';
 import { decryptKey, isEncryptedKey } from './key-encryption.js';
+import {
+  DEFAULT_PORT,
+  DEFAULT_HOST,
+  DEFAULT_UPSTREAM_URL,
+  DEFAULT_CIRCUIT_BREAKER_COOLDOWN_MS,
+  DEFAULT_REQUEST_TIMEOUT_MS,
+  MIN_KEY_LENGTH,
+  API_KEY_PREFIX,
+  MIN_SCRAPE_INTERVAL_MS,
+  MAX_SCRAPE_INTERVAL_MS,
+  DEFAULT_SCRAPE_INTERVAL_MS,
+  DEFAULT_USAGE_THRESHOLD,
+  WORKSPACE_ID_REGEX,
+} from './constants.js';
+import { isValidPort, isValidHttpsUrl, isValidApiKey, isValidWorkspaceId } from './validation.js';
 
 export interface ProxyConfig {
   port: number;
@@ -49,6 +66,29 @@ interface YamlConfig {
 }
 
 /**
+ * Return the OS-native user config directory path for opencode-go-proxy.
+ *
+ * Windows: %LOCALAPPDATA%\opencode-go-proxy\config.yaml
+ * macOS/Linux: ~/.config/opencode-go-proxy/config.yaml (XDG)
+ */
+export function getDefaultConfigPath(): string {
+  const home = homedir();
+  if (!home) {
+    throw new Error(
+      'Cannot determine home directory — set XDG_CONFIG_HOME or LOCALAPPDATA environment variable',
+    );
+  }
+
+  if (process.platform === 'win32') {
+    const localAppData = process.env.LOCALAPPDATA || join(home, 'AppData', 'Local');
+    return join(localAppData, 'opencode-go-proxy', 'config.yaml');
+  }
+
+  const xdgConfig = process.env.XDG_CONFIG_HOME || join(home, '.config');
+  return join(xdgConfig, 'opencode-go-proxy', 'config.yaml');
+}
+
+/**
  * Parse --key value pairs from process.argv.
  */
 function parseCliArgs(): Record<string, string> {
@@ -77,44 +117,36 @@ function parseCliArgs(): Record<string, string> {
  */
 export function validateConfig(config: Partial<ProxyConfig>): ProxyConfig {
   // --- Port ---
-  let port = config.port ?? 3000;
-  if (!Number.isInteger(port) || port < 1 || port > 65535) {
-    logger.warn('Invalid port %d, defaulting to 3000', port);
-    port = 3000;
+  let port = config.port ?? DEFAULT_PORT;
+  if (!isValidPort(port)) {
+    logger.warn('Invalid port %d, defaulting to %d', port, DEFAULT_PORT);
+    port = DEFAULT_PORT;
   }
 
   // --- Host ---
-  let host = config.host ?? '127.0.0.1';
+  let host = config.host ?? DEFAULT_HOST;
   // Simple validation: only allow alphanumeric, dots, hyphens, colons (for IPv6), brackets
   const hostRegex = /^[a-zA-Z0-9._:\-[\]]+$/;
   if (!hostRegex.test(host)) {
-    logger.warn('Invalid host "%s", defaulting to 127.0.0.1', host);
-    host = '127.0.0.1';
+    logger.warn('Invalid host "%s", defaulting to %s', host, DEFAULT_HOST);
+    host = DEFAULT_HOST;
   }
 
   // --- Upstream URL (SSRF prevention — must be HTTPS) ---
-  let upstreamBaseUrl = config.upstreamBaseUrl ?? 'https://opencode.ai';
-  try {
-    const parsed = new URL(upstreamBaseUrl);
-    if (parsed.protocol !== 'https:') {
-      logger.warn(
-        'Upstream URL "%s" must use HTTPS, defaulting to https://opencode.ai',
-        upstreamBaseUrl,
-      );
-      upstreamBaseUrl = 'https://opencode.ai';
-    }
-  } catch {
+  let upstreamBaseUrl = config.upstreamBaseUrl ?? DEFAULT_UPSTREAM_URL;
+  if (!isValidHttpsUrl(upstreamBaseUrl)) {
     logger.warn(
-      'Invalid upstream URL "%s", defaulting to https://opencode.ai',
+      'Upstream URL "%s" must use HTTPS, defaulting to %s',
       upstreamBaseUrl,
+      DEFAULT_UPSTREAM_URL,
     );
-    upstreamBaseUrl = 'https://opencode.ai';
+    upstreamBaseUrl = DEFAULT_UPSTREAM_URL;
   }
 
   // --- API keys (must start with sk- and be >= 20 chars) ---
   const rawKeys = config.keys ?? [];
   const validKeys = rawKeys.filter((k) => {
-    if (!k.key.startsWith('sk-') || k.key.length < 20) {
+    if (!isValidApiKey(k.key)) {
       logger.warn('Invalid key "%s", filtering out', maskKey(k.key));
       return false;
     }
@@ -140,31 +172,33 @@ export function validateConfig(config: Partial<ProxyConfig>): ProxyConfig {
   }
 
   // --- Circuit breaker cooldown ---
-  let circuitBreakerCooldownMs = config.circuitBreakerCooldownMs ?? 60_000;
+  let circuitBreakerCooldownMs = config.circuitBreakerCooldownMs ?? DEFAULT_CIRCUIT_BREAKER_COOLDOWN_MS;
   if (
     !Number.isInteger(circuitBreakerCooldownMs) ||
     circuitBreakerCooldownMs < 1_000 ||
-    circuitBreakerCooldownMs > 3_600_000
+    circuitBreakerCooldownMs > MAX_SCRAPE_INTERVAL_MS
   ) {
     logger.warn(
-      'Invalid circuitBreakerCooldownMs %d, defaulting to 60000',
+      'Invalid circuitBreakerCooldownMs %d, defaulting to %d',
       circuitBreakerCooldownMs,
+      DEFAULT_CIRCUIT_BREAKER_COOLDOWN_MS,
     );
-    circuitBreakerCooldownMs = 60_000;
+    circuitBreakerCooldownMs = DEFAULT_CIRCUIT_BREAKER_COOLDOWN_MS;
   }
 
   // --- Request timeout ---
-  let requestTimeoutMs = config.requestTimeoutMs ?? 30_000;
+  let requestTimeoutMs = config.requestTimeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS;
   if (
     !Number.isInteger(requestTimeoutMs) ||
     requestTimeoutMs < 1_000 ||
     requestTimeoutMs > 300_000
   ) {
     logger.warn(
-      'Invalid requestTimeoutMs %d, defaulting to 30000',
+      'Invalid requestTimeoutMs %d, defaulting to %d',
       requestTimeoutMs,
+      DEFAULT_REQUEST_TIMEOUT_MS,
     );
-    requestTimeoutMs = 30_000;
+    requestTimeoutMs = DEFAULT_REQUEST_TIMEOUT_MS;
   }
 
   // --- Allowed origins (CORS) ---
@@ -182,24 +216,26 @@ export function validateConfig(config: Partial<ProxyConfig>): ProxyConfig {
     const enabled = s.enabled ?? false;
 
     // intervalMs: default 90000, range 10000-3600000
-    let intervalMs = s.intervalMs ?? 90_000;
-    if (!Number.isInteger(intervalMs) || intervalMs < 10_000 || intervalMs > 3_600_000) {
-      logger.warn('Invalid scraping.intervalMs %d, defaulting to 90000', intervalMs);
-      intervalMs = 90_000;
+    let intervalMs = s.intervalMs ?? DEFAULT_SCRAPE_INTERVAL_MS;
+    if (!Number.isInteger(intervalMs) || intervalMs < MIN_SCRAPE_INTERVAL_MS || intervalMs > MAX_SCRAPE_INTERVAL_MS) {
+      logger.warn('Invalid scraping.intervalMs %d, defaulting to %d', intervalMs, DEFAULT_SCRAPE_INTERVAL_MS);
+      intervalMs = DEFAULT_SCRAPE_INTERVAL_MS;
     }
 
     // usageThreshold: default 50, range 1-100
-    let usageThreshold = s.usageThreshold ?? 50;
+    let usageThreshold = s.usageThreshold ?? DEFAULT_USAGE_THRESHOLD;
     if (!Number.isInteger(usageThreshold) || usageThreshold < 1 || usageThreshold > 100) {
-      logger.warn('Invalid scraping.usageThreshold %d, defaulting to 50', usageThreshold);
-      usageThreshold = 50;
+      logger.warn('Invalid scraping.usageThreshold %d, defaulting to %d', usageThreshold, DEFAULT_USAGE_THRESHOLD);
+      usageThreshold = DEFAULT_USAGE_THRESHOLD;
     }
 
     // accounts: filter invalid entries
-    const rawAccounts = s.accounts ?? [];
+    const rawAccounts = Array.isArray(s.accounts) ? s.accounts : [];
     const validAccounts = rawAccounts.filter((acc) => {
+      // null/not-object guard
+      if (!acc || typeof acc !== 'object') return false;
       // workspaceId must match wrk_[A-Za-z0-9]+
-      if (!/^wrk_[A-Za-z0-9]+$/.test(acc.workspaceId)) {
+      if (!isValidWorkspaceId(acc.workspaceId)) {
         logger.warn('Invalid scraping account workspaceId "%s", filtering out', acc.workspaceId);
         return false;
       }
@@ -246,13 +282,13 @@ export function loadConfig(configPath?: string): ProxyConfig {
 
   // --- Step 1: defaults ---
   const config: ProxyConfig = {
-    port: 3000,
-    host: '127.0.0.1',
+    port: DEFAULT_PORT,
+    host: DEFAULT_HOST,
     keys: [],
     circuitBreakerThreshold: 3,
-    circuitBreakerCooldownMs: 60_000,
-    upstreamBaseUrl: 'https://opencode.ai',
-    requestTimeoutMs: 30_000,
+    circuitBreakerCooldownMs: DEFAULT_CIRCUIT_BREAKER_COOLDOWN_MS,
+    upstreamBaseUrl: DEFAULT_UPSTREAM_URL,
+    requestTimeoutMs: DEFAULT_REQUEST_TIMEOUT_MS,
     allowedOrigins: ['http://localhost:*', 'http://127.0.0.1:*'],
     scraping: undefined,
   };
@@ -283,7 +319,18 @@ export function loadConfig(configPath?: string): ProxyConfig {
   }
 
   // --- Step 3: YAML config file ---
-  const yamlPath = configPath || cliArgs.config || 'config.yaml';
+  let yamlPath = configPath || cliArgs.config;
+  if (!yamlPath) {
+    const defaultPath = getDefaultConfigPath();
+    if (existsSync(defaultPath)) {
+      yamlPath = defaultPath;
+    } else if (existsSync('config.yaml')) {
+      logger.warn('Config loaded from current directory (config.yaml). Consider moving it to %s', defaultPath);
+      yamlPath = 'config.yaml';
+    } else {
+      yamlPath = defaultPath;
+    }
+  }
   if (existsSync(yamlPath)) {
     try {
       const raw = readFileSync(yamlPath, 'utf-8');
@@ -300,8 +347,8 @@ export function loadConfig(configPath?: string): ProxyConfig {
       if (yaml.scraping !== undefined) {
         config.scraping = {
           enabled: yaml.scraping.enabled ?? false,
-          intervalMs: yaml.scraping.intervalMs ?? 90_000,
-          usageThreshold: yaml.scraping.usageThreshold ?? 50,
+          intervalMs: yaml.scraping.intervalMs ?? DEFAULT_SCRAPE_INTERVAL_MS,
+          usageThreshold: yaml.scraping.usageThreshold ?? DEFAULT_USAGE_THRESHOLD,
           accounts: yaml.scraping.accounts ?? [],
         };
       }

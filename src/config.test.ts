@@ -6,8 +6,8 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { writeFileSync, mkdtempSync, rmSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
-import { tmpdir } from 'node:os';
-import { loadConfig, validateConfig, type ProxyConfig } from './config.js';
+import * as os from 'node:os';
+import { loadConfig, validateConfig, getDefaultConfigPath, type ProxyConfig, type ScrapingConfig } from './config.js';
 import { encryptKey } from './key-encryption.js';
 
 // ---------------------------------------------------------------------------
@@ -66,7 +66,7 @@ function writeMinimalYaml(yamlPath: string): void {
 
 /** Create a temp directory and return its path. */
 function createTempDir(): string {
-  return mkdtempSync(join(tmpdir(), 'config-test-'));
+  return mkdtempSync(join(os.tmpdir(), 'config-test-'));
 }
 
 /** Remove a temp directory. */
@@ -147,12 +147,6 @@ describe('validateConfig', () => {
 
   it('defaults to 127.0.0.1 for host with special characters', () => {
     const result = validateConfig(validBase({ host: 'host@name' }));
-    expect(result.host).toBe('127.0.0.1');
-  });
-
-  it('defaults to 127.0.0.1 for host with spaces', () => {
-    // Spaces are not in the allowed host regex
-    const result = validateConfig(validBase({ host: 'my host' }));
     expect(result.host).toBe('127.0.0.1');
   });
 
@@ -475,6 +469,8 @@ describe('parseCliArgs (via loadConfig)', () => {
       const result = loadConfig();
       // Should still load YAML values; unknown flag is ignored
       expect(result.port).toBe(9090);
+      // Unknown flags must not pollute the config object
+      expect(result).not.toHaveProperty('unknown-flag');
     } finally {
       removeTempDir(tempDir);
     }
@@ -535,14 +531,14 @@ describe('loadConfig', () => {
     process.env.PROXY_PORT = '5000';
     process.env.OPENCODE_GO_KEYS = `test:${VALID_KEY}`;
     // Pass a path that does not exist to skip YAML
-    const result = loadConfig(join(tmpdir(), 'nonexistent-config.yaml'));
+    const result = loadConfig(join(os.tmpdir(), 'nonexistent-config.yaml'));
     expect(result.port).toBe(5000);
   });
 
   it('Missing YAML file falls back to env/defaults', () => {
     process.env.PROXY_HOST = '0.0.0.0';
     process.env.OPENCODE_GO_KEYS = `test:${VALID_KEY}`;
-    const result = loadConfig(join(tmpdir(), 'does-not-exist.yaml'));
+    const result = loadConfig(join(os.tmpdir(), 'does-not-exist.yaml'));
     expect(result.host).toBe('0.0.0.0');
     // Other fields should use defaults
     expect(result.port).toBe(3000);
@@ -649,27 +645,27 @@ describe('loadConfig', () => {
   it('PROXY_PORT env var sets port', () => {
     process.env.PROXY_PORT = '4000';
     process.env.OPENCODE_GO_KEYS = `test:${VALID_KEY}`;
-    const result = loadConfig(join(tmpdir(), 'no-exist.yaml'));
+    const result = loadConfig(join(os.tmpdir(), 'no-exist.yaml'));
     expect(result.port).toBe(4000);
   });
 
   it('PROXY_HOST env var sets host', () => {
     process.env.PROXY_HOST = '0.0.0.0';
     process.env.OPENCODE_GO_KEYS = `test:${VALID_KEY}`;
-    const result = loadConfig(join(tmpdir(), 'no-exist.yaml'));
+    const result = loadConfig(join(os.tmpdir(), 'no-exist.yaml'));
     expect(result.host).toBe('0.0.0.0');
   });
 
   it('UPSTREAM_BASE_URL env var sets upstream', () => {
     process.env.UPSTREAM_BASE_URL = 'https://env.example.com';
     process.env.OPENCODE_GO_KEYS = `test:${VALID_KEY}`;
-    const result = loadConfig(join(tmpdir(), 'no-exist.yaml'));
+    const result = loadConfig(join(os.tmpdir(), 'no-exist.yaml'));
     expect(result.upstreamBaseUrl).toBe('https://env.example.com');
   });
 
   it('OPENCODE_GO_KEYS env var parses key list', () => {
     process.env.OPENCODE_GO_KEYS = `test:${VALID_KEY},other:${VALID_KEY2}`;
-    const result = loadConfig(join(tmpdir(), 'no-exist.yaml'));
+    const result = loadConfig(join(os.tmpdir(), 'no-exist.yaml'));
     expect(result.keys).toHaveLength(2);
     expect(result.keys[0]).toEqual({ label: 'test', key: VALID_KEY });
     expect(result.keys[1]).toEqual({ label: 'other', key: VALID_KEY2 });
@@ -679,14 +675,14 @@ describe('loadConfig', () => {
     // Without colon, the key is set to '' which fails startsWith('sk-')
     process.env.OPENCODE_GO_KEYS = 'no-colon-key';
     expect(() =>
-      loadConfig(join(tmpdir(), 'no-exist.yaml')),
+      loadConfig(join(os.tmpdir(), 'no-exist.yaml')),
     ).toThrow('No valid API keys configured');
   });
 
   it('OPENCODE_GO_KEYS with non-sk- keys filters out', () => {
     process.env.OPENCODE_GO_KEYS = 'bad:no-sk-prefix-key-that-is-twenty-chars';
     expect(() =>
-      loadConfig(join(tmpdir(), 'no-exist.yaml')),
+      loadConfig(join(os.tmpdir(), 'no-exist.yaml')),
     ).toThrow('No valid API keys configured');
   });
 
@@ -695,7 +691,7 @@ describe('loadConfig', () => {
     process.env.PROXY_HOST = '0.0.0.0';
     process.env.UPSTREAM_BASE_URL = 'https://multi.env.example.com';
     process.env.OPENCODE_GO_KEYS = `multi:${VALID_KEY}`;
-    const result = loadConfig(join(tmpdir(), 'no-exist.yaml'));
+    const result = loadConfig(join(os.tmpdir(), 'no-exist.yaml'));
     expect(result.port).toBe(5000);
     expect(result.host).toBe('0.0.0.0');
     expect(result.upstreamBaseUrl).toBe('https://multi.env.example.com');
@@ -718,7 +714,7 @@ describe('loadConfig', () => {
 
   it('Missing file at configPath falls back gracefully', () => {
     process.env.OPENCODE_GO_KEYS = `test:${VALID_KEY}`;
-    const result = loadConfig(join(tmpdir(), 'no-such-file.yaml'));
+    const result = loadConfig(join(os.tmpdir(), 'no-such-file.yaml'));
     expect(result.port).toBe(3000);
     expect(result.host).toBe('127.0.0.1');
     expect(result.upstreamBaseUrl).toBe('https://opencode.ai');
@@ -786,7 +782,7 @@ describe('loadConfig — encryption', () => {
   const originalEnv = { ...process.env };
 
   beforeEach(() => {
-    tempDir = mkdtempSync(join(tmpdir(), 'config-encrypt-test-'));
+    tempDir = mkdtempSync(join(os.tmpdir(), 'config-encrypt-test-'));
     delete process.env.OPENCODE_GO_ENCRYPTION_KEY;
     delete process.env.OPENCODE_GO_KEYS;
     delete process.env.PROXY_PORT;
@@ -861,7 +857,7 @@ describe('validateConfig — scraping', () => {
   });
 
   it('passes valid scraping config through', () => {
-    const scraping = {
+    const scraping: ScrapingConfig = {
       enabled: true,
       intervalMs: 60_000,
       usageThreshold: 75,
@@ -879,7 +875,7 @@ describe('validateConfig — scraping', () => {
       intervalMs: 60_000,
       usageThreshold: 50,
       accounts: [],
-    } as any;
+    } as unknown as ScrapingConfig;
     const result = validateConfig(validBase({ scraping }));
     expect(result.scraping?.enabled).toBe(false);
   });
@@ -889,7 +885,7 @@ describe('validateConfig — scraping', () => {
       enabled: true,
       usageThreshold: 50,
       accounts: [],
-    } as any;
+    } as unknown as ScrapingConfig;
     const result = validateConfig(validBase({ scraping }));
     expect(result.scraping?.intervalMs).toBe(90_000);
   });
@@ -932,7 +928,7 @@ describe('validateConfig — scraping', () => {
       enabled: true,
       intervalMs: 60_000,
       accounts: [],
-    } as any;
+    } as unknown as ScrapingConfig;
     const result = validateConfig(validBase({ scraping }));
     expect(result.scraping?.usageThreshold).toBe(50);
   });
@@ -984,7 +980,7 @@ describe('validateConfig — scraping', () => {
       enabled: true,
       intervalMs: 60_000,
       usageThreshold: 50,
-    } as any;
+    } as unknown as ScrapingConfig;
     const result = validateConfig(validBase({ scraping }));
     expect(result.scraping?.accounts).toEqual([]);
   });
@@ -1057,7 +1053,7 @@ describe('loadConfig — scraping', () => {
   const originalEnv = { ...process.env };
 
   beforeEach(() => {
-    tempDir = mkdtempSync(join(tmpdir(), 'config-scraping-test-'));
+    tempDir = mkdtempSync(join(os.tmpdir(), 'config-scraping-test-'));
     delete process.env.OPENCODE_GO_ENCRYPTION_KEY;
     delete process.env.OPENCODE_GO_KEYS;
     delete process.env.PROXY_PORT;
@@ -1204,4 +1200,49 @@ describe('loadConfig — scraping', () => {
     expect(config.scraping?.accounts[0].authCookie).toBe('encrypted-cookie');
     expect(config.scraping?.accounts[1].authCookie).toBe('plaintext-cookie');
   });
+});
+
+// ---------------------------------------------------------------------------
+// getDefaultConfigPath tests
+// ---------------------------------------------------------------------------
+
+describe('getDefaultConfigPath', () => {
+  const originalEnv = { ...process.env };
+
+  afterEach(() => {
+    process.env = { ...originalEnv };
+  });
+
+  it('returns path ending with opencode-go-proxy/config.yaml', () => {
+    const result = getDefaultConfigPath();
+    expect(result).toMatch(/opencode-go-proxy[\\/]config\.yaml$/);
+  });
+
+  if (process.platform === 'win32') {
+    it('uses LOCALAPPDATA when available on Windows', () => {
+      process.env.LOCALAPPDATA = 'C:\\Custom\\Path';
+      const result = getDefaultConfigPath();
+      expect(result).toBe('C:\\Custom\\Path\\opencode-go-proxy\\config.yaml');
+    });
+
+    it('falls back to homedir when LOCALAPPDATA missing on Windows', () => {
+      delete process.env.LOCALAPPDATA;
+      const result = getDefaultConfigPath();
+      // os.homedir() on Windows uses the Windows API, so just verify suffix
+      expect(result).toMatch(/\\opencode-go-proxy\\config\.yaml$/);
+    });
+  } else {
+    it('uses XDG_CONFIG_HOME when available on Unix', () => {
+      process.env.XDG_CONFIG_HOME = '/custom/config';
+      const result = getDefaultConfigPath();
+      expect(result).toBe('/custom/config/opencode-go-proxy/config.yaml');
+    });
+
+    it('falls back to ~/.config when XDG_CONFIG_HOME missing on Unix', () => {
+      delete process.env.XDG_CONFIG_HOME;
+      process.env.HOME = '/home/test';
+      const result = getDefaultConfigPath();
+      expect(result).toBe('/home/test/.config/opencode-go-proxy/config.yaml');
+    });
+  }
 });

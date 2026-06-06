@@ -10,10 +10,12 @@
 
 import { serve } from '@hono/node-server';
 import type { ServerType } from '@hono/node-server';
+import { dirname } from 'node:path';
 import { loadConfig, type ProxyConfig } from './config.js';
 import { createProxyApp } from './proxy.js';
 import { logger, maskKey } from './logger.js';
 import { startScraper, stopScraper } from './scraper.js';
+import { FORCE_SHUTDOWN_TIMEOUT_MS } from './constants.js';
 
 // ---------------------------------------------------------------------------
 // Subcommand: 'setup' — delegate to the interactive setup wizard
@@ -21,7 +23,8 @@ import { startScraper, stopScraper } from './scraper.js';
 
 if (process.argv[2] === 'setup') {
   const { setup } = await import('./cli/setup.js');
-  await setup();
+  const { getDefaultConfigPath } = await import('./config.js');
+  await setup(dirname(getDefaultConfigPath()));
   process.exit(0);
 }
 
@@ -119,11 +122,11 @@ function gracefulShutdown(signal: string): void {
     process.exit(0);
   });
 
-  // Force exit after 5 seconds
+  // Force exit after forced shutdown timeout
   setTimeout(() => {
     logger.error('Forced shutdown after timeout');
     process.exit(1);
-  }, 5_000);
+  }, FORCE_SHUTDOWN_TIMEOUT_MS);
 }
 
 process.on('SIGINT', () => gracefulShutdown('SIGINT'));

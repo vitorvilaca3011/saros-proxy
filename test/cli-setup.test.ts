@@ -50,6 +50,8 @@ const mockState = vi.hoisted(() => ({
   //   7. password → acc 1 api key
   //   8. text     → acc 2 label
   //   9. password → acc 2 api key
+  //  10. text     → opencode.json path (or Enter to skip)
+  //  11. confirm  → configure opencode.json? (y/n)
   answers: [
     '3001',                                           // 0. port (text)
     'https://opencode.ai',                            // 1. upstream (text)
@@ -60,6 +62,7 @@ const mockState = vi.hoisted(() => ({
     'sk-valid-key-111111111111111',                   // 6. acc 1 api key (password)
     'backup',                                         // 7. acc 2 label (text)
     'sk-valid-key-222222222222222',                   // 8. acc 2 api key (password)
+    '',                                               // 9. opencode path → skip (text, empty)
   ],
   idx: 0,
 }));
@@ -445,7 +448,7 @@ describe('CLI Setup Wizard', () => {
       const port = await getRandomPort();
 
       // Allow up to 60s for tsx to compile and start
-      await expect(testProxy(port, 60_000, tmpDir)).resolves.toBeUndefined();
+      await expect(testProxy(port, 60_000, tmpDir, undefined, join(tmpDir, 'config.yaml'))).resolves.toBeUndefined();
     }, 120_000);
 
     it('handles port already in use', async () => {
@@ -466,7 +469,7 @@ describe('CLI Setup Wizard', () => {
         // Use Promise.race to ensure test rejects even if testProxy hangs
         await expect(
           Promise.race([
-            testProxy(port, 15_000, tmpDir),
+            testProxy(port, 15_000, tmpDir, undefined, join(tmpDir, 'config.yaml')),
             new Promise<never>((_, reject) =>
               setTimeout(() => reject(new Error('testProxy did not reject in time')), 10_000)
             ),
@@ -482,7 +485,7 @@ describe('CLI Setup Wizard', () => {
       const port = await getRandomPort();
 
       // Very short timeout — the proxy cannot start this fast
-      await expect(testProxy(port, 10, tmpDir)).rejects.toThrow(
+      await expect(testProxy(port, 10, tmpDir, undefined, join(tmpDir, 'config.yaml'))).rejects.toThrow(
         'Proxy did not start within the allotted time',
       );
     }, 15_000);
@@ -551,6 +554,51 @@ describe('CLI Setup Wizard', () => {
 
       // No backup should exist since there was no prior config
       expect(existsSync(join(tmpDir, 'config.yaml.backup'))).toBe(false);
+    });
+
+    it('configures opencode.json when path is provided', async () => {
+      const opencodePath = join(tmpDir, 'opencode.json');
+
+      // Override answers to provide a path and confirm
+      mockState.answers[9] = opencodePath;  // opencode.json path
+      mockState.answers.push('y');           // confirm configure
+      mockState.idx = 0;
+
+      await setup(tmpDir, true);
+
+      // Verify opencode.json was created
+      expect(existsSync(opencodePath)).toBe(true);
+
+      const content = JSON.parse(readFileSync(opencodePath, 'utf-8'));
+      expect(content.provider['opencode-go-proxy']).toBeDefined();
+      expect(content.provider['opencode-go-proxy'].options.baseURL).toBe(
+        'http://127.0.0.1:3001/zen/go/v1',
+      );
+    });
+
+    it('skips opencode.json configuration when user declines', async () => {
+      const opencodePath = join(tmpDir, 'opencode.json');
+
+      // Override answers to provide a path but decline
+      mockState.answers[9] = opencodePath;  // opencode.json path
+      mockState.answers.push('n');           // decline configure
+      mockState.idx = 0;
+
+      await setup(tmpDir, true);
+
+      // opencode.json should NOT be created
+      expect(existsSync(opencodePath)).toBe(false);
+    });
+
+    it('skips opencode.json when user presses Enter without path', async () => {
+      // answers[9] is already '' (empty string to skip)
+      mockState.idx = 0;
+
+      await setup(tmpDir, true);
+
+      // Should complete without error
+      const configPath = join(tmpDir, 'config.yaml');
+      expect(existsSync(configPath)).toBe(true);
     });
   });
 });
