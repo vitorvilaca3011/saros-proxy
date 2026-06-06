@@ -47,19 +47,51 @@ Manage multiple OpenCode-Go API keys behind a single endpoint. When one key is r
 │     └─────────────────────┘                          │
 └──────────────────────┬───────────────────────────────┘
                        │
-          ┌────────────┼────────────┐
-          ▼            ▼            ▼
-   ┌──────────┐ ┌──────────┐ ┌──────────┐
-   │ Key A    │ │ Key B    │ │ Key C    │
-   │ sk-abc…  │ │ sk-def…  │ │ sk-ghi…  │
-   └────┬─────┘ └────┬─────┘ └────┬─────┘
-        │            │            │
-        ▼            ▼            ▼
-   ┌───────────────────────────────────────┐
-   │        OpenCode-Go API (upstream)     │
-   │        https://opencode.ai            │
-   └───────────────────────────────────────┘
+           ┌────────────┼────────────┐
+           ▼            ▼            ▼
+    ┌──────────┐ ┌──────────┐ ┌──────────┐
+    │ Key A    │ │ Key B    │ │ Key C    │
+    │ sk-abc…  │ │ sk-def…  │ │ sk-ghi…  │
+    └────┬─────┘ └────┬─────┘ └────┬─────┘
+         │            │            │
+         ▼            ▼            ▼
+    ┌───────────────────────────────────────┐
+    │        OpenCode-Go API (upstream)     │
+    │        https://opencode.ai            │
+    └───────────────────────────────────────┘
 ```
+
+### How Request Distribution Works
+
+The proxy uses **two layers** to decide which API key handles each request:
+
+#### Layer 1: Round-Robin (always active)
+Every new request cycles to the next key in order:
+
+```
+Request 1 → Key A
+Request 2 → Key B
+Request 3 → Key C
+Request 4 → Key A (wraps around)
+```
+
+This gives you **even distribution by default** — no manual odd/even logic needed. If you have 2 accounts, odd requests go to account 1 and even to account 2 automatically.
+
+#### Layer 2: Usage-Based Gating (optional)
+If you enable [dashboard scraping](#usage-based-key-selection), the proxy checks each account's quota usage before selecting a key:
+
+- If an account's usage is **≥ threshold** (default 70%), that key is skipped
+- If **all** keys are over threshold, the proxy falls back to the **lowest-usage** key
+- If no usage data is available, round-robin continues unchanged
+
+| Scenario | Behavior |
+|---|---|
+| Scraping disabled | Pure round-robin across all keys |
+| Scraping enabled + data available | Round-robin, skipping over-quota accounts |
+| Scraping enabled + no data | Falls back to pure round-robin |
+
+#### Concurrent Request Safety
+The proxy tracks which keys are **currently in use** by active requests. A key already handling a streaming request won't be assigned to another request until it completes. This prevents double-booking the same account under load.
 
 ---
 
@@ -406,6 +438,22 @@ NODE_ENV=development npx tsx src/index.ts
 
 # Production (structured JSON)
 NODE_ENV=production npx tsx src/index.ts
+```
+
+### Verify which key served a request
+
+The proxy returns two debug headers on every successful response:
+
+| Header | Example | Meaning |
+|---|---|---|
+| `X-Proxy-Key-Label` | `primary` | Which configured key was used |
+| `X-Proxy-Request-Id` | `550e8400-e29b-41d4-a716-446655440000` | Unique request ID for log correlation |
+
+```bash
+# Check which key handled your request
+curl -s -D - http://127.0.0.1:3000/zen/go/v1/models | grep -i x-proxy
+# X-Proxy-Key-Label: primary
+# X-Proxy-Request-Id: 550e8400-e29b-41d4-a716-446655440000
 ```
 
 ### Common issues
