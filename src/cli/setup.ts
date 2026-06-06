@@ -645,6 +645,7 @@ export async function setup(configDir = dirname(getDefaultConfigPath()), skipSmo
   }
 
   if (opencodePath) {
+    ui.info(`Found OpenCode config at ${opencodePath}`);
     const shouldConfigure = ui.assertNotCancelled(await ui.confirm({
       message: 'Configure opencode.json to use this proxy?',
       initialValue: true,

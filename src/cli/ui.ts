@@ -117,6 +117,10 @@ export function printNextSteps(port: number): void {
   console.log(`  ${bullet} Extension endpoint:   ${chalk.dim(`http://127.0.0.1:${port}`)}`);
   console.log(`  ${bullet} Health check:         ${chalk.dim(`$ curl http://127.0.0.1:${port}/health`)}`);
   console.log('');
+  log.step('OpenCode Client');
+  console.log(`  ${bullet} Select provider:      ${chalk.dim('opencode-go-proxy')}`);
+  console.log(`  ${bullet} Or set as default:    ${chalk.dim('"model": "opencode-go-proxy/glm-5"')}`);
+  console.log('');
   log.step('Manage');
   console.log(`  ${bullet} Re-run setup anytime: ${chalk.dim('$ npm run setup')}`);
   console.log(`  ${bullet} Edit config.yaml directly (circuit breaker, CORS, timeouts)`);

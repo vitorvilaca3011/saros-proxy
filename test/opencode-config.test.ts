@@ -1,0 +1,266 @@
+/**
+ * opencode-config.test.ts — Unit tests for OpenCode client configuration management.
+ */
+
+import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import {
+  writeFileSync,
+  readFileSync,
+  existsSync,
+  mkdtempSync,
+  rmSync,
+  mkdirSync,
+} from 'node:fs';
+import { join, sep } from 'node:path';
+import { tmpdir } from 'node:os';
+
+import {
+  getDefaultOpencodeConfigPath,
+  updateOpencodeConfig,
+  generateManualConfigSnippet,
+} from '../src/cli/opencode-config.js';
+import { OPENCODE_MODELS } from '../src/constants.js';
+
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
+function createTempDir(): string {
+  return mkdtempSync(`${tmpdir()}${sep}opencode-config-test-`);
+}
+
+async function removeTempDir(dir: string): Promise<void> {
+  if (!existsSync(dir)) return;
+
+  const maxRetries = 5;
+  const retryDelay = 500;
+
+  for (let i = 0; i < maxRetries; i++) {
+    try {
+      rmSync(dir, { recursive: true, force: true, maxRetries: 3, retryDelay });
+      return;
+    } catch {
+      if (i === maxRetries - 1) {
+        console.warn(`Failed to remove temp dir ${dir}`);
+        return;
+      }
+      await new Promise((resolve) => setTimeout(resolve, retryDelay));
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Tests
+// ---------------------------------------------------------------------------
+
+describe('OpenCode Config Integration', () => {
+  let tmpDir: string;
+
+  beforeEach(() => {
+    tmpDir = createTempDir();
+  });
+
+  afterEach(async () => {
+    await removeTempDir(tmpDir);
+  });
+
+  // -----------------------------------------------------------------------
+  // Path detection
+  // -----------------------------------------------------------------------
+
+  describe('getDefaultOpencodeConfigPath', () => {
+    it('returns path within home directory', () => {
+      const path = getDefaultOpencodeConfigPath();
+      expect(path).toContain('.config');
+      expect(path).toContain('opencode');
+      expect(path).toContain('opencode.json');
+    });
+  });
+
+  // -----------------------------------------------------------------------
+  // Config update
+  // -----------------------------------------------------------------------
+
+  describe('updateOpencodeConfig', () => {
+    it('creates new config file when none exists', () => {
+      const configPath = join(tmpDir, 'opencode.json');
+
+      const result = updateOpencodeConfig(3000, { configPath });
+
+      expect(result.success).toBe(true);
+      expect(result.created).toBe(true);
+      expect(result.path).toBe(configPath);
+      expect(existsSync(configPath)).toBe(true);
+
+      const content = JSON.parse(readFileSync(configPath, 'utf-8'));
+      expect(content.provider).toBeDefined();
+      expect(content.provider['opencode-go-proxy']).toBeDefined();
+      expect(content.provider['opencode-go-proxy'].options.baseURL).toBe(
+        'http://127.0.0.1:3000/zen/go/v1',
+      );
+    });
+
+    it('merges with existing config preserving other providers', () => {
+      const configPath = join(tmpDir, 'opencode.json');
+      const existing = {
+        provider: {
+          openai: {
+            npm: '@ai-sdk/openai',
+            name: 'OpenAI',
+          },
+        },
+        plugins: ['some-plugin'],
+      };
+      writeFileSync(configPath, JSON.stringify(existing, null, 2), 'utf-8');
+
+      const result = updateOpencodeConfig(3000, { configPath });
+
+      expect(result.success).toBe(true);
+      expect(result.created).toBe(false);
+
+      const content = JSON.parse(readFileSync(configPath, 'utf-8'));
+      expect(content.provider.openai).toBeDefined();
+      expect(content.provider['opencode-go-proxy']).toBeDefined();
+      expect(content.plugins).toEqual(['some-plugin']);
+    });
+
+    it('overwrites existing opencode-go-proxy provider', () => {
+      const configPath = join(tmpDir, 'opencode.json');
+      const existing = {
+        provider: {
+          'opencode-go-proxy': {
+            options: { baseURL: 'http://old:3000/v1' },
+          },
+        },
+      };
+      writeFileSync(configPath, JSON.stringify(existing, null, 2), 'utf-8');
+
+      const result = updateOpencodeConfig(4000, { configPath });
+
+      expect(result.success).toBe(true);
+
+      const content = JSON.parse(readFileSync(configPath, 'utf-8'));
+      expect(content.provider['opencode-go-proxy'].options.baseURL).toBe(
+        'http://127.0.0.1:4000/zen/go/v1',
+      );
+    });
+
+    it('creates backup before modifying existing file', () => {
+      const configPath = join(tmpDir, 'opencode.json');
+      const originalContent = JSON.stringify({ provider: { openai: {} } }, null, 2);
+      writeFileSync(configPath, originalContent, 'utf-8');
+
+      updateOpencodeConfig(3000, { configPath });
+
+      const backupPath = `${configPath}.backup`;
+      expect(existsSync(backupPath)).toBe(true);
+      expect(readFileSync(backupPath, 'utf-8')).toBe(originalContent);
+    });
+
+    it('handles missing provider key in existing config', () => {
+      const configPath = join(tmpDir, 'opencode.json');
+      const existing = { someOtherField: 'value' };
+      writeFileSync(configPath, JSON.stringify(existing, null, 2), 'utf-8');
+
+      const result = updateOpencodeConfig(3000, { configPath });
+
+      expect(result.success).toBe(true);
+
+      const content = JSON.parse(readFileSync(configPath, 'utf-8'));
+      expect(content.someOtherField).toBe('value');
+      expect(content.provider['opencode-go-proxy']).toBeDefined();
+    });
+
+    it('fails gracefully with invalid JSON in existing file', () => {
+      const configPath = join(tmpDir, 'opencode.json');
+      writeFileSync(configPath, 'not valid json {', 'utf-8');
+
+      const result = updateOpencodeConfig(3000, { configPath });
+
+      expect(result.success).toBe(false);
+      expect(result.error).toContain('invalid JSON');
+    });
+
+    it('uses correct port in baseURL', () => {
+      const configPath = join(tmpDir, 'opencode.json');
+
+      updateOpencodeConfig(8080, { configPath });
+
+      const content = JSON.parse(readFileSync(configPath, 'utf-8'));
+      expect(content.provider['opencode-go-proxy'].options.baseURL).toBe(
+        'http://127.0.0.1:8080/zen/go/v1',
+      );
+    });
+
+    it('includes all 18 OpenCode-Go model definitions', () => {
+      const configPath = join(tmpDir, 'opencode.json');
+
+      updateOpencodeConfig(3000, { configPath });
+
+      const content = JSON.parse(readFileSync(configPath, 'utf-8'));
+      const models = content.provider['opencode-go-proxy'].models;
+
+      // All 18 models from the OpenCode-Go catalog
+      const expectedModels = [
+        'glm-5', 'glm-5.1',
+        'kimi-k2.5', 'kimi-k2.6',
+        'deepseek-v4-pro', 'deepseek-v4-flash',
+        'mimo-v2.5', 'mimo-v2.5-pro', 'mimo-v2-pro', 'mimo-v2-omni',
+        'minimax-m3', 'minimax-m2.7', 'minimax-m2.5',
+        'qwen3.7-max', 'qwen3.7-plus', 'qwen3.6-plus', 'qwen3.5-plus',
+        'hy3-preview',
+      ];
+
+      expect(Object.keys(models)).toHaveLength(expectedModels.length);
+
+      for (const modelId of expectedModels) {
+        expect(models[modelId]).toBeDefined();
+        expect(models[modelId].id).toBe(modelId);
+        expect(models[modelId].name).toBeDefined();
+        expect(models[modelId].tool_call).toBeDefined();
+        expect(models[modelId].limit).toBeDefined();
+        expect(models[modelId].modalities).toBeDefined();
+      }
+
+      // Verify specific capabilities
+      expect(models['glm-5'].tool_call).toBe(true);
+      expect(models['hy3-preview'].tool_call).toBe(false);
+      expect(models['qwen3.6-plus'].limit.context).toBe(1000000);
+      expect(models['qwen3.5-plus'].limit.output).toBe(65536);
+    });
+
+    it('creates parent directories when creating new file', () => {
+      const nestedDir = join(tmpDir, 'nested', 'config');
+      const configPath = join(nestedDir, 'opencode.json');
+
+      const result = updateOpencodeConfig(3000, { configPath });
+
+      expect(result.success).toBe(true);
+      expect(existsSync(configPath)).toBe(true);
+    });
+  });
+
+  // -----------------------------------------------------------------------
+  // Manual config snippet
+  // -----------------------------------------------------------------------
+
+  describe('generateManualConfigSnippet', () => {
+    it('generates valid JSON with correct port', () => {
+      const snippet = generateManualConfigSnippet(3000);
+      const parsed = JSON.parse(snippet);
+
+      expect(parsed.provider['opencode-go-proxy']).toBeDefined();
+      expect(parsed.provider['opencode-go-proxy'].options.baseURL).toBe(
+        'http://127.0.0.1:3000/zen/go/v1',
+      );
+    });
+
+    it('includes models in snippet', () => {
+      const snippet = generateManualConfigSnippet(3000);
+      const parsed = JSON.parse(snippet);
+
+      expect(parsed.provider['opencode-go-proxy'].models).toBeDefined();
+      expect(parsed.provider['opencode-go-proxy'].models['glm-5']).toBeDefined();
+    });
+  });
+});
