@@ -1,0 +1,10 @@
+[
+  {
+    "workspaceId": "wrk_EXAMPLE_WORKSPACE_ID_1",
+    "authCookie": "Fe26.2**EXAMPLE_COOKIE_REPLACE_ME"
+  },
+  {
+    "workspaceId": "wrk_EXAMPLE_WORKSPACE_ID_2",
+    "authCookie": "Fe26.2**EXAMPLE_COOKIE_REPLACE_ME"
+  }
+]

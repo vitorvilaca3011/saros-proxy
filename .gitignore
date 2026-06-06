@@ -7,3 +7,24 @@ config.yaml
 test-output.txt
 .DS_Store
 *.tsbuildinfo
+
+# Session/tool artifacts
+.codenomad/
+.slim/
+FirstPlan.txt
+deep-research-report.md
+stderr_proto.txt
+stdout_proto.txt
+
+# Prototype credentials (contains auth cookies)
+prototype/scraper-creds.json
+
+# AI tool session artifacts
+.opencode/
+.vscode/
+
+# Backup files
+config.yaml.backup
+
+# Test output
+test-results.*

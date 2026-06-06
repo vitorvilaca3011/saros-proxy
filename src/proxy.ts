@@ -21,9 +21,12 @@ import {
   classifyHttpError,
   type ProxyState,
   type KeySnapshot,
+  type KeySelectionOptions,
+  type UsageInfo,
 } from './proxy-logic.js';
 import type { ProxyConfig } from './config.js';
 import { logger, maskKey } from './logger.js';
+import { getAllUsage, isScraperRunning } from './scraper.js';
 
 const MAX_BODY_SIZE = 10 * 1024 * 1024; // 10MB — prevent DoS via oversized request bodies
 
@@ -73,10 +76,14 @@ function generateRequestId(): string {
 /**
  * Build upstream URL from base + request path.
  */
-function buildUpstreamUrl(base: string, path: string): string {
+export function buildUpstreamUrl(base: string, path: string): string {
   // Strip trailing slash from base, ensure leading slash on path
   const normalizedBase = base.replace(/\/+$/, '');
   const normalizedPath = path.startsWith('/') ? path : '/' + path;
+  // Reject path traversal attempts
+  if (normalizedPath.includes('..')) {
+    throw new Error('Path traversal detected');
+  }
   return normalizedBase + normalizedPath;
 }
 
@@ -84,7 +91,7 @@ function buildUpstreamUrl(base: string, path: string): string {
  * Clean headers for upstream forwarding: remove hop-by-hop headers
  * and any pre-existing Authorization.
  */
-function buildUpstreamHeaders(
+export function buildUpstreamHeaders(
   incoming: Headers,
   bearerToken: string,
 ): Headers {
@@ -109,13 +116,36 @@ function buildUpstreamHeaders(
 /**
  * Check if a request body indicates streaming mode.
  */
-function isStreamingRequest(bodyText: string): boolean {
+export function isStreamingRequest(bodyText: string): boolean {
   try {
     const parsed = JSON.parse(bodyText);
     return parsed.stream === true;
   } catch {
     return false;
   }
+}
+
+/**
+ * Build usage-based key selection options from scraped data.
+ * Returns undefined when no usage data is available or scraping is disabled.
+ */
+function buildUsageKeyOptions(config: ProxyConfig): KeySelectionOptions | undefined {
+  const allUsage = getAllUsage();
+  if (allUsage.size === 0) return undefined;
+
+  const usageMap = new Map<string, UsageInfo>();
+  config.keys.forEach((key, i) => {
+    const account = config.scraping?.accounts?.[i];
+    if (account) {
+      const accountUsage = allUsage.get(account.workspaceId);
+      if (accountUsage) {
+        usageMap.set(key.label, accountUsage.usage);
+      }
+    }
+  });
+
+  if (usageMap.size === 0) return undefined;
+  return { usageMap, usageThreshold: config.scraping!.usageThreshold };
 }
 
 // ---------------------------------------------------------------------------
@@ -139,11 +169,16 @@ async function handleWithFailover(
   const upstreamUrl = buildUpstreamUrl(config.upstreamBaseUrl, path);
   let lastError: Error | null = null;
 
+  // Build usage-gated key selection options from scraped data
+  const keyOptions: KeySelectionOptions | undefined = config.scraping?.enabled
+    ? buildUsageKeyOptions(config)
+    : undefined;
+
   for (let attempt = 0; attempt < maxRetries; attempt++) {
     const key: KeySnapshot | null =
       attempt === 0
-        ? selectKeyForRequest(state, requestId)
-        : failoverRequest(state, requestId);
+        ? selectKeyForRequest(state, requestId, keyOptions)
+        : failoverRequest(state, requestId, keyOptions);
 
     if (!key) {
       logger.warn({ requestId }, 'No API keys available on attempt %d', attempt);
@@ -299,11 +334,16 @@ async function handleStreamingRequest(
   const upstreamUrl = buildUpstreamUrl(config.upstreamBaseUrl, path);
   let lastError: Error | null = null;
 
+  // Build usage-gated key selection options from scraped data
+  const keyOptions: KeySelectionOptions | undefined = config.scraping?.enabled
+    ? buildUsageKeyOptions(config)
+    : undefined;
+
   for (let attempt = 0; attempt < maxRetries; attempt++) {
     const key: KeySnapshot | null =
       attempt === 0
-        ? selectKeyForRequest(state, requestId)
-        : failoverRequest(state, requestId);
+        ? selectKeyForRequest(state, requestId, keyOptions)
+        : failoverRequest(state, requestId, keyOptions);
 
     if (!key) {
       logger.warn(
@@ -356,9 +396,20 @@ async function handleStreamingRequest(
 
         if (errorType === 'RequestFault') {
           completeRequest(state, requestId, false);
-          return new Response(errorBody, {
+          // Sanitize upstream error - don't leak internal details
+          let safeError;
+          try {
+            const parsed = JSON.parse(errorBody);
+            safeError = JSON.stringify({
+              error: parsed.error?.message || parsed.error || 'Bad Request',
+              requestId,
+            });
+          } catch {
+            safeError = JSON.stringify({ error: 'Bad Request', requestId });
+          }
+          return new Response(safeError, {
             status: response.status,
-            headers: response.headers,
+            headers: { 'content-type': 'application/json' },
           });
         }
 
@@ -522,7 +573,15 @@ export function createProxyApp(config: ProxyConfig): Hono {
     windowMs: 60 * 1000, // 1 minute
     limit: 100, // 100 requests per minute per IP
     standardHeaders: true, // Return rate limit info in headers
-    keyGenerator: (c) => c.req.header('x-forwarded-for') ?? c.req.header('x-real-ip') ?? 'unknown',
+    keyGenerator: (c) => {
+      const forwarded = c.req.header('x-forwarded-for');
+      if (forwarded) return forwarded.split(',')[0].trim();
+      const realIp = c.req.header('x-real-ip');
+      if (realIp) return realIp;
+      // Fall back to socket remote address for direct connections
+      // @ts-expect-error -- env.remote is set by @hono/node-server
+      return c.env?.remote?.address ?? 'unknown';
+    },
     message: { error: 'Too many requests, please try again later' },
   }));
 
@@ -552,6 +611,24 @@ export function createProxyApp(config: ProxyConfig): Hono {
     const disabledCount = keys.length - enabledCount;
     const activeCount = state.activeRequests.size;
 
+    // Build scraping status
+    const scrapingStatus = config.scraping?.enabled
+      ? {
+          enabled: true,
+          running: isScraperRunning(),
+          intervalMs: config.scraping.intervalMs,
+          usageThreshold: config.scraping.usageThreshold,
+          accounts: Array.from(getAllUsage().entries()).map(
+            ([workspaceId, data]) => ({
+              workspaceId,
+              usage: data.usage,
+              lastScrapedAt: data.lastScrapedAt.toISOString(),
+              lastError: data.lastError ?? null,
+            }),
+          ),
+        }
+      : { enabled: false };
+
     return c.json({
       status: 'ok',
       uptime: process.uptime(),
@@ -561,6 +638,7 @@ export function createProxyApp(config: ProxyConfig): Hono {
       activeRequests: activeCount,
       circuitBreakerThreshold: state.circuitBreakerThreshold,
       circuitBreakerCooldownMs: state.circuitBreakerCooldownMs,
+      scraping: scrapingStatus,
     });
   });
 

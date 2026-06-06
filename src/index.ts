@@ -13,6 +13,7 @@ import type { ServerType } from '@hono/node-server';
 import { loadConfig, type ProxyConfig } from './config.js';
 import { createProxyApp } from './proxy.js';
 import { logger, maskKey } from './logger.js';
+import { startScraper, stopScraper } from './scraper.js';
 
 // ---------------------------------------------------------------------------
 // Subcommand: 'setup' — delegate to the interactive setup wizard
@@ -87,6 +88,13 @@ const server: ServerType = serve(
     logger.info('Proxy listening on http://%s:%d', info.address, info.port);
     logger.info('Upstream: %s', config.upstreamBaseUrl);
     logger.info('API keys loaded: %d', config.keys.length);
+
+    // Start usage-based scraper if configured
+    if (config.scraping?.enabled && config.scraping.accounts.length > 0) {
+      startScraper(config.scraping.accounts, config.scraping.intervalMs);
+    } else {
+      logger.info('Usage-based scraping disabled (not configured or no accounts)');
+    }
   },
 );
 
@@ -101,6 +109,9 @@ function gracefulShutdown(signal: string): void {
   isShuttingDown = true;
 
   logger.info('Received %s, starting graceful shutdown...', signal);
+
+  // Stop background scraper
+  stopScraper();
 
   // Stop accepting new connections
   server.close(() => {

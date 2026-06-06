@@ -45,6 +45,24 @@ export interface ProxyState {
 }
 
 /**
+ * Usage data for a single account, scraped from the OpenCode-Go workspace.
+ * All values are percentages (0-100). null means no data for that window.
+ */
+export interface UsageInfo {
+  rolling: number | null;
+  weekly: number | null;
+  monthly: number | null;
+}
+
+/**
+ * Optional parameters for usage-gated key selection.
+ */
+export interface KeySelectionOptions {
+  usageMap?: Map<string, UsageInfo>; // key label -> usage data
+  usageThreshold?: number; // 1-100 threshold for any usage window
+}
+
+/**
  * Error classification for HTTP responses.
  * - KeyFault: the API key should be penalised (invalid, revoked, rate-limited, server fault)
  * - RequestFault: the request itself is bad — no key penalisation
@@ -116,6 +134,66 @@ function isKeyAvailable(state: ProxyState, key: ApiKey): boolean {
 }
 
 /**
+ * Check if a key is available based on usage data.
+ * A key is unavailable if ANY of its usage windows >= threshold.
+ *
+ * @param usage - The usage data for this key's account (null = no data = available)
+ * @param threshold - The usage threshold (1-100)
+ * @returns true if the key is available (usage below threshold or no data)
+ */
+export function isKeyAvailableByUsage(
+  usage: UsageInfo | null,
+  threshold: number,
+): boolean {
+  if (usage === null) return true; // no data = don't block
+  return (
+    (usage.rolling === null || usage.rolling < threshold) &&
+    (usage.weekly === null || usage.weekly < threshold) &&
+    (usage.monthly === null || usage.monthly < threshold)
+  );
+}
+
+/**
+ * Internal: when all circuit-breaker-available keys are over the usage
+ * threshold, fall back to the key with the lowest maximum usage across
+ * all windows. If a key has no usage data, it is preferred immediately.
+ */
+function findFallbackKey(
+  state: ProxyState,
+  usageMap: Map<string, UsageInfo>,
+): KeySnapshot | null {
+  let best: ApiKey | null = null;
+  let bestMaxUsage = Infinity;
+
+  for (const key of state.keys) {
+    if (!isKeyAvailable(state, key)) continue;
+
+    const usage = usageMap.get(key.label);
+    if (!usage) {
+      // No usage data = best possible – take it immediately
+      key.lastUsed = Date.now();
+      return toSnapshot(key);
+    }
+
+    const maxUsage = Math.max(
+      usage.rolling ?? 0,
+      usage.weekly ?? 0,
+      usage.monthly ?? 0,
+    );
+    if (maxUsage < bestMaxUsage) {
+      bestMaxUsage = maxUsage;
+      best = key;
+    }
+  }
+
+  if (best) {
+    best.lastUsed = Date.now();
+    return toSnapshot(best);
+  }
+  return null;
+}
+
+/**
  * Internal: return the set of key labels that are currently booked
  * (present in *any* active request's triedKeys — C4 double-booking avoidance).
  */
@@ -171,6 +249,7 @@ function findNextKey(
 export function selectKeyForRequest(
   state: ProxyState,
   requestId: string,
+  options?: KeySelectionOptions,
 ): KeySnapshot | null {
   // If context already exists, return the already-assigned current key
   const existing = state.activeRequests.get(requestId);
@@ -189,7 +268,32 @@ export function selectKeyForRequest(
     excludeLabels.add(label);
   }
 
-  const snapshot = findNextKey(state, excludeLabels);
+  // Exclude keys whose account usage exceeds the threshold
+  if (options?.usageMap && options?.usageThreshold !== undefined) {
+    const threshold = options.usageThreshold;
+    for (const key of state.keys) {
+      const usage = options.usageMap!.get(key.label) ?? null;
+      if (!isKeyAvailableByUsage(usage, threshold)) {
+        excludeLabels.add(key.label);
+      }
+    }
+  }
+
+  let snapshot = findNextKey(state, excludeLabels);
+
+  // Fallback: all circuit-breaker-available keys are over threshold
+  if (!snapshot && options?.usageMap) {
+    const fallback = findFallbackKey(state, options.usageMap);
+    if (fallback) {
+      // Advance round-robin past the selected fallback key
+      const idx = state.keys.findIndex((k) => k.label === fallback.label);
+      if (idx !== -1) {
+        state.currentIndex = (idx + 1) % state.keys.length;
+      }
+      snapshot = fallback;
+    }
+  }
+
   ctx.currentKey = snapshot;
   return snapshot;
 }
@@ -203,6 +307,7 @@ export function selectKeyForRequest(
 export function failoverRequest(
   state: ProxyState,
   requestId: string,
+  options?: KeySelectionOptions,
 ): KeySnapshot | null {
   const ctx = state.activeRequests.get(requestId);
   if (!ctx) return null;
@@ -219,7 +324,31 @@ export function failoverRequest(
     excludeLabels.add(label);
   }
 
-  const snapshot = findNextKey(state, excludeLabels);
+  // Exclude keys whose account usage exceeds the threshold
+  if (options?.usageMap && options?.usageThreshold !== undefined) {
+    const threshold = options.usageThreshold;
+    for (const key of state.keys) {
+      const usage = options.usageMap!.get(key.label) ?? null;
+      if (!isKeyAvailableByUsage(usage, threshold)) {
+        excludeLabels.add(key.label);
+      }
+    }
+  }
+
+  let snapshot = findNextKey(state, excludeLabels);
+
+  // Fallback: all circuit-breaker-available keys are over threshold
+  if (!snapshot && options?.usageMap) {
+    const fallback = findFallbackKey(state, options.usageMap);
+    if (fallback) {
+      const idx = state.keys.findIndex((k) => k.label === fallback.label);
+      if (idx !== -1) {
+        state.currentIndex = (idx + 1) % state.keys.length;
+      }
+      snapshot = fallback;
+    }
+  }
+
   ctx.currentKey = snapshot;
   return snapshot;
 }

@@ -5,6 +5,7 @@
 import { readFileSync, existsSync } from 'node:fs';
 import { parse as parseYaml } from 'yaml';
 import { logger, maskKey } from './logger.js';
+import { decryptKey, isEncryptedKey } from './key-encryption.js';
 
 export interface ProxyConfig {
   port: number;
@@ -15,6 +16,19 @@ export interface ProxyConfig {
   upstreamBaseUrl: string;
   requestTimeoutMs: number;
   allowedOrigins: string[];
+  scraping?: ScrapingConfig;
+}
+
+export interface ScrapingAccount {
+  workspaceId: string;
+  authCookie: string;
+}
+
+export interface ScrapingConfig {
+  enabled: boolean;
+  intervalMs: number;
+  usageThreshold: number;
+  accounts: ScrapingAccount[];
 }
 
 interface YamlConfig {
@@ -26,6 +40,12 @@ interface YamlConfig {
   requestTimeoutMs?: number;
   allowedOrigins?: string[];
   keys?: Array<{ label: string; key: string }>;
+  scraping?: {
+    enabled?: boolean;
+    intervalMs?: number;
+    usageThreshold?: number;
+    accounts?: ScrapingAccount[];
+  };
 }
 
 /**
@@ -153,6 +173,52 @@ export function validateConfig(config: Partial<ProxyConfig>): ProxyConfig {
     'http://127.0.0.1:*',
   ];
 
+  // --- Scraping config (optional) ---
+  let scraping: ScrapingConfig | undefined;
+  if (config.scraping) {
+    const s = config.scraping;
+
+    // enabled: default false
+    const enabled = s.enabled ?? false;
+
+    // intervalMs: default 90000, range 10000-3600000
+    let intervalMs = s.intervalMs ?? 90_000;
+    if (!Number.isInteger(intervalMs) || intervalMs < 10_000 || intervalMs > 3_600_000) {
+      logger.warn('Invalid scraping.intervalMs %d, defaulting to 90000', intervalMs);
+      intervalMs = 90_000;
+    }
+
+    // usageThreshold: default 50, range 1-100
+    let usageThreshold = s.usageThreshold ?? 50;
+    if (!Number.isInteger(usageThreshold) || usageThreshold < 1 || usageThreshold > 100) {
+      logger.warn('Invalid scraping.usageThreshold %d, defaulting to 50', usageThreshold);
+      usageThreshold = 50;
+    }
+
+    // accounts: filter invalid entries
+    const rawAccounts = s.accounts ?? [];
+    const validAccounts = rawAccounts.filter((acc) => {
+      // workspaceId must match wrk_[A-Za-z0-9]+
+      if (!/^wrk_[A-Za-z0-9]+$/.test(acc.workspaceId)) {
+        logger.warn('Invalid scraping account workspaceId "%s", filtering out', acc.workspaceId);
+        return false;
+      }
+      // authCookie must not be empty
+      if (!acc.authCookie || acc.authCookie.trim() === '') {
+        logger.warn('Invalid scraping account authCookie for "%s", filtering out', acc.workspaceId);
+        return false;
+      }
+      return true;
+    });
+
+    scraping = {
+      enabled,
+      intervalMs,
+      usageThreshold,
+      accounts: validAccounts,
+    };
+  }
+
   return {
     port,
     host,
@@ -162,6 +228,7 @@ export function validateConfig(config: Partial<ProxyConfig>): ProxyConfig {
     upstreamBaseUrl,
     requestTimeoutMs,
     allowedOrigins,
+    scraping,
   };
 }
 
@@ -187,6 +254,7 @@ export function loadConfig(configPath?: string): ProxyConfig {
     upstreamBaseUrl: 'https://opencode.ai',
     requestTimeoutMs: 30_000,
     allowedOrigins: ['http://localhost:*', 'http://127.0.0.1:*'],
+    scraping: undefined,
   };
 
   // --- Step 2: environment variables (lowest-priority source) ---
@@ -199,6 +267,7 @@ export function loadConfig(configPath?: string): ProxyConfig {
   if (process.env.UPSTREAM_BASE_URL) {
     config.upstreamBaseUrl = process.env.UPSTREAM_BASE_URL;
   }
+  // Note: OPENCODE_GO_KEYS env var keys are always plaintext (CI/CD use case)
   const envKeysRaw = process.env.OPENCODE_GO_KEYS;
   if (envKeysRaw) {
     config.keys = envKeysRaw.split(',').map((pair) => {
@@ -228,6 +297,14 @@ export function loadConfig(configPath?: string): ProxyConfig {
       if (yaml.requestTimeoutMs !== undefined) config.requestTimeoutMs = yaml.requestTimeoutMs;
       if (yaml.allowedOrigins !== undefined) config.allowedOrigins = yaml.allowedOrigins;
       if (yaml.keys && yaml.keys.length > 0) config.keys = yaml.keys;
+      if (yaml.scraping !== undefined) {
+        config.scraping = {
+          enabled: yaml.scraping.enabled ?? false,
+          intervalMs: yaml.scraping.intervalMs ?? 90_000,
+          usageThreshold: yaml.scraping.usageThreshold ?? 50,
+          accounts: yaml.scraping.accounts ?? [],
+        };
+      }
 
       logger.info('Loaded config from %s', yamlPath);
     } catch (err) {
@@ -235,6 +312,53 @@ export function loadConfig(configPath?: string): ProxyConfig {
     }
   } else {
     logger.info('No config file found at %s, using env/defaults', yamlPath);
+  }
+
+  // --- Step 3.5: Decrypt encrypted keys ---
+  const encryptionKey = process.env.OPENCODE_GO_ENCRYPTION_KEY;
+  if (encryptionKey) {
+    config.keys = config.keys.map((k) => {
+      if (isEncryptedKey(k.key)) {
+        try {
+          return { ...k, key: decryptKey(k.key, encryptionKey) };
+        } catch (err) {
+          logger.error('Failed to decrypt key "%s": %s', k.label, err instanceof Error ? err.message : String(err));
+          throw new Error(`Failed to decrypt API key "${k.label}" — check OPENCODE_GO_ENCRYPTION_KEY`);
+        }
+      }
+      return k; // plaintext key, use as-is
+    });
+
+    // Decrypt encrypted authCookies in scraping accounts
+    if (config.scraping?.accounts) {
+      config.scraping.accounts = config.scraping.accounts.map((acc) => {
+        if (isEncryptedKey(acc.authCookie)) {
+          try {
+            return { ...acc, authCookie: decryptKey(acc.authCookie, encryptionKey) };
+          } catch (err) {
+            logger.error('Failed to decrypt authCookie for workspace "%s": %s', acc.workspaceId, err instanceof Error ? err.message : String(err));
+            throw new Error(`Failed to decrypt authCookie for workspace "${acc.workspaceId}" — check OPENCODE_GO_ENCRYPTION_KEY`);
+          }
+        }
+        return acc; // plaintext cookie, use as-is
+      });
+    }
+  } else {
+    // Check if any keys are encrypted but no encryption key provided
+    const encryptedKeys = config.keys.filter((k) => isEncryptedKey(k.key));
+    if (encryptedKeys.length > 0) {
+      throw new Error(
+        `Found ${encryptedKeys.length} encrypted API key(s) but OPENCODE_GO_ENCRYPTION_KEY environment variable is not set`
+      );
+    }
+
+    // Check if any authCookies are encrypted but no encryption key provided
+    const encryptedCookies = config.scraping?.accounts?.filter((acc) => isEncryptedKey(acc.authCookie)) ?? [];
+    if (encryptedCookies.length > 0) {
+      throw new Error(
+        `Found ${encryptedCookies.length} encrypted authCookie(s) but OPENCODE_GO_ENCRYPTION_KEY environment variable is not set`
+      );
+    }
   }
 
   // --- Step 4: CLI overrides (highest priority) ---

@@ -247,6 +247,36 @@ keys:
 OPENCODE_GO_KEYS="account1:sk-xxx,account2:sk-yyy"
 ```
 
+### API Key Encryption
+
+API keys can be encrypted at rest using AES-256-GCM with scrypt key derivation. When encrypted, keys are stored as `enc:scrypt:...` in `config.yaml` and decrypted at startup using the `OPENCODE_GO_ENCRYPTION_KEY` environment variable.
+
+**Setup with encryption:**
+```bash
+npm run setup
+# When prompted, choose to encrypt keys and enter a master key (min 16 characters)
+```
+
+**Running with encrypted keys:**
+```bash
+export OPENCODE_GO_ENCRYPTION_KEY="your-master-key"
+npx tsx src/index.ts
+```
+
+**Docker with encrypted keys:**
+```yaml
+# docker-compose.yml
+environment:
+  - OPENCODE_GO_ENCRYPTION_KEY=your-master-key
+```
+
+**Notes:**
+- Encrypted keys use AES-256-GCM with scrypt KDF (N=16384, r=8, p=1)
+- Each key is encrypted with a random salt and IV
+- Plaintext keys (starting with `sk-`) are still supported for backward compatibility
+- The `OPENCODE_GO_KEYS` environment variable always uses plaintext keys (for CI/CD)
+- If keys are encrypted but `OPENCODE_GO_ENCRYPTION_KEY` is not set, the proxy will fail to start with a clear error message
+
 ### CLI Flags
 
 ```bash

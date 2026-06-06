@@ -248,7 +248,13 @@ async function startProxy(cfg: ProxyConfig): Promise<ProxyContext> {
         resolve({
           port: info.port,
           server,
-          close: () => new Promise<void>((r) => server.close(() => r())),
+          close: () => new Promise<void>((r) => {
+            // Close all keep-alive connections first (Node.js 18.2+)
+            if ('closeAllConnections' in server) {
+              (server as any).closeAllConnections();
+            }
+            server.close(() => r());
+          }),
         });
       },
     );
@@ -293,7 +299,13 @@ beforeAll(async () => {
 });
 
 afterAll(async () => {
-  await new Promise<void>((resolve) => mockUpstream.close(() => resolve()));
+  await new Promise<void>((resolve) => {
+    // Close all keep-alive connections first (Node.js 18.2+)
+    if ('closeAllConnections' in mockUpstream) {
+      (mockUpstream as any).closeAllConnections();
+    }
+    mockUpstream.close(() => resolve());
+  });
 });
 
 beforeEach(() => {
@@ -1070,4 +1082,136 @@ describe('10. Config Validation', () => {
     expect(cfg.requestTimeoutMs).toBe(15_000);
     expect(cfg.allowedOrigins).toEqual(['http://app.example.com']);
   });
+});
+
+// -----------------------------------------------------------------------
+// 11. Concurrent Requests
+// -----------------------------------------------------------------------
+
+describe('11. Concurrent Requests', () => {
+  let proxy: ProxyContext;
+
+  beforeAll(async () => {
+    proxy = await startProxy(baseConfig(upstreamPort));
+  });
+  afterAll(async () => { await proxy.close(); });
+
+  it('concurrent requests use multiple keys in rotation', async () => {
+    const count = 6;
+
+    const responses = await Promise.all(
+      Array.from({ length: count }, (_, i) =>
+        pf(proxy.port, '/zen/go/v1/chat/completions', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            model: 'gpt-4',
+            messages: [{ role: 'user', content: `concurrent-msg-${i}` }],
+            stream: false,
+          }),
+        }),
+      ),
+    );
+
+    // All requests should succeed
+    for (const res of responses) {
+      expect(res.status).toBe(200);
+    }
+
+    const log = mockControl.getRequestLog();
+    expect(log.length).toBe(count);
+
+    // Verify at least 2 different keys were used (rotation happened)
+    const usedKeys = new Set(log.map((entry) => entry.auth));
+    expect(usedKeys.size).toBeGreaterThan(1);
+
+    // Verify no single key handled more than 4 of the 6 requests
+    const keyCounts = new Map<string, number>();
+    for (const entry of log) {
+      keyCounts.set(entry.auth, (keyCounts.get(entry.auth) || 0) + 1);
+    }
+    for (const count of keyCounts.values()) {
+      expect(count).toBeLessThanOrEqual(4);
+    }
+  });
+
+  it('concurrent requests all return valid chat completions', async () => {
+    const responses = await Promise.all(
+      Array.from({ length: 4 }, (_, i) =>
+        pf(proxy.port, '/zen/go/v1/chat/completions', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            model: 'gpt-4',
+            messages: [{ role: 'user', content: `msg-${i}` }],
+            stream: false,
+          }),
+        }),
+      ),
+    );
+
+    for (const res of responses) {
+      expect(res.status).toBe(200);
+      const body = await res.json() as Record<string, unknown>;
+      expect(body.id).toBe('chatcmpl-e2e-test');
+      const choices = body.choices as Array<{ message: { content: string } }>;
+      expect(choices[0].message.content).toBe('Hello world from mock');
+    }
+  });
+});
+
+// -----------------------------------------------------------------------
+// 12. Request Body Limits
+// -----------------------------------------------------------------------
+
+describe('12. Request Body Limits', () => {
+  let proxy: ProxyContext;
+
+  beforeAll(async () => {
+    proxy = await startProxy(baseConfig(upstreamPort));
+  });
+  afterAll(async () => { await proxy.close(); });
+
+  it('rejects request body larger than 10MB with 413', async () => {
+    const largeBody = 'x'.repeat(11 * 1024 * 1024); // ~11MB — exceeds 10MB limit
+
+    const res = await pf(proxy.port, '/zen/go/v1/chat/completions', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        model: 'gpt-4',
+        messages: [{ role: 'user', content: largeBody }],
+        stream: false,
+      }),
+    });
+
+    expect(res.status).toBe(413);
+    const body = await res.json() as Record<string, unknown>;
+    expect(body.error).toBe('Request body too large');
+
+    // Verify no request was forwarded to the upstream
+    expect(mockControl.getRequestLog().length).toBe(0);
+  });
+
+  it('accepts request body near but under 10MB limit', async () => {
+    const bodyContent = 'y'.repeat(9 * 1024 * 1024); // ~9MB — under 10MB limit
+
+    const res = await pf(proxy.port, '/zen/go/v1/chat/completions', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        model: 'gpt-4',
+        messages: [{ role: 'user', content: bodyContent }],
+        stream: false,
+      }),
+    });
+
+    expect(res.status).toBe(200);
+
+    // Verify the request was forwarded
+    const log = mockControl.getRequestLog();
+    const matchingLogs = log.filter((entry) => entry.body.includes('yyyyy'));
+    expect(matchingLogs.length).toBe(1);
+  }, 30000);
+
 });
