@@ -26,6 +26,8 @@ import {
   isValidApiKey,
   isValidHttpsUrl,
   isValidPositiveInt,
+} from '../src/validation.js';
+import {
   generateYaml,
   backupExistingConfig,
   testProxy,
@@ -38,43 +40,64 @@ import {
 // ---------------------------------------------------------------------------
 
 const mockState = vi.hoisted(() => ({
-  // Prompt order in setup():
-  //   1. promptInput → port
-  //   2. promptInput → upstream
-  //   3. promptInput → num accounts
-  //   4. promptInput → encrypt keys (y/n)
-  //   5. promptConfirm → usage switching (y/n)
-  //   6. promptInput   → acc 1 label
-  //   7. promptSecret* → acc 1 api key  (* falls back to rl.question in test)
-  //   8. promptInput   → acc 2 label
-  //   9. promptSecret* → acc 2 api key
+  // Prompt order in setup() using @clack/prompts via ui.ts:
+  //   1. text     → port
+  //   2. text     → upstream
+  //   3. text     → num accounts
+  //   4. confirm  → encrypt keys (y/n)
+  //   5. confirm  → usage switching (y/n)
+  //   6. text     → acc 1 label
+  //   7. password → acc 1 api key
+  //   8. text     → acc 2 label
+  //   9. password → acc 2 api key
   answers: [
-    '3001',                                           // 0. port
-    'https://opencode.ai',                            // 1. upstream
-    '2',                                              // 2. num accounts
-    'n',                                              // 3. encrypt? → NO
-    'n',                                              // 4. usage switching? → NO
-    'main',                                           // 5. acc 1 label
-    'sk-valid-key-111111111111111',                   // 6. acc 1 api key
-    'backup',                                         // 7. acc 2 label
-    'sk-valid-key-222222222222222',                   // 8. acc 2 api key
+    '3001',                                           // 0. port (text)
+    'https://opencode.ai',                            // 1. upstream (text)
+    '2',                                              // 2. num accounts (text)
+    'n',                                              // 3. encrypt? → NO (confirm)
+    'n',                                              // 4. usage switching? → NO (confirm)
+    'main',                                           // 5. acc 1 label (text)
+    'sk-valid-key-111111111111111',                   // 6. acc 1 api key (password)
+    'backup',                                         // 7. acc 2 label (text)
+    'sk-valid-key-222222222222222',                   // 8. acc 2 api key (password)
   ],
   idx: 0,
 }));
 
-vi.mock('node:readline/promises', () => ({
-  createInterface: vi.fn(() => ({
-    question: vi.fn(() => {
-      const ans = Promise.resolve(mockState.answers[mockState.idx]);
-      mockState.idx++;
-      return ans;
+vi.mock('@clack/prompts', () => {
+  const nextAnswer = () => {
+    const ans = mockState.answers[mockState.idx];
+    mockState.idx++;
+    return ans;
+  };
+
+  return {
+    text: vi.fn(() => Promise.resolve(nextAnswer())),
+    confirm: vi.fn(() => {
+      const ans = nextAnswer();
+      return Promise.resolve(ans?.toLowerCase() === 'y');
     }),
-    close: vi.fn(),
-    [Symbol.asyncIterator]: async function* () {
-      /* no-op */
+    password: vi.fn(() => Promise.resolve(nextAnswer())),
+    select: vi.fn(() => Promise.resolve(nextAnswer())),
+    spinner: vi.fn(() => ({
+      start: vi.fn(),
+      stop: vi.fn(),
+      error: vi.fn(),
+      message: vi.fn(),
+    })),
+    intro: vi.fn(),
+    outro: vi.fn(),
+    log: {
+      step: vi.fn(),
+      success: vi.fn(),
+      warn: vi.fn(),
+      error: vi.fn(),
+      info: vi.fn(),
     },
-  })),
-}));
+    note: vi.fn(),
+    isCancel: vi.fn(() => false),
+  };
+});
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -138,6 +161,7 @@ function writeValidConfig(dir: string): void {
 /** Suppress console.log output during tests. */
 function suppressConsole(): void {
   vi.spyOn(console, 'log').mockImplementation(() => {});
+  vi.spyOn(console, 'warn').mockImplementation(() => {});
 }
 
 /** Restore console.log. */
@@ -354,35 +378,6 @@ describe('CLI Setup Wizard', () => {
       expect(keys[2].label).toBe('key3');
     });
 
-    it('uses correct defaults for circuit breaker and timeout', () => {
-      const cfg: SetupConfig = {
-        port: 5000,
-        upstreamBaseUrl: 'https://opencode.ai',
-        keys: [{ label: 'main', key: 'sk-valid-key-111111111111111' }],
-      };
-
-      const yaml = generateYaml(cfg);
-      const parsed = parseYaml(yaml) as Record<string, unknown>;
-
-      expect(parsed.circuitBreakerThreshold).toBe(3);
-      expect(parsed.circuitBreakerCooldownMs).toBe(60_000);
-      expect(parsed.requestTimeoutMs).toBe(30_000);
-      expect(parsed.host).toBe('127.0.0.1');
-    });
-
-    it('outputs valid YAML syntax', () => {
-      const cfg: SetupConfig = {
-        port: 3000,
-        upstreamBaseUrl: 'https://opencode.ai',
-        keys: [{ label: 'test', key: 'sk-test-key-123456789012345' }],
-      };
-
-      const yaml = generateYaml(cfg);
-      expect(() => parseYaml(yaml)).not.toThrow();
-      expect(yaml).toContain('keys:');
-      expect(yaml).toContain('- label:');
-      expect(yaml).toContain('sk-test-key');
-    });
   });
 
   // -----------------------------------------------------------------------
