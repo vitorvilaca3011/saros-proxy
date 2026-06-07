@@ -10,7 +10,7 @@
 
 Please report security vulnerabilities privately via GitHub Security Advisories:
 
-1. Go to the [Security tab](https://github.com/saros/saros/security) of the repository
+1. Go to the [Security tab](https://github.com/vitorvilaca3011/saros-proxy/security) of the repository
 2. Click "Report a vulnerability"
 3. Describe the issue in detail with steps to reproduce
 

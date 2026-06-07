@@ -33,5 +33,5 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Hop-by-hop header sanitization
 - Non-root Docker user
 
-[Unreleased]: https://github.com/saros/saros/compare/v0.1.0...HEAD
-[0.1.0]: https://github.com/saros/saros/releases/tag/v0.1.0
+[Unreleased]: https://github.com/vitorvilaca3011/saros-proxy/compare/v0.1.0...HEAD
+[0.1.0]: https://github.com/vitorvilaca3011/saros-proxy/releases/tag/v0.1.0

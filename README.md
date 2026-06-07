@@ -1,6 +1,6 @@
 # Saros
 
-[![CI](https://github.com/saros/saros/actions/workflows/ci.yml/badge.svg)](https://github.com/saros/saros/actions/workflows/ci.yml)
+[![CI](https://github.com/vitorvilaca3011/saros-proxy/actions/workflows/ci.yml/badge.svg)](https://github.com/vitorvilaca3011/saros-proxy/actions/workflows/ci.yml)
 [![npm version](https://img.shields.io/npm/v/saros-proxy.svg)](https://www.npmjs.com/package/saros-proxy)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Node.js Version](https://img.shields.io/badge/node-%3E%3D%2022.0.0-brightgreen.svg)](https://nodejs.org/)
@@ -131,7 +131,7 @@ npm install -g saros-proxy
 ### From source
 
 ```bash
-git clone https://github.com/saros/saros.git
+git clone https://github.com/vitorvilaca3011/saros-proxy.git
 cd proxy
 npm install
 npm run build
@@ -559,7 +559,7 @@ node --version  # Must be >= 22.0.0
 
 **Install from source:**
 ```bash
-git clone https://github.com/saros/saros.git
+git clone https://github.com/vitorvilaca3011/saros-proxy.git
 cd proxy
 npm install
 npm run build

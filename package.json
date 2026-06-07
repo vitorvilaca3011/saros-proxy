@@ -47,12 +47,12 @@
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/saros/saros.git"
+    "url": "git+https://github.com/vitorvilaca3011/saros-proxy.git"
   },
   "bugs": {
-    "url": "https://github.com/saros/saros/issues"
+    "url": "https://github.com/vitorvilaca3011/saros-proxy/issues"
   },
-  "homepage": "https://github.com/saros/saros#readme",
+  "homepage": "https://github.com/vitorvilaca3011/saros-proxy#readme",
   "devDependencies": {
     "@types/node": "^25.9.1",
     "@vitest/coverage-v8": "^4.1.8",
