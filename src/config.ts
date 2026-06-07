@@ -4,7 +4,7 @@
 
 import { readFileSync, existsSync } from 'node:fs';
 import { homedir } from 'node:os';
-import { dirname, join } from 'node:path';
+import { join } from 'node:path';
 import { parse as parseYaml } from 'yaml';
 import { logger, maskKey } from './logger.js';
 import { decryptKey, isEncryptedKey } from './key-encryption.js';
@@ -14,13 +14,10 @@ import {
   DEFAULT_UPSTREAM_URL,
   DEFAULT_CIRCUIT_BREAKER_COOLDOWN_MS,
   DEFAULT_REQUEST_TIMEOUT_MS,
-  MIN_KEY_LENGTH,
-  API_KEY_PREFIX,
   MIN_SCRAPE_INTERVAL_MS,
   MAX_SCRAPE_INTERVAL_MS,
   DEFAULT_SCRAPE_INTERVAL_MS,
   DEFAULT_USAGE_THRESHOLD,
-  WORKSPACE_ID_REGEX,
 } from './constants.js';
 import { isValidPort, isValidHttpsUrl, isValidApiKey, isValidWorkspaceId } from './validation.js';
 
@@ -66,10 +63,10 @@ interface YamlConfig {
 }
 
 /**
- * Return the OS-native user config directory path for opencode-go-proxy.
+ * Return the OS-native user config directory path for saros.
  *
- * Windows: %LOCALAPPDATA%\opencode-go-proxy\config.yaml
- * macOS/Linux: ~/.config/opencode-go-proxy/config.yaml (XDG)
+ * Windows: %LOCALAPPDATA%\saros\config.yaml
+ * macOS/Linux: ~/.config/saros/config.yaml (XDG)
  */
 export function getDefaultConfigPath(): string {
   const home = homedir();
@@ -81,11 +78,11 @@ export function getDefaultConfigPath(): string {
 
   if (process.platform === 'win32') {
     const localAppData = process.env.LOCALAPPDATA || join(home, 'AppData', 'Local');
-    return join(localAppData, 'opencode-go-proxy', 'config.yaml');
+    return join(localAppData, 'saros', 'config.yaml');
   }
 
   const xdgConfig = process.env.XDG_CONFIG_HOME || join(home, '.config');
-  return join(xdgConfig, 'opencode-go-proxy', 'config.yaml');
+  return join(xdgConfig, 'saros', 'config.yaml');
 }
 
 /**
@@ -279,9 +276,28 @@ export function validateConfig(config: Partial<ProxyConfig>): ProxyConfig {
  */
 export function loadConfig(configPath?: string): ProxyConfig {
   const cliArgs = parseCliArgs();
+  const config = getBaseConfig();
 
-  // --- Step 1: defaults ---
-  const config: ProxyConfig = {
+  applyEnvConfig(config);
+
+  const yamlPath = resolveYamlPath(cliArgs.config, configPath);
+  const yaml = loadYamlOverrides(yamlPath);
+  if (yaml) applyYamlConfig(config, yaml);
+
+  const encryptionKey = process.env.OPENCODE_GO_ENCRYPTION_KEY;
+  if (encryptionKey) {
+    decryptConfigSecrets(config, encryptionKey);
+  } else {
+    assertNoEncryptedSecrets(config);
+  }
+
+  applyCliOverrides(config, cliArgs);
+
+  return validateConfig(config);
+}
+
+function getBaseConfig(): ProxyConfig {
+  return {
     port: DEFAULT_PORT,
     host: DEFAULT_HOST,
     keys: [],
@@ -292,10 +308,11 @@ export function loadConfig(configPath?: string): ProxyConfig {
     allowedOrigins: ['http://localhost:*', 'http://127.0.0.1:*'],
     scraping: undefined,
   };
+}
 
-  // --- Step 2: environment variables (lowest-priority source) ---
+function applyEnvConfig(config: ProxyConfig): void {
   if (process.env.PROXY_PORT) {
-    config.port = parseInt(process.env.PROXY_PORT, 10);
+    config.port = Number.parseInt(process.env.PROXY_PORT, 10);
   }
   if (process.env.PROXY_HOST) {
     config.host = process.env.PROXY_HOST;
@@ -317,105 +334,119 @@ export function loadConfig(configPath?: string): ProxyConfig {
       };
     }).filter((k) => k.key.startsWith('sk-'));
   }
+}
 
-  // --- Step 3: YAML config file ---
-  let yamlPath = configPath || cliArgs.config;
-  if (!yamlPath) {
-    const defaultPath = getDefaultConfigPath();
-    if (existsSync(defaultPath)) {
-      yamlPath = defaultPath;
-    } else if (existsSync('config.yaml')) {
-      logger.warn('Config loaded from current directory (config.yaml). Consider moving it to %s', defaultPath);
-      yamlPath = 'config.yaml';
-    } else {
-      yamlPath = defaultPath;
-    }
+function resolveYamlPath(cliConfigArg: string | undefined, explicitPath: string | undefined): string {
+  if (explicitPath) return explicitPath;
+  if (cliConfigArg) return cliConfigArg;
+
+  const defaultPath = getDefaultConfigPath();
+  if (existsSync(defaultPath)) return defaultPath;
+
+  if (existsSync('config.yaml')) {
+    logger.warn('Config loaded from current directory (config.yaml). Consider moving it to %s', defaultPath);
+    return 'config.yaml';
   }
-  if (existsSync(yamlPath)) {
-    try {
-      const raw = readFileSync(yamlPath, 'utf-8');
-      const yaml = parseYaml(raw) as YamlConfig;
+  return defaultPath;
+}
 
-      if (yaml.port !== undefined) config.port = yaml.port;
-      if (yaml.host !== undefined) config.host = yaml.host;
-      if (yaml.upstreamBaseUrl !== undefined) config.upstreamBaseUrl = yaml.upstreamBaseUrl;
-      if (yaml.circuitBreakerThreshold !== undefined) config.circuitBreakerThreshold = yaml.circuitBreakerThreshold;
-      if (yaml.circuitBreakerCooldownMs !== undefined) config.circuitBreakerCooldownMs = yaml.circuitBreakerCooldownMs;
-      if (yaml.requestTimeoutMs !== undefined) config.requestTimeoutMs = yaml.requestTimeoutMs;
-      if (yaml.allowedOrigins !== undefined) config.allowedOrigins = yaml.allowedOrigins;
-      if (yaml.keys && yaml.keys.length > 0) config.keys = yaml.keys;
-      if (yaml.scraping !== undefined) {
-        config.scraping = {
-          enabled: yaml.scraping.enabled ?? false,
-          intervalMs: yaml.scraping.intervalMs ?? DEFAULT_SCRAPE_INTERVAL_MS,
-          usageThreshold: yaml.scraping.usageThreshold ?? DEFAULT_USAGE_THRESHOLD,
-          accounts: yaml.scraping.accounts ?? [],
-        };
-      }
-
-      logger.info('Loaded config from %s', yamlPath);
-    } catch (err) {
-      logger.error({ err }, 'Failed to parse config file %s', yamlPath);
-    }
-  } else {
+function loadYamlOverrides(yamlPath: string): YamlConfig | null {
+  if (!existsSync(yamlPath)) {
     logger.info('No config file found at %s, using env/defaults', yamlPath);
+    return null;
+  }
+  try {
+    const raw = readFileSync(yamlPath, 'utf-8');
+    const yaml = parseYaml(raw) as YamlConfig;
+    logger.info('Loaded config from %s', yamlPath);
+    return yaml;
+  } catch (err) {
+    logger.error({ err }, 'Failed to parse config file %s', yamlPath);
+    return null;
+  }
+}
+
+function applyYamlConfig(config: ProxyConfig, yaml: YamlConfig): void {
+  if (yaml.port !== undefined) config.port = yaml.port;
+  if (yaml.host !== undefined) config.host = yaml.host;
+  if (yaml.upstreamBaseUrl !== undefined) config.upstreamBaseUrl = yaml.upstreamBaseUrl;
+  if (yaml.circuitBreakerThreshold !== undefined) config.circuitBreakerThreshold = yaml.circuitBreakerThreshold;
+  if (yaml.circuitBreakerCooldownMs !== undefined) config.circuitBreakerCooldownMs = yaml.circuitBreakerCooldownMs;
+  if (yaml.requestTimeoutMs !== undefined) config.requestTimeoutMs = yaml.requestTimeoutMs;
+  if (yaml.allowedOrigins !== undefined) config.allowedOrigins = yaml.allowedOrigins;
+  if (yaml.keys && yaml.keys.length > 0) config.keys = yaml.keys;
+  if (yaml.scraping !== undefined) {
+    config.scraping = {
+      enabled: yaml.scraping.enabled ?? false,
+      intervalMs: yaml.scraping.intervalMs ?? DEFAULT_SCRAPE_INTERVAL_MS,
+      usageThreshold: yaml.scraping.usageThreshold ?? DEFAULT_USAGE_THRESHOLD,
+      accounts: yaml.scraping.accounts ?? [],
+    };
+  }
+}
+
+function decryptConfigSecrets(config: ProxyConfig, encryptionKey: string): void {
+  config.keys = config.keys.map((k) => decryptApiKeyIfNeeded(k, encryptionKey));
+  if (config.scraping?.accounts) {
+    config.scraping.accounts = config.scraping.accounts.map((acc) =>
+      decryptAuthCookieIfNeeded(acc, encryptionKey),
+    );
+  }
+}
+
+function decryptApiKeyIfNeeded(
+  entry: { label: string; key: string },
+  encryptionKey: string,
+): { label: string; key: string } {
+  if (!isEncryptedKey(entry.key)) return entry;
+  try {
+    return { ...entry, key: decryptKey(entry.key, encryptionKey) };
+  } catch (err) {
+    logger.error(
+      'Failed to decrypt key "%s": %s',
+      entry.label,
+      err instanceof Error ? err.message : String(err),
+    );
+    throw new Error(`Failed to decrypt API key "${entry.label}" — check OPENCODE_GO_ENCRYPTION_KEY`);
+  }
+}
+
+function decryptAuthCookieIfNeeded(acc: ScrapingAccount, encryptionKey: string): ScrapingAccount {
+  if (!isEncryptedKey(acc.authCookie)) return acc;
+  try {
+    return { ...acc, authCookie: decryptKey(acc.authCookie, encryptionKey) };
+  } catch (err) {
+    logger.error(
+      'Failed to decrypt authCookie for workspace "%s": %s',
+      acc.workspaceId,
+      err instanceof Error ? err.message : String(err),
+    );
+    throw new Error(`Failed to decrypt authCookie for workspace "${acc.workspaceId}" — check OPENCODE_GO_ENCRYPTION_KEY`);
+  }
+}
+
+function assertNoEncryptedSecrets(config: ProxyConfig): void {
+  const encryptedKeys = config.keys.filter((k) => isEncryptedKey(k.key));
+  if (encryptedKeys.length > 0) {
+    throw new Error(
+      `Found ${encryptedKeys.length} encrypted API key(s) but OPENCODE_GO_ENCRYPTION_KEY environment variable is not set`,
+    );
   }
 
-  // --- Step 3.5: Decrypt encrypted keys ---
-  const encryptionKey = process.env.OPENCODE_GO_ENCRYPTION_KEY;
-  if (encryptionKey) {
-    config.keys = config.keys.map((k) => {
-      if (isEncryptedKey(k.key)) {
-        try {
-          return { ...k, key: decryptKey(k.key, encryptionKey) };
-        } catch (err) {
-          logger.error('Failed to decrypt key "%s": %s', k.label, err instanceof Error ? err.message : String(err));
-          throw new Error(`Failed to decrypt API key "${k.label}" — check OPENCODE_GO_ENCRYPTION_KEY`);
-        }
-      }
-      return k; // plaintext key, use as-is
-    });
-
-    // Decrypt encrypted authCookies in scraping accounts
-    if (config.scraping?.accounts) {
-      config.scraping.accounts = config.scraping.accounts.map((acc) => {
-        if (isEncryptedKey(acc.authCookie)) {
-          try {
-            return { ...acc, authCookie: decryptKey(acc.authCookie, encryptionKey) };
-          } catch (err) {
-            logger.error('Failed to decrypt authCookie for workspace "%s": %s', acc.workspaceId, err instanceof Error ? err.message : String(err));
-            throw new Error(`Failed to decrypt authCookie for workspace "${acc.workspaceId}" — check OPENCODE_GO_ENCRYPTION_KEY`);
-          }
-        }
-        return acc; // plaintext cookie, use as-is
-      });
-    }
-  } else {
-    // Check if any keys are encrypted but no encryption key provided
-    const encryptedKeys = config.keys.filter((k) => isEncryptedKey(k.key));
-    if (encryptedKeys.length > 0) {
-      throw new Error(
-        `Found ${encryptedKeys.length} encrypted API key(s) but OPENCODE_GO_ENCRYPTION_KEY environment variable is not set`
-      );
-    }
-
-    // Check if any authCookies are encrypted but no encryption key provided
-    const encryptedCookies = config.scraping?.accounts?.filter((acc) => isEncryptedKey(acc.authCookie)) ?? [];
-    if (encryptedCookies.length > 0) {
-      throw new Error(
-        `Found ${encryptedCookies.length} encrypted authCookie(s) but OPENCODE_GO_ENCRYPTION_KEY environment variable is not set`
-      );
-    }
+  const encryptedCookies =
+    config.scraping?.accounts?.filter((acc) => isEncryptedKey(acc.authCookie)) ?? [];
+  if (encryptedCookies.length > 0) {
+    throw new Error(
+      `Found ${encryptedCookies.length} encrypted authCookie(s) but OPENCODE_GO_ENCRYPTION_KEY environment variable is not set`,
+    );
   }
+}
 
-  // --- Step 4: CLI overrides (highest priority) ---
+function applyCliOverrides(config: ProxyConfig, cliArgs: Record<string, string>): void {
   if (cliArgs.port) {
-    config.port = parseInt(cliArgs.port, 10);
+    config.port = Number.parseInt(cliArgs.port, 10);
   }
   if (cliArgs.host) {
     config.host = cliArgs.host;
   }
-
-  // --- Step 5: Validate and normalize ---
-  return validateConfig(config);
 }

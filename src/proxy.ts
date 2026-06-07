@@ -1,5 +1,5 @@
 /**
- * proxy.ts — Hono HTTP proxy app for OpenCode-Go Multi-Account Proxy.
+ * proxy.ts — Hono HTTP proxy app. Saros predicts account exhaustion and cycles between accounts.
  *
  * Routes /zen/go/v1/* requests to the upstream API with automatic key
  * selection, circuit-breaker failover, and streaming pass-through.
@@ -201,6 +201,8 @@ function buildUsageKeyOptions(config: ProxyConfig): KeySelectionOptions | undefi
 // Upstream forwarding with failover
 // ---------------------------------------------------------------------------
 
+type RequestKind = 'standard' | 'streaming';
+
 type SuccessHandler = (
   response: Response,
   state: ProxyState,
@@ -208,215 +210,317 @@ type SuccessHandler = (
   keyLabel: string,
 ) => Promise<Response>;
 
+interface RetryContext {
+  state: ProxyState;
+  requestId: string;
+  config: ProxyConfig;
+  method: string;
+  path: string;
+  incomingHeaders: Headers;
+  bodyText: string;
+  kind: RequestKind;
+  upstreamUrl: string;
+  keyOptions: KeySelectionOptions | undefined;
+  onSuccess: SuccessHandler;
+}
+
+type AttemptResult =
+  | { kind: 'done'; response: Response }
+  | { kind: 'retry'; lastError: Error | null };
+
 /**
  * Shared retry loop for both streaming and non-streaming requests.
  * Handles key selection, failover, error classification, and retry logic.
- * Delegates the success-path response construction to `onSuccess`.
+ * Delegates the success-path response construction to `ctx.onSuccess`.
  */
-async function executeWithRetry(
-  state: ProxyState,
-  requestId: string,
-  config: ProxyConfig,
-  method: string,
-  path: string,
-  incomingHeaders: Headers,
-  bodyText: string | null,
-  maxRetries: number,
-  onSuccess: SuccessHandler,
-  kind: 'standard' | 'streaming',
-): Promise<Response> {
-  const upstreamUrl = buildUpstreamUrl(config.upstreamBaseUrl, path);
+async function executeWithRetry(opts: {
+  state: ProxyState;
+  requestId: string;
+  config: ProxyConfig;
+  method: string;
+  path: string;
+  incomingHeaders: Headers;
+  bodyText: string;
+  kind: RequestKind;
+  onSuccess: SuccessHandler;
+  maxRetries: number;
+}): Promise<Response> {
+  const ctx: RetryContext = {
+    state: opts.state,
+    requestId: opts.requestId,
+    config: opts.config,
+    method: opts.method,
+    path: opts.path,
+    incomingHeaders: opts.incomingHeaders,
+    bodyText: opts.bodyText,
+    kind: opts.kind,
+    upstreamUrl: buildUpstreamUrl(opts.config.upstreamBaseUrl, opts.path),
+    keyOptions: opts.config.scraping?.enabled ? buildUsageKeyOptions(opts.config) : undefined,
+    onSuccess: opts.onSuccess,
+  };
+
   let lastError: Error | null = null;
 
-  const keyOptions: KeySelectionOptions | undefined = config.scraping?.enabled
-    ? buildUsageKeyOptions(config)
-    : undefined;
-
-  for (let attempt = 0; attempt < maxRetries; attempt++) {
-    const key: KeySnapshot | null =
-      attempt === 0
-        ? selectKeyForRequest(state, requestId, keyOptions)
-        : failoverRequest(state, requestId, keyOptions);
-
-    if (!key) {
-      logger.warn(
-        { requestId, attempt },
-        kind === 'standard'
-          ? 'No API keys available on attempt %d'
-          : 'No API keys available for streaming on attempt %d',
-        attempt,
-      );
-      completeRequest(state, requestId, false);
-      return new Response(
-        JSON.stringify({ error: 'All API keys are temporarily unavailable', requestId }),
-        {
-          status: 503,
-          headers: { 'content-type': 'application/json' },
-        },
-      );
-    }
-
-    logger.info(
-      { requestId, keyLabel: key.label, attempt },
-      kind === 'standard'
-        ? 'Forwarding request to upstream using key %s'
-        : 'Streaming request with key %s',
-      maskKey(key.key),
-    );
-
-    const headers = buildUpstreamHeaders(incomingHeaders, key.key);
-
-    try {
-      const fetchOptions: RequestInit = {
-        method,
-        headers,
-      };
-      if (kind === 'standard') {
-        if (method !== 'GET' && method !== 'HEAD' && bodyText) {
-          fetchOptions.body = bodyText;
-          (fetchOptions as { duplex: string }).duplex = 'half';
-        }
-      } else if (bodyText) {
-        fetchOptions.body = bodyText;
-        (fetchOptions as { duplex: string }).duplex = 'half';
-      }
-
-      const response = await fetchWithTimeout(
-        upstreamUrl,
-        fetchOptions,
-        config.requestTimeoutMs,
-      );
-
-      if (response.ok) {
-        markKeySucceeded(state, key.label);
-        completeRequest(state, requestId, true);
-        return onSuccess(response, state, requestId, key.label);
-      }
-
-      // Error path: classify and decide
-      const errorBody = await response.text();
-      const errorType = classifyHttpError(response.status, errorBody);
-
-      if (kind === 'standard') {
-        logger.warn(
-          { requestId, keyLabel: key.label, status: response.status, errorType },
-          'Upstream returned error: %s',
-          errorBody.slice(0, 200),
-        );
-      } else {
-        logger.warn(
-          { requestId, keyLabel: key.label, status: response.status },
-          'Upstream streaming error',
-        );
-      }
-
-      if (errorType === 'RequestFault') {
-        // Client error — don't retry, don't penalise the key
-        completeRequest(state, requestId, false);
-        // Sanitize upstream error - don't leak internal details
-        let safeError;
-        try {
-          const parsed = JSON.parse(errorBody);
-          safeError = JSON.stringify({
-            error: parsed.error?.message || parsed.error || 'Bad Request',
-            requestId,
-          });
-        } catch {
-          safeError = JSON.stringify({ error: 'Bad Request', requestId });
-        }
-        return new Response(safeError, {
-          status: response.status,
-          headers: { 'content-type': 'application/json' },
-        });
-      }
-
-      // KeyFault or ServerFault — penalise the key and retry
-      markKeyFailed(state, key.label, errorType);
-      if (kind === 'standard') {
-        lastError = new Error(
-          `Upstream error ${response.status}: ${errorBody.slice(0, 200)}`,
-        );
-      }
-    } catch (err) {
-      lastError = err instanceof Error ? err : new Error(String(err));
-      if (lastError instanceof TimeoutError) {
-        logger.warn(
-          { requestId, keyLabel: key.label },
-          kind === 'standard'
-            ? 'Request timed out after %dms, retrying with next key'
-            : 'Streaming request timed out after %dms, retrying with next key',
-          config.requestTimeoutMs,
-        );
-        markKeyFailed(state, key.label, 'ServerFault');
-        continue;
-      }
-      logger.error(
-        { requestId, keyLabel: key.label, err },
-        kind === 'standard'
-          ? 'Network error forwarding to upstream'
-          : 'Network error during streaming',
-      );
-      markKeyFailed(state, key.label, 'ServerFault');
-    }
+  for (let attempt = 0; attempt < opts.maxRetries; attempt++) {
+    const result = await executeSingleAttempt(attempt, ctx);
+    if (result.kind === 'done') return result.response;
+    lastError = result.lastError;
   }
 
-  // All retries exhausted
-  completeRequest(state, requestId, false);
-  logger.error(
-    { requestId, err: lastError },
+  return handleAllRetriesFailed(ctx, opts.maxRetries, lastError);
+}
+
+async function executeSingleAttempt(attempt: number, ctx: RetryContext): Promise<AttemptResult> {
+  const key = pickKey(ctx, attempt);
+  if (!key) {
+    return { kind: 'done', response: buildNoKeysResponse(ctx.state, ctx.requestId, ctx.kind, attempt) };
+  }
+
+  logKeyAttempt(ctx.requestId, key, attempt, ctx.kind);
+  const fetchOptions = buildFetchOptions(ctx.method, ctx.bodyText, ctx.kind, ctx.incomingHeaders, key.key);
+
+  try {
+    const response = await fetchWithTimeout(ctx.upstreamUrl, fetchOptions, ctx.config.requestTimeoutMs);
+    if (response.ok) {
+      markKeySucceeded(ctx.state, key.label);
+      completeRequest(ctx.state, ctx.requestId, true);
+      return {
+        kind: 'done',
+        response: await ctx.onSuccess(response, ctx.state, ctx.requestId, key.label),
+      };
+    }
+    return await handleUpstreamErrorResponse(response, ctx, key);
+  } catch (err) {
+    return handleNetworkError(err, ctx, key);
+  }
+}
+
+function pickKey(ctx: RetryContext, attempt: number): KeySnapshot | null {
+  return attempt === 0
+    ? selectKeyForRequest(ctx.state, ctx.requestId, ctx.keyOptions)
+    : failoverRequest(ctx.state, ctx.requestId, ctx.keyOptions);
+}
+
+function buildFetchOptions(
+  method: string,
+  bodyText: string,
+  kind: RequestKind,
+  incomingHeaders: Headers,
+  bearerToken: string,
+): RequestInit & { duplex?: 'half' } {
+  const headers = buildUpstreamHeaders(incomingHeaders, bearerToken);
+  const options: RequestInit & { duplex?: 'half' } = { method, headers };
+  if (!bodyText) return options;
+  // Node.js fetch requires `duplex: 'half'` when body is a stream or string
+  // that may be streamed. TypeScript's DOM RequestInit lacks this field.
+  if (kind === 'standard' && (method === 'GET' || method === 'HEAD')) return options;
+  options.body = bodyText;
+  options.duplex = 'half';
+  return options;
+}
+
+async function handleUpstreamErrorResponse(
+  response: Response,
+  ctx: RetryContext,
+  key: KeySnapshot,
+): Promise<AttemptResult> {
+  const errorBody = await response.text();
+  const errorType = classifyHttpError(response.status, errorBody);
+  logUpstreamError(ctx.requestId, key, response.status, errorType, errorBody, ctx.kind);
+
+  if (errorType === 'RequestFault') {
+    // Client error — don't retry, don't penalise the key
+    completeRequest(ctx.state, ctx.requestId, false);
+    return { kind: 'done', response: buildClientErrorResponse(response.status, errorBody, ctx.requestId) };
+  }
+
+  // KeyFault or ServerFault — penalise the key and retry
+  markKeyFailed(ctx.state, key.label, errorType);
+  const lastError = ctx.kind === 'standard'
+    ? new Error(`Upstream error ${response.status}: ${errorBody.slice(0, 200)}`)
+    : null;
+  return { kind: 'retry', lastError };
+}
+
+function handleNetworkError(err: unknown, ctx: RetryContext, key: KeySnapshot): AttemptResult {
+  const lastError = err instanceof Error ? err : new Error(String(err));
+  if (lastError instanceof TimeoutError) {
+    logTimeout(ctx.requestId, key, ctx.config.requestTimeoutMs, ctx.kind);
+    markKeyFailed(ctx.state, key.label, 'ServerFault');
+    return { kind: 'retry', lastError };
+  }
+  logNetworkError(ctx.requestId, key, err, ctx.kind);
+  markKeyFailed(ctx.state, key.label, 'ServerFault');
+  return { kind: 'retry', lastError };
+}
+
+function buildNoKeysResponse(state: ProxyState, requestId: string, kind: RequestKind, attempt: number): Response {
+  logger.warn(
+    { requestId, attempt, kind },
     kind === 'standard'
+      ? 'No API keys available on attempt %d'
+      : 'No API keys available for streaming on attempt %d',
+    attempt,
+  );
+  completeRequest(state, requestId, false);
+  return new Response(
+    JSON.stringify({ error: 'All API keys are temporarily unavailable', requestId }),
+    { status: 503, headers: { 'content-type': 'application/json' } },
+  );
+}
+
+function buildClientErrorResponse(status: number, errorBody: string, requestId: string): Response {
+  // Sanitize upstream error - don't leak internal details
+  let safeError: string;
+  try {
+    const parsed = JSON.parse(errorBody);
+    const message = parsed.error?.message || parsed.error || 'Bad Request';
+    safeError = JSON.stringify({ error: message, requestId });
+  } catch {
+    safeError = JSON.stringify({ error: 'Bad Request', requestId });
+  }
+  return new Response(safeError, {
+    status,
+    headers: { 'content-type': 'application/json' },
+  });
+}
+
+function handleAllRetriesFailed(ctx: RetryContext, maxRetries: number, lastError: Error | null): Response {
+  completeRequest(ctx.state, ctx.requestId, false);
+  logger.error(
+    { requestId: ctx.requestId, err: lastError, kind: ctx.kind },
+    ctx.kind === 'standard'
       ? 'All %d retries exhausted, returning 502'
       : 'Streaming failed after %d attempts',
     maxRetries,
   );
+  const message = ctx.kind === 'standard'
+    ? 'Upstream service unavailable after multiple attempts'
+    : 'Streaming service unavailable after multiple attempts';
   return new Response(
-    JSON.stringify({
-      error: 'Bad Gateway',
-      message:
-        kind === 'standard'
-          ? 'Upstream service unavailable after multiple attempts'
-          : 'Streaming service unavailable after multiple attempts',
-      requestId,
-    }),
-    {
-      status: 502,
-      headers: { 'content-type': 'application/json' },
-    },
+    JSON.stringify({ error: 'Bad Gateway', message, requestId: ctx.requestId }),
+    { status: 502, headers: { 'content-type': 'application/json' } },
   );
+}
+
+// --- Logging helpers (preserve original log message format) ---
+
+function logKeyAttempt(requestId: string, key: KeySnapshot, attempt: number, kind: RequestKind): void {
+  logger.info(
+    { requestId, keyLabel: key.label, attempt, kind },
+    kind === 'standard'
+      ? 'Forwarding request to upstream using key %s'
+      : 'Streaming request with key %s',
+    maskKey(key.key),
+  );
+}
+
+function logUpstreamError(
+  requestId: string,
+  key: KeySnapshot,
+  status: number,
+  errorType: string,
+  errorBody: string,
+  kind: RequestKind,
+): void {
+  if (kind === 'standard') {
+    logger.warn(
+      { requestId, keyLabel: key.label, status, errorType, kind },
+      'Upstream returned error: %s',
+      errorBody.slice(0, 200),
+    );
+  } else {
+    logger.warn(
+      { requestId, keyLabel: key.label, status, kind },
+      'Upstream streaming error',
+    );
+  }
+}
+
+function logTimeout(requestId: string, key: KeySnapshot, timeoutMs: number, kind: RequestKind): void {
+  logger.warn(
+    { requestId, keyLabel: key.label, kind },
+    kind === 'standard'
+      ? 'Request timed out after %dms, retrying with next key'
+      : 'Streaming request timed out after %dms, retrying with next key',
+    timeoutMs,
+  );
+}
+
+function logNetworkError(requestId: string, key: KeySnapshot, err: unknown, kind: RequestKind): void {
+  logger.error(
+    { requestId, keyLabel: key.label, err, kind },
+    kind === 'standard'
+      ? 'Network error forwarding to upstream'
+      : 'Network error during streaming',
+  );
+}
+
+// ---------------------------------------------------------------------------
+// Success handlers
+// ---------------------------------------------------------------------------
+
+const standardSuccessHandler: SuccessHandler = async (response, state, requestId, keyLabel) => {
+  logger.info(
+    { requestId, keyLabel, status: response.status },
+    'Upstream request succeeded',
+  );
+  const responseBody = await response.text();
+  const downstreamHeaders = buildDownstreamHeaders(response.headers);
+  downstreamHeaders.set('X-Proxy-Key-Label', keyLabel);
+  downstreamHeaders.set('X-Proxy-Request-Id', requestId);
+  return new Response(responseBody, {
+    status: response.status,
+    headers: downstreamHeaders,
+  });
+};
+
+const streamingSuccessHandler: SuccessHandler = async (response, state, requestId, keyLabel) => {
+  if (!response.body) {
+    logger.error({ requestId, keyLabel }, 'Streaming response missing body');
+    return new Response(
+      JSON.stringify({ error: 'Bad Gateway', message: 'Upstream response missing body', requestId }),
+      { status: 502, headers: { 'content-type': 'application/json' } },
+    );
+  }
+  const wrappedStream = wrapStreamWithErrorDetection(response.body, state, requestId, keyLabel);
+  const responseHeaders = buildDownstreamHeaders(response.headers);
+  responseHeaders.set('content-type', 'text/event-stream');
+  responseHeaders.set('cache-control', 'no-cache');
+  responseHeaders.set('connection', 'keep-alive');
+  responseHeaders.set('X-Proxy-Key-Label', keyLabel);
+  responseHeaders.set('X-Proxy-Request-Id', requestId);
+  return new Response(wrappedStream, { status: 200, headers: responseHeaders });
+};
+
+interface HandleRequestOptions {
+  state: ProxyState;
+  requestId: string;
+  config: ProxyConfig;
+  method: string;
+  path: string;
+  incomingHeaders: Headers;
+  bodyText: string;
+  maxRetries?: number;
 }
 
 /**
  * Forward a (non-streaming) request to the upstream with automatic
  * key failover on KeyFault and ServerFault responses.
  */
-async function handleWithFailover(
-  state: ProxyState,
-  requestId: string,
-  config: ProxyConfig,
-  method: string,
-  path: string,
-  incomingHeaders: Headers,
-  bodyText: string,
-  maxRetries: number = MAX_RETRIES,
-): Promise<Response> {
-  const onSuccess: SuccessHandler = async (response, state, requestId, keyLabel) => {
-    logger.info(
-      { requestId, keyLabel, status: response.status },
-      'Upstream request succeeded',
-    );
-    const responseBody = await response.text();
-    const downstreamHeaders = buildDownstreamHeaders(response.headers);
-    downstreamHeaders.set('X-Proxy-Key-Label', keyLabel);
-    downstreamHeaders.set('X-Proxy-Request-Id', requestId);
-    return new Response(responseBody, {
-      status: response.status,
-      headers: downstreamHeaders,
-    });
-  };
-  return executeWithRetry(
-    state, requestId, config, method, path, incomingHeaders, bodyText,
-    maxRetries, onSuccess, 'standard',
-  );
+async function handleWithFailover(opts: HandleRequestOptions): Promise<Response> {
+  return executeWithRetry({
+    state: opts.state,
+    requestId: opts.requestId,
+    config: opts.config,
+    method: opts.method,
+    path: opts.path,
+    incomingHeaders: opts.incomingHeaders,
+    bodyText: opts.bodyText,
+    kind: 'standard',
+    onSuccess: standardSuccessHandler,
+    maxRetries: opts.maxRetries ?? MAX_RETRIES,
+  });
 }
 
 /**
@@ -424,38 +528,19 @@ async function handleWithFailover(
  * error detection.  Streams SSE chunks directly to the client and wraps
  * the stream to detect error markers mid-response.
  */
-async function handleStreamingRequest(
-  state: ProxyState,
-  requestId: string,
-  config: ProxyConfig,
-  method: string,
-  path: string,
-  incomingHeaders: Headers,
-  bodyText: string,
-  maxRetries: number = MAX_RETRIES,
-): Promise<Response> {
-  const onSuccess: SuccessHandler = async (response, state, requestId, keyLabel) => {
-    const wrappedStream = wrapStreamWithErrorDetection(
-      response.body!,
-      state,
-      requestId,
-      keyLabel,
-    );
-    const responseHeaders = buildDownstreamHeaders(response.headers);
-    responseHeaders.set('content-type', 'text/event-stream');
-    responseHeaders.set('cache-control', 'no-cache');
-    responseHeaders.set('connection', 'keep-alive');
-    responseHeaders.set('X-Proxy-Key-Label', keyLabel);
-    responseHeaders.set('X-Proxy-Request-Id', requestId);
-    return new Response(wrappedStream, {
-      status: 200,
-      headers: responseHeaders,
-    });
-  };
-  return executeWithRetry(
-    state, requestId, config, method, path, incomingHeaders, bodyText,
-    maxRetries, onSuccess, 'streaming',
-  );
+async function handleStreamingRequest(opts: HandleRequestOptions): Promise<Response> {
+  return executeWithRetry({
+    state: opts.state,
+    requestId: opts.requestId,
+    config: opts.config,
+    method: opts.method,
+    path: opts.path,
+    incomingHeaders: opts.incomingHeaders,
+    bodyText: opts.bodyText,
+    kind: 'streaming',
+    onSuccess: streamingSuccessHandler,
+    maxRetries: opts.maxRetries ?? MAX_RETRIES,
+  });
 }
 
 /**
@@ -573,8 +658,8 @@ export function createProxyApp(config: ProxyConfig): Hono {
         if (!origin) return null; // Non-browser requests (no Origin header) — skip CORS
         const allowed = config.allowedOrigins.some((pattern) => {
           // Escape regex special chars, then replace \* with .*
-          const escaped = pattern.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-          const regex = new RegExp('^' + escaped.replace(/\\\*/g, '.*') + '$');
+          const escaped = pattern.replace(/[.*+?^${}()|[\]\\]/g, String.raw`\$&`);
+          const regex = new RegExp('^' + escaped.replaceAll(String.raw`\*`, '.*') + '$');
           return regex.test(origin);
         });
         if (allowed) return origin;
@@ -631,7 +716,7 @@ export function createProxyApp(config: ProxyConfig): Hono {
 
     // Reject oversized requests early via Content-Length header
     const contentLength = c.req.header('content-length');
-    if (contentLength && parseInt(contentLength) > MAX_BODY_SIZE) {
+    if (contentLength && Number.parseInt(contentLength) > MAX_BODY_SIZE) {
       return c.json({ error: 'Request body too large', requestId }, 413);
     }
 
@@ -646,7 +731,7 @@ export function createProxyApp(config: ProxyConfig): Hono {
     // Check for streaming mode
     if (bodyText && isStreamingRequest(bodyText)) {
       logger.info({ requestId, method, path }, 'Streaming request detected');
-      return handleStreamingRequest(
+      return handleStreamingRequest({
         state,
         requestId,
         config,
@@ -654,11 +739,11 @@ export function createProxyApp(config: ProxyConfig): Hono {
         path,
         incomingHeaders,
         bodyText,
-      );
+      });
     }
 
     // Non-streaming request with failover
-    return handleWithFailover(
+    return handleWithFailover({
       state,
       requestId,
       config,
@@ -666,7 +751,7 @@ export function createProxyApp(config: ProxyConfig): Hono {
       path,
       incomingHeaders,
       bodyText,
-    );
+    });
   });
 
   return app;

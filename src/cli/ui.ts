@@ -1,5 +1,5 @@
 /**
- * ui.ts — Centralized CLI UI abstraction for the OpenCode-Go Proxy.
+ * ui.ts — Centralized CLI UI abstraction for Saros.
  *
  * Thin wrapper around @clack/prompts. All CLI output goes through here
  * so that future migration to Ink, Blessed, or web dashboards only requires
@@ -12,18 +12,7 @@
  *   - No business logic
  */
 
-import {
-  intro,
-  outro,
-  log,
-  note,
-  spinner,
-  text,
-  confirm,
-  password,
-  select,
-  isCancel,
-} from '@clack/prompts';
+import { outro, log, note, isCancel } from '@clack/prompts';
 import chalk from 'chalk';
 import { maskKey } from '../logger.js';
 import type { SetupConfig } from './setup.js';
@@ -32,7 +21,8 @@ import type { SetupConfig } from './setup.js';
 // Re-exports — setup.ts imports from here so migration is localized
 // ---------------------------------------------------------------------------
 
-export { intro, outro, log, note, spinner, text, confirm, password, select, isCancel };
+export { outro };
+export { intro, spinner, text, confirm, password, select } from '@clack/prompts';
 
 // ---------------------------------------------------------------------------
 // Status messages (thin wrappers around @clack/log)
@@ -90,10 +80,12 @@ export function printConfigSummary(
   }
 
   if (cfg.scrapingAccounts && cfg.scrapingAccounts.length > 0) {
-    lines.push('');
-    lines.push(`${chalk.dim('Scraping accounts:')} ${cfg.scrapingAccounts.length}`);
-    lines.push(`${chalk.dim('Usage threshold:')}  ${cfg.scrapingThreshold ?? 50}%`);
-    lines.push(`${chalk.dim('Check interval:')}   ${((cfg.scrapingIntervalMs ?? 90_000) / 1000)}s`);
+    lines.push(
+      '',
+      `${chalk.dim('Scraping accounts:')} ${cfg.scrapingAccounts.length}`,
+      `${chalk.dim('Usage threshold:')}  ${cfg.scrapingThreshold ?? 50}%`,
+      `${chalk.dim('Check interval:')}   ${((cfg.scrapingIntervalMs ?? 90_000) / 1000)}s`,
+    );
   }
 
   note(lines.join('\n'), 'Configuration Summary');
@@ -114,12 +106,13 @@ export function printNextSteps(port: number): void {
   const bullet = chalk.dim('•');
   log.step('Next Steps');
   console.log(`  ${bullet} Start the proxy:      ${chalk.dim('$ npm run dev')}`);
-  console.log(`  ${bullet} Extension endpoint:   ${chalk.dim(`http://127.0.0.1:${port}`)}`);
-  console.log(`  ${bullet} Health check:         ${chalk.dim(`$ curl http://127.0.0.1:${port}/health`)}`);
+  const extensionUrl = `http://127.0.0.1:${port}`;
+  console.log(`  ${bullet} Extension endpoint:   ${chalk.dim(extensionUrl)}`);
+  console.log(`  ${bullet} Health check:         ${chalk.dim(`$ curl ${extensionUrl}/health`)}`);
   console.log('');
   log.step('OpenCode Client');
-  console.log(`  ${bullet} Select provider:      ${chalk.dim('opencode-go-proxy')}`);
-  console.log(`  ${bullet} Or set as default:    ${chalk.dim('"model": "opencode-go-proxy/glm-5"')}`);
+  console.log(`  ${bullet} Select provider:      ${chalk.dim('saros-proxy')}`);
+  console.log(`  ${bullet} Or set as default:    ${chalk.dim('"model": "saros-proxy/glm-5"')}`);
   console.log('');
   log.step('Manage');
   console.log(`  ${bullet} Re-run setup anytime: ${chalk.dim('$ npm run setup')}`);
@@ -133,8 +126,11 @@ export function printNextSteps(port: number): void {
 export function listWorkspaces(workspaceIds: string[]): void {
   info('Workspaces found in Firefox history:');
   for (let w = 0; w < workspaceIds.length; w++) {
-    console.log(`  ${chalk.cyan(`${w + 1})`)} ${workspaceIds[w]}`);
-    console.log(`     ${chalk.dim(`https://opencode.ai/workspace/${workspaceIds[w]}/go`)}`);
+    const number = `${w + 1})`;
+    const ws = workspaceIds[w]!;
+    const url = `https://opencode.ai/workspace/${ws}/go`;
+    console.log(`  ${chalk.cyan(number)} ${ws}`);
+    console.log(`     ${chalk.dim(url)}`);
   }
 }
 
@@ -147,5 +143,5 @@ export function assertNotCancelled<T>(value: T | symbol): T {
     outro(chalk.red('Setup cancelled.'));
     process.exit(1);
   }
-  return value as T;
+  return value;
 }
