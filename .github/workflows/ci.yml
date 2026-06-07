@@ -2,9 +2,9 @@ name: CI
 
 on:
   push:
-    branches: [main]
+    branches: [master]
   pull_request:
-    branches: [main]
+    branches: [master]
 
 jobs:
   test:
@@ -30,7 +30,7 @@ jobs:
         run: npm run lint
 
       - name: Run unit tests
-        run: npm test
+        run: npx vitest run --coverage
 
       - name: Upload coverage to Codecov
         uses: codecov/codecov-action@v5
