@@ -55,7 +55,8 @@ export function decryptKey(encrypted: string, masterKey: string): string {
     const decrypted = Buffer.concat([decipher.update(ciphertext), decipher.final()]);
     return decrypted.toString('utf8');
   } catch (err) {
-    throw new Error('Failed to decrypt API key — wrong encryption key or corrupted data');
+    const message = err instanceof Error ? err.message : String(err);
+    throw new Error(`Failed to decrypt key: ${message}`);
   }
 }
 

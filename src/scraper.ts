@@ -1,9 +1,10 @@
 /**
- * scraper.ts — Single-shot HTTP fetch + parse wrapper for the OpenCode-Go dashboard.
+ * scraper.ts — Dashboard scraper; Saros uses this to predict account exhaustion.
  *
- * Fetches the dashboard page for a given workspace and parses usage percentages
- * using the dashboard-parser module. Designed for one-shot use — no timers,
- * no intervals, no retries.
+ * Provides both one-shot scraping (scrapeDashboard) and a background scraper
+ * that periodically fetches dashboard pages for all configured accounts.
+ * Uses recursive setTimeout (not setInterval) with AbortController to prevent
+ * overlapping cycles and to support clean shutdown.
  */
 
 import { parseAllUsage, type UsageData } from './dashboard-parser.js';
@@ -31,7 +32,7 @@ export interface ScrapeResult {
 // In-memory usage store
 // ---------------------------------------------------------------------------
 
-export interface AccountUsage {
+interface AccountUsage {
   usage: UsageData;
   lastScrapedAt: Date;
   lastError?: string;
@@ -41,7 +42,10 @@ export interface AccountUsage {
 const usageStore = new Map<string, AccountUsage>();
 
 /** Active timer handle, if any */
-let scraperTimer: ReturnType<typeof setInterval> | null = null;
+let scraperTimer: ReturnType<typeof setTimeout> | null = null;
+
+/** AbortController for the current scrape cycle, if any */
+let abortController: AbortController | null = null;
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -51,6 +55,33 @@ const FIREFOX_UA =
   'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:136.0) Gecko/20100101 Firefox/136.0';
 
 const DEFAULT_TIMEOUT_MS = 15_000;
+
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+
+/**
+ * Combine multiple AbortSignals into one — fires when any of them fire.
+ * Cleans up listeners when any signal fires or when the resulting signal
+ * is garbage collected.
+ */
+function anySignal(signals: AbortSignal[]): AbortSignal {
+  const controller = new AbortController();
+
+  for (const signal of signals) {
+    if (signal.aborted) {
+      controller.abort(signal.reason);
+      return controller.signal;
+    }
+    signal.addEventListener(
+      'abort',
+      () => controller.abort(signal.reason),
+      { once: true },
+    );
+  }
+
+  return controller.signal;
+}
 
 // ---------------------------------------------------------------------------
 // Public API
@@ -72,7 +103,7 @@ const DEFAULT_TIMEOUT_MS = 15_000;
 export async function scrapeDashboard(
   workspaceId: string,
   authCookie: string,
-  options?: { timeoutMs?: number },
+  options?: { timeoutMs?: number; signal?: AbortSignal },
 ): Promise<ScrapeResult> {
   const start = performance.now();
   const timeoutMs = options?.timeoutMs ?? DEFAULT_TIMEOUT_MS;
@@ -80,18 +111,25 @@ export async function scrapeDashboard(
   const url = `https://opencode.ai/workspace/${encodeURIComponent(workspaceId)}/go`;
 
   try {
+    // Combine external signal with timeout via race
+    const externalSignal = options?.signal;
+    const timeoutSignal = AbortSignal.timeout(timeoutMs);
+    const combinedSignal = externalSignal
+      ? anySignal([externalSignal, timeoutSignal])
+      : timeoutSignal;
+
     const response = await fetch(url, {
       headers: {
         Cookie: `auth=${authCookie}`,
         'User-Agent': FIREFOX_UA,
       },
-      signal: AbortSignal.timeout(timeoutMs),
+      signal: combinedSignal,
     });
 
     const httpStatus = response.status;
     const durationMs = Math.round(performance.now() - start);
 
-    // Handle non-2xx responses
+    // Classify HTTP error status into a user-facing error message
     if (!response.ok) {
       let error: string;
       if (httpStatus === 401 || httpStatus === 403) {
@@ -132,6 +170,15 @@ export async function scrapeDashboard(
       };
     }
 
+    // Intentional abort (from our AbortController during stop)
+    if (err instanceof DOMException && err.name === 'AbortError') {
+      return {
+        success: false,
+        error: 'Aborted',
+        durationMs,
+      };
+    }
+
     // Network or other errors
     const message =
       err instanceof Error ? err.message : 'Unknown fetch error';
@@ -149,18 +196,18 @@ export async function scrapeDashboard(
 // ---------------------------------------------------------------------------
 
 /**
- * Get the latest usage data for a workspace.
- * Returns null if no data has been scraped yet.
- */
-export function getUsageForAccount(workspaceId: string): AccountUsage | null {
-  return usageStore.get(workspaceId) ?? null;
-}
-
-/**
  * Get all usage data (for health endpoint).
  */
 export function getAllUsage(): Map<string, AccountUsage> {
-  return usageStore;
+  return new Map(usageStore);
+}
+
+/**
+ * Clear the in-memory usage store (for testing).
+ * Production code should NOT call this unless resetting state is intentional.
+ */
+export function clearUsageStore(): void {
+  usageStore.clear();
 }
 
 // ---------------------------------------------------------------------------
@@ -170,8 +217,8 @@ export function getAllUsage(): Map<string, AccountUsage> {
 /**
  * Scrape a single account and update the store.
  */
-async function scrapeAndStore(account: ScrapingAccount): Promise<void> {
-  const result = await scrapeDashboard(account.workspaceId, account.authCookie);
+async function scrapeAndStore(account: ScrapingAccount, signal?: AbortSignal): Promise<void> {
+  const result = await scrapeDashboard(account.workspaceId, account.authCookie, { signal });
 
   if (result.success && result.usage) {
     usageStore.set(account.workspaceId, {
@@ -198,61 +245,78 @@ async function scrapeAndStore(account: ScrapingAccount): Promise<void> {
     );
   }
 
-  // Handle non-2xx HTTP responses silently — we already logged and stored the error
+  // Error already logged and stored above — no further action needed
 }
 
 /**
  * Run a full scrape cycle across all configured accounts sequentially.
+ * Checks the abort signal between accounts and returns early if aborted.
  */
-async function runScrapeCycle(accounts: ScrapingAccount[]): Promise<void> {
+async function runScrapeCycle(
+  accounts: ScrapingAccount[],
+  signal?: AbortSignal,
+): Promise<void> {
   for (const account of accounts) {
-    await scrapeAndStore(account);
+    if (signal?.aborted) return;
+    await scrapeAndStore(account, signal);
   }
 }
 
 /**
- * Start the background scraper timer.
- * Scrapes all configured accounts every intervalMs.
- * If already running, stops the previous timer first.
+ * Start the background scraper.
+ * Scrapes all configured accounts every intervalMs using recursive setTimeout,
+ * preventing overlapping cycles. If already running, aborts the previous cycle
+ * and clears its timer first.
  */
 export function startScraper(accounts: ScrapingAccount[], intervalMs: number): void {
-  // Stop any existing timer first (idempotent)
+  // Cancel any in-flight cycle and clear any existing timer
   stopScraper();
 
-  // Do an immediate first scrape (don't wait for first interval)
-  runScrapeCycle(accounts).catch((err) => {
+  const controller = new AbortController();
+  abortController = controller;
+
+  const schedule = async (): Promise<void> => {
+    if (controller.signal.aborted) return;
+    await runScrapeCycle(accounts, controller.signal).catch((err) => {
+      logger.error({ err }, 'Scrape cycle failed');
+    });
+    if (controller.signal.aborted) return;
+    scraperTimer = setTimeout(schedule, intervalMs);
+
+    // Allow the process to exit even if the timer is still running
+    if (scraperTimer && typeof scraperTimer === 'object' && 'unref' in scraperTimer) {
+      scraperTimer.unref();
+    }
+  };
+
+  // Start first cycle immediately
+  schedule().catch((err) => {
     logger.error({ err }, 'Initial scrape cycle failed');
   });
-
-  // Schedule subsequent scrapes
-  scraperTimer = setInterval(() => {
-    runScrapeCycle(accounts).catch((err) => {
-      logger.error({ err }, 'Scheduled scrape cycle failed');
-    });
-  }, intervalMs);
-
-  // Allow the process to exit even if the timer is still running
-  if (scraperTimer && typeof scraperTimer === 'object' && 'unref' in scraperTimer) {
-    scraperTimer.unref();
-  }
 
   logger.info('Background scraper started (interval: %d ms, accounts: %d)', intervalMs, accounts.length);
 }
 
 /**
- * Stop the background scraper timer.
+ * Stop the background scraper.
+ * Aborts any in-flight scrape cycle and clears the scheduled timer.
  */
 export function stopScraper(): void {
-  if (scraperTimer !== null) {
-    clearInterval(scraperTimer);
-    scraperTimer = null;
-    logger.info('Background scraper stopped');
+  if (abortController !== null) {
+    abortController.abort();
+    abortController = null;
   }
+  if (scraperTimer !== null) {
+    clearTimeout(scraperTimer);
+    scraperTimer = null;
+  }
+  // Only log if we actually stopped something — allows idempotent calls from startScraper
+  // without spurious "stopped" messages when nothing was running.
 }
 
 /**
- * Check if the scraper is currently running.
+ * Check if the scraper is currently running (either a cycle in flight or a timer scheduled).
  */
 export function isScraperRunning(): boolean {
-  return scraperTimer !== null;
+  return scraperTimer !== null || abortController !== null;
 }

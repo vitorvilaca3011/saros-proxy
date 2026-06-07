@@ -1,5 +1,5 @@
 /**
- * proxy-logic.ts — Pure production logic module for Multi-Account OpenCode-Go Proxy
+ * proxy-logic.ts — Pure production logic. Saros picks the best key per request.
  *
  * No I/O, no console.log, no HTTP — completely portable and testable.
  *
@@ -10,11 +10,13 @@
  *   C4. Request-scoped key tracking (activeRequests map)
  */
 
+import { DEFAULT_CIRCUIT_BREAKER_COOLDOWN_MS } from './constants.js';
+
 // ---------------------------------------------------------------------------
 // Interfaces & Types
 // ---------------------------------------------------------------------------
 
-export interface ApiKey {
+interface ApiKey {
   label: string;
   key: string;
   enabled: boolean;
@@ -30,7 +32,7 @@ export interface KeySnapshot {
 }
 
 /** Tracks a single HTTP request's key usage through its lifecycle. */
-export interface RequestContext {
+interface RequestContext {
   requestId: string;
   triedKeys: string[]; // keys already attempted for this request (for failover)
   currentKey: KeySnapshot | null; // the key currently in use by this request
@@ -92,7 +94,7 @@ export function createProxyState(
     })),
     currentIndex: 0,
     circuitBreakerThreshold: options?.circuitBreakerThreshold ?? 3,
-    circuitBreakerCooldownMs: options?.circuitBreakerCooldownMs ?? 60_000,
+    circuitBreakerCooldownMs: options?.circuitBreakerCooldownMs ?? DEFAULT_CIRCUIT_BREAKER_COOLDOWN_MS,
     activeRequests: new Map(),
   };
 }
@@ -141,7 +143,7 @@ function isKeyAvailable(state: ProxyState, key: ApiKey): boolean {
  * @param threshold - The usage threshold (1-100)
  * @returns true if the key is available (usage below threshold or no data)
  */
-export function isKeyAvailableByUsage(
+function isKeyAvailableByUsage(
   usage: UsageInfo | null,
   threshold: number,
 ): boolean {
@@ -194,14 +196,64 @@ function findFallbackKey(
 }
 
 /**
- * Internal: return the set of key labels that are currently booked
- * (present in *any* active request's triedKeys — C4 double-booking avoidance).
+ * Internal: apply usage-gating to an exclusion set, then attempt to find
+ * the next available key.  Falls back to findFallbackKey if all
+ * circuit-breaker-available keys are over the usage threshold.
+ *
+ * Shared by selectKeyForRequest and failoverRequest — extracts the ~90%
+ * identical usage-gating logic that was previously copy-pasted (PR-5).
+ *
+ * @param excludeLabels  Mutable set; usage-over-threshold labels are added.
+ * @returns A key snapshot, or null if no key is available.
+ */
+function selectKeyWithUsageFallback(
+  state: ProxyState,
+  excludeLabels: Set<string>,
+  options?: KeySelectionOptions,
+): KeySnapshot | null {
+  // Exclude keys whose account usage exceeds the threshold
+  if (options?.usageMap && options?.usageThreshold !== undefined) {
+    const threshold = options.usageThreshold;
+    for (const key of state.keys) {
+      const usage = options.usageMap.get(key.label) ?? null;
+      if (!isKeyAvailableByUsage(usage, threshold)) {
+        excludeLabels.add(key.label);
+      }
+    }
+  }
+
+  let snapshot = findNextKey(state, excludeLabels);
+
+  // Fallback: all circuit-breaker-available keys are over threshold
+  if (!snapshot && options?.usageMap) {
+    const fallback = findFallbackKey(state, options.usageMap);
+    if (fallback) {
+      const idx = state.keys.findIndex((k) => k.label === fallback.label);
+      if (idx !== -1) {
+        state.currentIndex = (idx + 1) % state.keys.length;
+      }
+      snapshot = fallback;
+    }
+  }
+
+  return snapshot;
+}
+
+/**
+ * Internal: return the set of key labels that are currently *in use* by
+ * active requests (C4 double-booking avoidance).
+ *
+ * Previously this collected ALL ctx.triedKeys, which meant an abandoned key
+ * (one a request failed over from) stayed globally excluded even though
+ * nobody was using it.  Now it only tracks the key each request is actively
+ * using (ctx.currentKey).  Tried keys are still excluded per-request via
+ * the per-request excludeLabels in selectKeyForRequest/failoverRequest.
  */
 function buildBookedLabels(state: ProxyState): Set<string> {
   const booked = new Set<string>();
   for (const [, ctx] of state.activeRequests) {
-    for (const label of ctx.triedKeys) {
-      booked.add(label);
+    if (ctx.currentKey) {
+      booked.add(ctx.currentKey.label);
     }
   }
   return booked;
@@ -262,37 +314,13 @@ export function selectKeyForRequest(
   state.activeRequests.set(requestId, ctx);
 
   const excludeLabels = new Set(ctx.triedKeys);
-  // Avoid double-booking: don't assign a key that another request already tried
+  // Avoid double-booking: don't assign a key that another request already has
   const booked = buildBookedLabels(state);
   for (const label of booked) {
     excludeLabels.add(label);
   }
 
-  // Exclude keys whose account usage exceeds the threshold
-  if (options?.usageMap && options?.usageThreshold !== undefined) {
-    const threshold = options.usageThreshold;
-    for (const key of state.keys) {
-      const usage = options.usageMap!.get(key.label) ?? null;
-      if (!isKeyAvailableByUsage(usage, threshold)) {
-        excludeLabels.add(key.label);
-      }
-    }
-  }
-
-  let snapshot = findNextKey(state, excludeLabels);
-
-  // Fallback: all circuit-breaker-available keys are over threshold
-  if (!snapshot && options?.usageMap) {
-    const fallback = findFallbackKey(state, options.usageMap);
-    if (fallback) {
-      // Advance round-robin past the selected fallback key
-      const idx = state.keys.findIndex((k) => k.label === fallback.label);
-      if (idx !== -1) {
-        state.currentIndex = (idx + 1) % state.keys.length;
-      }
-      snapshot = fallback;
-    }
-  }
+  const snapshot = selectKeyWithUsageFallback(state, excludeLabels, options);
 
   ctx.currentKey = snapshot;
   return snapshot;
@@ -324,30 +352,7 @@ export function failoverRequest(
     excludeLabels.add(label);
   }
 
-  // Exclude keys whose account usage exceeds the threshold
-  if (options?.usageMap && options?.usageThreshold !== undefined) {
-    const threshold = options.usageThreshold;
-    for (const key of state.keys) {
-      const usage = options.usageMap!.get(key.label) ?? null;
-      if (!isKeyAvailableByUsage(usage, threshold)) {
-        excludeLabels.add(key.label);
-      }
-    }
-  }
-
-  let snapshot = findNextKey(state, excludeLabels);
-
-  // Fallback: all circuit-breaker-available keys are over threshold
-  if (!snapshot && options?.usageMap) {
-    const fallback = findFallbackKey(state, options.usageMap);
-    if (fallback) {
-      const idx = state.keys.findIndex((k) => k.label === fallback.label);
-      if (idx !== -1) {
-        state.currentIndex = (idx + 1) % state.keys.length;
-      }
-      snapshot = fallback;
-    }
-  }
+  const snapshot = selectKeyWithUsageFallback(state, excludeLabels, options);
 
   ctx.currentKey = snapshot;
   return snapshot;
@@ -420,7 +425,7 @@ export function markKeySucceeded(state: ProxyState, keyLabel: string): void {
 /**
  * Manually re-enable a previously disabled key.
  */
-export function reenableKey(state: ProxyState, keyLabel: string): void {
+function reenableKey(state: ProxyState, keyLabel: string): void {
   const key = state.keys.find((k) => k.label === keyLabel);
   if (!key) return;
   key.enabled = true;
@@ -437,7 +442,7 @@ export function reenableKey(state: ProxyState, keyLabel: string): void {
  * A key that has passed its cooldown window is considered no longer disabled
  * (lazy re-enable happens on next selection, but this query reflects that).
  */
-export function isKeyDisabled(state: ProxyState, keyLabel: string): boolean {
+function isKeyDisabled(state: ProxyState, keyLabel: string): boolean {
   const key = state.keys.find((k) => k.label === keyLabel);
   if (!key) return true;
 
@@ -483,18 +488,4 @@ export function classifyHttpError(status: number, _body?: string): ErrorType {
   return 'ServerFault';
 }
 
-// ---------------------------------------------------------------------------
-// Legacy (deprecated — prefer request-scoped API above)
-// ---------------------------------------------------------------------------
 
-/**
- * Legacy round-robin key selection.
- *
- * Picks the next enabled key that is under the circuit-breaker threshold
- * (or past its cooldown window).  Returns null when all keys are unavailable.
- *
- * @deprecated Use selectKeyForRequest / failoverRequest instead.
- */
-export function selectNextKey(state: ProxyState): KeySnapshot | null {
-  return findNextKey(state, new Set());
-}

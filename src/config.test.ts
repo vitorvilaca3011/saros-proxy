@@ -1213,36 +1213,36 @@ describe('getDefaultConfigPath', () => {
     process.env = { ...originalEnv };
   });
 
-  it('returns path ending with opencode-go-proxy/config.yaml', () => {
+  it('returns path ending with saros/config.yaml', () => {
     const result = getDefaultConfigPath();
-    expect(result).toMatch(/opencode-go-proxy[\\/]config\.yaml$/);
+    expect(result).toMatch(/saros[\\/]config\.yaml$/);
   });
 
   if (process.platform === 'win32') {
     it('uses LOCALAPPDATA when available on Windows', () => {
       process.env.LOCALAPPDATA = 'C:\\Custom\\Path';
       const result = getDefaultConfigPath();
-      expect(result).toBe('C:\\Custom\\Path\\opencode-go-proxy\\config.yaml');
+      expect(result).toBe('C:\\Custom\\Path\\saros\\config.yaml');
     });
 
     it('falls back to homedir when LOCALAPPDATA missing on Windows', () => {
       delete process.env.LOCALAPPDATA;
       const result = getDefaultConfigPath();
       // os.homedir() on Windows uses the Windows API, so just verify suffix
-      expect(result).toMatch(/\\opencode-go-proxy\\config\.yaml$/);
+      expect(result).toMatch(/\\saros\\config\.yaml$/);
     });
   } else {
     it('uses XDG_CONFIG_HOME when available on Unix', () => {
       process.env.XDG_CONFIG_HOME = '/custom/config';
       const result = getDefaultConfigPath();
-      expect(result).toBe('/custom/config/opencode-go-proxy/config.yaml');
+      expect(result).toBe('/custom/config/saros/config.yaml');
     });
 
     it('falls back to ~/.config when XDG_CONFIG_HOME missing on Unix', () => {
       delete process.env.XDG_CONFIG_HOME;
       process.env.HOME = '/home/test';
       const result = getDefaultConfigPath();
-      expect(result).toBe('/home/test/.config/opencode-go-proxy/config.yaml');
+      expect(result).toBe('/home/test/.config/saros/config.yaml');
     });
   }
 });

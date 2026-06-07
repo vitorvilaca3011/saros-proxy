@@ -2,7 +2,7 @@
 
 ## Project Overview
 
-**opencode-go-proxy** — Multi-account proxy for OpenCode-Go API with key failover, circuit breaker, rate limiting, and streaming support. Built with Hono + @hono/node-server.
+**saros-proxy** — Predictive multi-account proxy for the OpenCode-Go API. Cycles between accounts before they exhaust.
 
 - **Language:** TypeScript (ESM, `"type": "module"`)
 - **Runtime:** Node.js >= 20

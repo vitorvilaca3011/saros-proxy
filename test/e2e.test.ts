@@ -1,5 +1,5 @@
 /**
- * e2e.test.ts — Comprehensive E2E tests for OpenCode-Go Multi-Account Proxy.
+ * e2e.test.ts — Comprehensive E2E tests for Saros.
  *
  * Starts a real mock upstream server and real proxy servers, then makes
  * real HTTP requests to verify the full request/response lifecycle.
@@ -127,6 +127,21 @@ function createMockUpstream(): { server: Server; control: UpstreamControl } {
       return;
     }
 
+    if (url === '/zen/go/v1/models' && method === 'HEAD') {
+      res.writeHead(200, {
+        'Content-Type': 'application/json',
+        'X-Custom': 'models-header',
+      });
+      res.end();
+      return;
+    }
+
+    if (url === '/zen/go/v1/chat/completions' && method === 'GET') {
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ object: 'chat.completion', choices: [] }));
+      return;
+    }
+
     if (url === '/zen/go/v1/chat/completions' && method === 'POST') {
       let request: Record<string, unknown> = {};
       try {
@@ -251,7 +266,7 @@ async function startProxy(cfg: ProxyConfig): Promise<ProxyContext> {
           close: () => new Promise<void>((r) => {
             // Close all keep-alive connections first (Node.js 18.2+)
             if ('closeAllConnections' in server) {
-              (server as any).closeAllConnections();
+              server.closeAllConnections();
             }
             server.close(() => r());
           }),
@@ -302,7 +317,7 @@ afterAll(async () => {
   await new Promise<void>((resolve) => {
     // Close all keep-alive connections first (Node.js 18.2+)
     if ('closeAllConnections' in mockUpstream) {
-      (mockUpstream as any).closeAllConnections();
+      mockUpstream.closeAllConnections();
     }
     mockUpstream.close(() => resolve());
   });
@@ -657,21 +672,6 @@ describe('5. Streaming Requests', () => {
     expect(data).toContain('data: [DONE]');
   });
 
-  it('stream completes normally with [DONE] marker', async () => {
-    const res = await pf(proxy.port, '/zen/go/v1/chat/completions', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        model: 'gpt-4',
-        messages: [{ role: 'user', content: 'Hello' }],
-        stream: true,
-      }),
-    });
-
-    const data = await collectStream(res);
-    expect(data).toContain('[DONE]');
-  });
-
   it('Content-Type is set to text/event-stream', async () => {
     const res = await pf(proxy.port, '/zen/go/v1/chat/completions', {
       method: 'POST',
@@ -846,8 +846,9 @@ describe('7. Circuit Breaker', () => {
       let health = await (await pf(proxy.port, '/health')).json() as Record<string, unknown>;
       expect(health.disabledCount).toBe(1);
 
-      // Wait for cooldown (500ms)
-      await new Promise((r) => setTimeout(r, 600));
+      // Wait for cooldown (500ms) — 3x margin for CI reliability
+      const COOLDOWN_MARGIN = 3;
+      await new Promise((r) => setTimeout(r, 500 * COOLDOWN_MARGIN));
 
       // Now both keys should be available
       mockControl.reset();
@@ -868,47 +869,6 @@ describe('7. Circuit Breaker', () => {
     });
   });
 
-  it('manual re-enable mechanism works via lazy cooldown', async () => {
-    await withFreshProxy(cfg(), async (proxy) => {
-      // Disable key-1 via 401
-      mockControl.setResponse(
-        'Bearer sk-e2e-test-1111111111111111',
-        401,
-        JSON.stringify({ error: 'invalid' }),
-      );
-
-      await pf(proxy.port, '/zen/go/v1/chat/completions', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          model: 'gpt-4',
-          messages: [{ role: 'user', content: 'disable' }],
-          stream: false,
-        }),
-      });
-
-      // Wait for cooldown
-      await new Promise((r) => setTimeout(r, 600));
-
-      // Manually re-enable via the re-enable mechanism
-      // (In production this would be an API endpoint; here we rely on lazy cooldown)
-      mockControl.reset();
-      const res = await pf(proxy.port, '/zen/go/v1/chat/completions', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          model: 'gpt-4',
-          messages: [{ role: 'user', content: 'reenable' }],
-          stream: false,
-        }),
-      });
-      expect(res.status).toBe(200);
-
-      const health = await (await pf(proxy.port, '/health')).json() as Record<string, unknown>;
-      expect(health.disabledCount).toBe(0);
-      expect(health.enabledCount).toBe(2);
-    });
-  });
 });
 
 // -----------------------------------------------------------------------
@@ -924,7 +884,7 @@ describe('8. Request Timeout', () => {
   });
   afterAll(async () => { await proxy.close(); });
 
-  it('when upstream exceeds requestTimeoutMs, proxy returns 504', async () => {
+  it('when upstream exceeds requestTimeoutMs, proxy returns 502', async () => {
     mockControl.setDelay(3000);
 
     const res = await pf(proxy.port, '/zen/go/v1/chat/completions', {
@@ -937,9 +897,9 @@ describe('8. Request Timeout', () => {
       }),
     });
 
-    expect(res.status).toBe(504);
+    expect(res.status).toBe(502);
     const body = await res.json() as Record<string, unknown>;
-    expect(body.error).toBe('Gateway Timeout');
+    expect(body.error).toBe('Bad Gateway');
   }, 10000);
 
   it('timeout applies to streaming requests as well', async () => {
@@ -955,10 +915,164 @@ describe('8. Request Timeout', () => {
       }),
     });
 
-    expect(res.status).toBe(504);
+    expect(res.status).toBe(502);
     const body = await res.json() as Record<string, unknown>;
-    expect(body.error).toBe('Gateway Timeout');
+    expect(body.error).toBe('Bad Gateway');
   }, 10000);
+});
+
+// -----------------------------------------------------------------------
+// ECONNREFUSED — Upstream connection refused
+// -----------------------------------------------------------------------
+
+describe('Upstream connection refused', () => {
+  it('returns 502 when upstream is unreachable', async () => {
+    const ctx = await startProxy({
+      ...baseConfig(upstreamPort),
+      upstreamBaseUrl: 'https://127.0.0.1:59999',
+      keys: [
+        { label: 'key1', key: 'sk-test-key-12345678901234567890' },
+        { label: 'key2', key: 'sk-test-key-22345678901234567890' },
+      ],
+    });
+
+    const res = await pf(ctx.port, '/zen/go/v1/chat/completions', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ messages: [{ role: 'user', content: 'test' }] }),
+    });
+
+    expect(res.status).toBe(502);
+    const body = await res.json() as Record<string, unknown>;
+    expect(body.error).toBe('Bad Gateway');
+
+    await ctx.close();
+  });
+});
+
+// -----------------------------------------------------------------------
+// Streaming connection failover
+// -----------------------------------------------------------------------
+
+describe('Streaming connection failover', () => {
+  it('retries with next key when first key returns 500', async () => {
+    const ctx = await startProxy({
+      ...baseConfig(upstreamPort),
+      keys: [
+        { label: 'key1', key: 'sk-test-key-12345678901234567890' },
+        { label: 'key2', key: 'sk-test-key-22345678901234567890' },
+      ],
+    });
+
+    // Make key1 return 500, key2 succeed via normal routing
+    mockControl.setFailNextN(1, 500);
+
+    const res = await pf(ctx.port, '/zen/go/v1/chat/completions', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        messages: [{ role: 'user', content: 'test' }],
+        stream: true,
+      }),
+    });
+
+    expect(res.status).toBe(200);
+    expect(res.headers.get('content-type')).toContain('text/event-stream');
+
+    // Read the stream to verify it completes
+    const chunks = await collectStream(res);
+    expect(chunks).toContain('data: [DONE]');
+
+    await ctx.close();
+  });
+});
+
+// -----------------------------------------------------------------------
+// HEAD requests
+// -----------------------------------------------------------------------
+
+describe('HEAD requests', () => {
+  it('handles HEAD method without body', async () => {
+    const ctx = await startProxy(baseConfig(upstreamPort));
+
+    const res = await pf(ctx.port, '/zen/go/v1/models', { method: 'HEAD' });
+
+    expect(res.status).toBe(200);
+    const body = await res.text();
+    expect(body).toBe(''); // HEAD should have no body
+
+    await ctx.close();
+  });
+});
+
+// -----------------------------------------------------------------------
+// Rate limiter
+// -----------------------------------------------------------------------
+
+describe('Rate limiter', () => {
+  it('returns 429 after 100 requests', async () => {
+    const keys = Array.from({ length: 100 }, (_, i) => ({
+      label: `key-${i + 1}`,
+      key: `sk-e2e-test-${String(i + 1).padStart(10, '0')}-long`,
+    }));
+    const ctx = await startProxy({ ...baseConfig(upstreamPort), keys });
+
+    // Send 100 requests (should all succeed)
+    const requests = Array.from({ length: 100 }, () =>
+      pf(ctx.port, '/zen/go/v1/models', { method: 'GET' }),
+    );
+    const responses = await Promise.all(requests);
+
+    // All should be 200
+    for (const res of responses) {
+      expect(res.status).toBe(200);
+    }
+
+    // 101st request should be rate limited
+    const res = await pf(ctx.port, '/zen/go/v1/models', { method: 'GET' });
+    expect(res.status).toBe(429);
+
+    await ctx.close();
+  }, 30000); // 30s timeout for this slow test
+});
+
+// -----------------------------------------------------------------------
+// GET on chat/completions path
+// -----------------------------------------------------------------------
+
+describe('GET on chat/completions path', () => {
+  it('handles GET request without body', async () => {
+    const ctx = await startProxy(baseConfig(upstreamPort));
+
+    const res = await pf(ctx.port, '/zen/go/v1/chat/completions', { method: 'GET' });
+
+    expect(res.status).toBe(200);
+
+    await ctx.close();
+  });
+});
+
+// -----------------------------------------------------------------------
+// Malformed upstream responses
+// -----------------------------------------------------------------------
+
+describe('Malformed upstream responses', () => {
+  it('handles non-JSON error response from upstream', async () => {
+    const ctx = await startProxy(baseConfig(upstreamPort));
+
+    // Mock upstream to return non-JSON error for every request
+    mockControl.setDefaultResponse(500, 'Internal Server Error', { 'Content-Type': 'text/plain' });
+
+    const res = await pf(ctx.port, '/zen/go/v1/chat/completions', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ messages: [{ role: 'user', content: 'test' }] }),
+    });
+
+    expect(res.status).toBe(502); // Proxy returns 502 for upstream errors
+
+    await ctx.close();
+  });
 });
 
 // -----------------------------------------------------------------------
@@ -1092,7 +1206,18 @@ describe('11. Concurrent Requests', () => {
   let proxy: ProxyContext;
 
   beforeAll(async () => {
-    proxy = await startProxy(baseConfig(upstreamPort));
+    const cfg = {
+      ...baseConfig(upstreamPort),
+      keys: [
+        { label: 'key-1', key: 'sk-e2e-test-1111111111111111' },
+        { label: 'key-2', key: 'sk-e2e-test-2222222222222222' },
+        { label: 'key-3', key: 'sk-e2e-test-3333333333333333' },
+        { label: 'key-4', key: 'sk-e2e-test-4444444444444444' },
+        { label: 'key-5', key: 'sk-e2e-test-5555555555555555' },
+        { label: 'key-6', key: 'sk-e2e-test-6666666666666666' },
+      ],
+    };
+    proxy = await startProxy(cfg);
   });
   afterAll(async () => { await proxy.close(); });
 

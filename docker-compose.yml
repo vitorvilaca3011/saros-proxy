@@ -5,7 +5,7 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
-    container_name: opencode-proxy
+    container_name: saros
     ports:
       - "3000:3000"
     volumes:
@@ -25,7 +25,7 @@ services:
       # - LOG_LEVEL=info
     restart: unless-stopped
     networks:
-      - opencode-net
+      - saros-net
 
   # ── Test service ─────────────────────────────────────────────────────────
   # Runs the test suite inside a clean Linux container.
@@ -35,7 +35,7 @@ services:
       context: .
       dockerfile: Dockerfile
       target: build
-    container_name: opencode-proxy-test
+    container_name: saros-test
     volumes:
       # Mount source so tests reflect current code without rebuild
       - ./src:/app/src:ro
@@ -46,10 +46,10 @@ services:
       - CI=true
     command: ["npx", "vitest", "run", "--reporter=verbose"]
     networks:
-      - opencode-net
+      - saros-net
     profiles:
       - test
 
 networks:
-  opencode-net:
+  saros-net:
     driver: bridge

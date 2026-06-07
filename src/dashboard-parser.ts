@@ -1,5 +1,5 @@
 /**
- * dashboard-parser.ts — Parse usage percentages from OpenCode-Go dashboard HTML.
+ * dashboard-parser.ts — Parse usage percentages from the OpenCode-Go dashboard HTML.
  *
  * The dashboard returns SolidJS SSR hydration data with usage percentages
  * for three time windows: rolling (~5h), weekly, and monthly.
@@ -118,15 +118,4 @@ export function parseUsagePercent(html: string, window: 'rolling' | 'weekly' | '
   return null;
 }
 
-/**
- * Check if the given HTML looks like a valid OpenCode-Go dashboard page.
- *
- * Verifies the presence of SolidJS SSR hydration markers that indicate
- * usage data was rendered server-side.
- *
- * @param html — Raw HTML to inspect.
- * @returns `true` if the HTML contains the expected hydration markers.
- */
-export function isDashboardHtml(html: string): boolean {
-  return html.includes('rollingUsage') && html.includes('$R[');
-}
+

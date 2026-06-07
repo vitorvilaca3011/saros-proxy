@@ -83,7 +83,7 @@ export function updateOpencodeConfig(
     // Build provider configuration
     const providerConfig = {
       npm: '@ai-sdk/openai-compatible',
-      name: 'OpenCode-Go Proxy',
+      name: 'Saros',
       options: {
         baseURL: `http://127.0.0.1:${port}/zen/go/v1`,
         apiKey: 'not-used',
@@ -95,7 +95,7 @@ export function updateOpencodeConfig(
     const existingProvider = (config.provider as Record<string, unknown> | undefined) ?? {};
     config.provider = {
       ...existingProvider,
-      'opencode-go-proxy': providerConfig,
+      'saros-proxy': providerConfig,
     };
 
     // Write updated config
@@ -136,17 +136,17 @@ export function updateOpencodeConfig(
 export function generateManualConfigSnippet(port: number): string {
   const providerConfig = {
     npm: '@ai-sdk/openai-compatible',
-    name: 'OpenCode-Go Proxy',
-    options: {
-      baseURL: `http://127.0.0.1:${port}/zen/go/v1`,
-      apiKey: 'not-used',
-    },
-    models: OPENCODE_MODELS,
-  };
+      name: 'Saros',
+      options: {
+        baseURL: `http://127.0.0.1:${port}/zen/go/v1`,
+        apiKey: 'not-used',
+      },
+      models: OPENCODE_MODELS,
+    };
 
   return JSON.stringify({
     provider: {
-      'opencode-go-proxy': providerConfig,
+      'saros-proxy': providerConfig,
     },
   }, null, 2);
 }

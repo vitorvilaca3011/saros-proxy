@@ -1,8 +1,8 @@
-# Handoff — Usage-Based Account Switching for OpenCode-Go Proxy
+# Handoff — Usage-Based Account Switching for Saros
 
 ## Goal
 
-Add usage-based API key switching to the OpenCode-Go multi-account proxy:
+Add usage-based API key switching to Saros:
 - **Dashboard scraping** fetches per-key usage percentages (rolling~5h, weekly, monthly) from opencode.ai
 - **Usage gate** in key selection skips keys above a configurable threshold (default 50%)
 - **Fallback** when all keys exceed threshold picks the lowest-usage key

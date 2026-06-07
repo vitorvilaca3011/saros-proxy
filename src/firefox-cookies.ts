@@ -9,6 +9,7 @@ import { existsSync, copyFileSync, mkdirSync, rmSync, readdirSync } from 'node:f
 import { join } from 'node:path';
 import { homedir, tmpdir } from 'node:os';
 import { DatabaseSync } from 'node:sqlite';
+import { logger } from './logger.js';
 
 /**
  * Find the default Firefox profile directory on this system.
@@ -67,8 +68,7 @@ export function extractFirefoxAuthCookie(): { cookie: string | null; error?: str
   const cookiesDb = join(profileDir, 'cookies.sqlite');
   if (!existsSync(cookiesDb)) return { cookie: null, error: 'cookies.sqlite not found' };
 
-  const tempDir = mkdirSync(join(tmpdir(), 'proto-setup-' + Date.now()), { recursive: true });
-  if (!tempDir) return { cookie: null, error: 'Failed to create temp directory' };
+  const tempDir = mkdirSync(join(tmpdir(), 'proto-setup-' + Date.now()), { recursive: true }) as string;
   const tempDb = join(tempDir, 'cookies.sqlite');
 
   try {
@@ -129,8 +129,7 @@ export function extractFirefoxWorkspaceIds(): string[] {
   const placesDb = join(profileDir, 'places.sqlite');
   if (!existsSync(placesDb)) return [];
 
-  const tempDir = mkdirSync(join(tmpdir(), 'proto-setup-history-' + Date.now()), { recursive: true });
-  if (!tempDir) return [];
+  const tempDir = mkdirSync(join(tmpdir(), 'proto-setup-history-' + Date.now()), { recursive: true }) as string;
   const tempDb = join(tempDir, 'places.sqlite');
 
   try {
@@ -157,7 +156,7 @@ export function extractFirefoxWorkspaceIds(): string[] {
       const workspaceIds = new Set<string>();
 
       for (const row of rows) {
-        const match = row.url.match(/\/workspace\/(wrk_[A-Za-z0-9]+)/);
+        const match = row.url.match(/\/workspace\/(wrk_[A-Za-z0-9]+)/); 
         if (match) {
           workspaceIds.add(match[1]);
         }
@@ -167,7 +166,8 @@ export function extractFirefoxWorkspaceIds(): string[] {
     } finally {
       db.close();
     }
-  } catch {
+  } catch (err) {
+    logger.warn({ err }, 'Failed to extract Firefox workspace IDs');
     return [];
   } finally {
     rmSync(tempDir, { recursive: true, force: true });

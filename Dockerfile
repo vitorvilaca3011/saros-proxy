@@ -3,7 +3,7 @@
 # ===========================================================================
 # Build stage — installs all dependencies (including dev) and compiles TS
 # ===========================================================================
-FROM node:20-alpine AS build
+FROM node:22-alpine AS build
 
 WORKDIR /app
 
@@ -17,15 +17,15 @@ RUN npm run build
 # ===========================================================================
 # Production stage — minimal image with only production deps
 # ===========================================================================
-FROM node:20-alpine AS production
+FROM node:22-alpine AS production
 
 WORKDIR /app
 
 # Create non-root user for security
 RUN addgroup -S appgroup && adduser -S appuser -G appgroup
 
-# Copy production deps from build stage
-COPY --from=build /app/package.json ./
+# Copy production deps + lockfile from build stage
+COPY --from=build /app/package*.json ./
 RUN npm ci --omit=dev && npm cache clean --force
 
 # Copy compiled output

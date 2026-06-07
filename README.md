@@ -1,8 +1,33 @@
-# OpenCode-Go Multi-Account Proxy
+# Saros
 
-A lightweight, production-ready HTTP proxy for the OpenCode-Go API with **multi-key rotation**, **circuit-breaker failover**, **streaming pass-through**, and **security hardening**.
+[![CI](https://github.com/saros/saros/actions/workflows/ci.yml/badge.svg)](https://github.com/saros/saros/actions/workflows/ci.yml)
+[![npm version](https://img.shields.io/npm/v/saros-proxy.svg)](https://www.npmjs.com/package/saros-proxy)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+[![Node.js Version](https://img.shields.io/badge/node-%3E%3D%2022.0.0-brightgreen.svg)](https://nodejs.org/)
+
+Saros — like the eclipse cycle, this proxy predicts exhaustion and rotates accounts before they run out. Built for the OpenCode-Go API.
 
 Manage multiple OpenCode-Go API keys behind a single endpoint. When one key is rate-limited, revoked, or returns server errors, the proxy automatically fails over to the next healthy key — with zero downtime.
+
+> **Migrating from `opencode-go-proxy`?** If upgrading, re-run `saros-proxy setup` to migrate your config from `~/.config/opencode-go-proxy/` to `~/.config/saros/`.
+
+---
+
+## Contents
+
+- [Features](#features)
+- [Architecture](#architecture)
+- [Installation](#installation)
+- [Docker](#docker)
+- [Quick Start](#quick-start)
+- [Configuration Reference](#configuration-reference)
+- [Usage Examples](#usage-examples)
+- [OpenCode Integration](#opencode-integration)
+- [Troubleshooting](#troubleshooting)
+- [Development](#development)
+- [LLM Quick Reference](#llm-quick-reference)
+- [Security](#security)
+- [License](#license)
 
 ---
 
@@ -33,7 +58,7 @@ Manage multiple OpenCode-Go API keys behind a single endpoint. When one key is r
         │              │              │
         ▼              ▼              ▼
 ┌──────────────────────────────────────────────────────┐
-│               OpenCode-Go Proxy (:3000)               │
+│                    Saros (:3000)                     │
 │                                                       │
 │  ┌─────────────┐   ┌────────────┐   ┌─────────────┐  │
 │  │ Key Selector│──▶│ Circuit    │──▶│ Request     │  │
@@ -100,19 +125,19 @@ The proxy tracks which keys are **currently in use** by active requests. A key a
 ### From npm (when published)
 
 ```bash
-npm install -g opencode-go-proxy
+npm install -g saros-proxy
 ```
 
 ### From source
 
 ```bash
-git clone https://github.com/opencode-go/proxy.git
+git clone https://github.com/saros/saros.git
 cd proxy
 npm install
 npm run build
 ```
 
-> **Requirements**: Node.js >= 20.0.0
+> **Requirements**: Node.js >= 22.0.0
 
 ---
 
@@ -188,10 +213,10 @@ docker compose up proxy
 
 ```bash
 # Run the setup wizard — it will guide you through everything
-npx opencode-go-proxy setup
+npx saros-proxy setup
 
 # Or if installed globally:
-opencode-go-proxy setup
+saros-proxy setup
 ```
 
 The wizard will:
@@ -344,7 +369,7 @@ npx tsx src/index.ts
 ### Custom config path
 
 ```bash
-npx tsx src/index.ts --config /etc/opencode-proxy/config.yaml
+npx tsx src/index.ts --config /etc/saros/config.yaml
 ```
 
 ### Run as a background service (Linux)
@@ -365,9 +390,9 @@ Configure OpenCode to route API requests through the proxy. Create or edit your 
 {
   "$schema": "https://opencode.ai/config.json",
   "provider": {
-    "opencode-go-proxy": {
+    "saros-proxy": {
       "npm": "@ai-sdk/openai-compatible",
-      "name": "OpenCode-Go Proxy",
+      "name": "Saros",
       "options": {
         "baseURL": "http://127.0.0.1:3000/zen/go/v1",
         "apiKey": "not-used"
@@ -393,9 +418,9 @@ Configure OpenCode to route API requests through the proxy. Create or edit your 
 ```jsonc
 {
   "provider": {
-    "opencode-go-proxy": {
+    "saros-proxy": {
       "npm": "@ai-sdk/openai-compatible",
-      "name": "OpenCode-Go Proxy",
+      "name": "Saros",
       "options": {
         "baseURL": "{env:OPENCODE_PROXY_URL}",
         "apiKey": "{env:OPENCODE_PROXY_KEY}"
@@ -414,7 +439,7 @@ Once configured, select the proxy provider in OpenCode's model picker, or set it
 ```jsonc
 {
   "provider": { /* ... as above ... */ },
-  "model": "opencode-go-proxy/glm-5"
+  "model": "saros-proxy/glm-5"
 }
 ```
 
@@ -523,6 +548,75 @@ test/
 
 ---
 
+## LLM Quick Reference
+
+If you're an AI assistant helping a user install this proxy, use these exact commands:
+
+**Prerequisites check:**
+```bash
+node --version  # Must be >= 22.0.0
+```
+
+**Install from source:**
+```bash
+git clone https://github.com/saros/saros.git
+cd proxy
+npm install
+npm run build
+```
+
+**Configure:**
+```bash
+npm run setup  # Interactive wizard
+# OR manually: cp config.example.yaml config.yaml && edit config.yaml
+```
+
+**Run:**
+```bash
+npm run dev         # Development
+node dist/index.js  # Production
+```
+
+**Verify:**
+```bash
+curl http://127.0.0.1:3000/health
+```
+
+**Docker quick start:**
+```bash
+cp config.example.yaml config.yaml  # Edit with your keys
+npm run docker:build
+npm run docker:run
+```
+
+**Add to OpenCode config:**
+```bash
+# Run setup wizard and choose "Update OpenCode config automatically"
+npm run setup
+
+# Or manually edit ~/.config/opencode/opencode.json and add:
+{
+  "provider": {
+    "saros-proxy": {
+      "npm": "@ai-sdk/openai-compatible",
+      "name": "Saros",
+      "options": {
+        "baseURL": "http://127.0.0.1:3000/zen/go/v1",
+        "apiKey": "not-used"
+      }
+    }
+  }
+}
+```
+
+---
+
+## Security
+
+For vulnerability reporting, see [SECURITY.md](SECURITY.md).
+
+---
+
 ## License
 
-[MIT](LICENSE) © 2026 OpenCode-Go Proxy Contributors
+[MIT](LICENSE) © 2026 Saros Contributors

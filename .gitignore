@@ -16,8 +16,8 @@ deep-research-report.md
 stderr_proto.txt
 stdout_proto.txt
 
-# Prototype credentials (contains auth cookies)
-prototype/scraper-creds.json
+# Prototype (throwaway exploration)
+prototype/
 
 # AI tool session artifacts
 .opencode/
@@ -28,3 +28,4 @@ config.yaml.backup
 
 # Test output
 test-results.*
+coverage/

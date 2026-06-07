@@ -1,5 +1,5 @@
 /**
- * index.ts — Entry point for the OpenCode-Go Multi-Account Proxy.
+ * index.ts — Entry point for Saros.
  *
  * Usage:
  *   tsx src/index.ts

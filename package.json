@@ -1,11 +1,11 @@
 {
-  "name": "opencode-go-proxy",
+  "name": "saros-proxy",
   "version": "0.1.0",
-  "description": "Multi-account proxy for OpenCode-Go API with failover and streaming",
+  "description": "Saros — predictive multi-account proxy for the OpenCode-Go API. Cycles between accounts before they exhaust.",
   "type": "module",
   "bin": {
-    "opencode-go-proxy": "./dist/index.js",
-    "opencode-go-proxy-setup": "./dist/cli/setup.js"
+    "saros-proxy": "./dist/index.js",
+    "saros-proxy-setup": "./dist/cli/setup.js"
   },
   "files": [
     "dist",
@@ -36,21 +36,23 @@
     "failover",
     "load-balancer",
     "api-gateway",
-    "circuit-breaker"
+    "circuit-breaker",
+    "saros",
+    "saros-proxy"
   ],
-  "author": "OpenCode-Go Proxy Contributors",
+  "author": "Saros Contributors",
   "license": "MIT",
   "engines": {
     "node": ">=22.0.0"
   },
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/opencode-go/proxy.git"
+    "url": "git+https://github.com/saros/saros.git"
   },
   "bugs": {
-    "url": "https://github.com/opencode-go/proxy/issues"
+    "url": "https://github.com/saros/saros/issues"
   },
-  "homepage": "https://github.com/opencode-go/proxy#readme",
+  "homepage": "https://github.com/saros/saros#readme",
   "devDependencies": {
     "@types/node": "^25.9.1",
     "@vitest/coverage-v8": "^4.1.8",

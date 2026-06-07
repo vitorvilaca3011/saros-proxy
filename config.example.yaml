@@ -1,4 +1,4 @@
-# OpenCode-Go Multi-Account Proxy Configuration
+# Saros Configuration
 # Copy this file to config.yaml and customize.
 
 port: 3000

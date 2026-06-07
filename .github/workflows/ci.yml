@@ -12,7 +12,7 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        node-version: [20, 22]
+        node-version: [22, 23]
 
     steps:
       - uses: actions/checkout@v4
@@ -37,3 +37,15 @@ jobs:
         if: ${{ !cancelled() }}
         with:
           fail_ci_if_error: false
+
+  docker-build:
+    name: Verify Docker build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build image (no push)
+        run: docker build -t saros-proxy:ci .

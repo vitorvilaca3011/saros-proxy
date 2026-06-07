@@ -6,16 +6,19 @@ export default defineConfig({
       provider: 'v8',
       reporter: ['text', 'json', 'html'],
       thresholds: {
-        lines: 80,
-        branches: 75,
-        functions: 80,
-        statements: 80,
+        lines: 85,
+        branches: 80,
+        functions: 85,
+        statements: 85,
       },
       include: ['src/**/*.ts'],
       exclude: [
         'src/**/*.test.ts',
         'src/index.ts',
         'src/cli/setup.ts',
+        // Firefox cookie extraction requires a real Firefox profile + node:sqlite
+        // to be meaningful. Mocking it would test the mocks, not the code.
+        'src/firefox-cookies.ts',
       ],
     },
     // Exclude compiled output to avoid running tests twice
