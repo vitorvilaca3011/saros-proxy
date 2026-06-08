@@ -131,6 +131,69 @@ export function updateOpencodeConfig(
 // ---------------------------------------------------------------------------
 
 /**
+ * Sync models from OPENCODE_MODELS into an existing opencode.json.
+ * Only replaces the `saros-proxy.models` field — preserves everything else.
+ *
+ * @param options.configPath — Explicit path to opencode.json (optional, for testing)
+ * @returns Result object with success status and path
+ */
+export function syncModelsToOpencodeConfig(
+  options: { configPath?: string } = {},
+): OpencodeConfigResult {
+  const configPath = options.configPath ?? getDefaultOpencodeConfigPath();
+
+  if (!existsSync(configPath)) {
+    return { success: false, error: 'opencode.json not found at ' + configPath };
+  }
+
+  try {
+    const raw = readFileSync(configPath, 'utf-8');
+    const config = JSON.parse(raw) as Record<string, unknown>;
+
+    const provider = config.provider as Record<string, unknown> | undefined;
+    if (!provider) {
+      return { success: false, error: 'Config has no "provider" section' };
+    }
+
+    const sarosProvider = provider['saros-proxy'];
+    if (!sarosProvider || typeof sarosProvider !== 'object' || Array.isArray(sarosProvider)) {
+      return { success: false, error: 'saros-proxy provider config is missing or malformed' };
+    }
+
+    // Backup before modifying
+    const backupPath = `${configPath}.backup`;
+    copyFileSync(configPath, backupPath);
+
+    // Only replace models — preserve everything else
+    (sarosProvider as Record<string, unknown>).models = OPENCODE_MODELS;
+
+    // Write
+    const json = JSON.stringify(config, null, 2);
+    writeFileSync(configPath, json, 'utf-8');
+
+    // Validate: re-read to ensure we didn't corrupt it
+    try {
+      const verifyRaw = readFileSync(configPath, 'utf-8');
+      JSON.parse(verifyRaw);
+    } catch {
+      if (existsSync(backupPath)) {
+        copyFileSync(backupPath, configPath);
+      }
+      return {
+        success: false,
+        path: configPath,
+        error: 'Failed to write valid JSON after sync. Restored from backup.',
+      };
+    }
+
+    return { success: true, path: configPath };
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err);
+    return { success: false, path: configPath, error: message };
+  }
+}
+
+/**
  * Generate a manual configuration snippet that users can paste.
  */
 export function generateManualConfigSnippet(port: number): string {

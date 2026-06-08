@@ -19,6 +19,7 @@ import { logger, maskKey } from './logger.js';
 import { startScraper, stopScraper } from './scraper.js';
 import { FORCE_SHUTDOWN_TIMEOUT_MS } from './constants.js';
 import { daemonStart, daemonStop, daemonStatus } from './cli/daemon.js';
+import { syncModelsToOpencodeConfig } from './cli/opencode-config.js';
 
 // ---------------------------------------------------------------------------
 // Subcommand: 'start' | 'stop' | 'status' — daemon management
@@ -49,6 +50,17 @@ if (subcommand === 'stop') {
 if (subcommand === 'status') {
   daemonStatus();
   // daemonStatus calls process.exit()
+}
+
+if (subcommand === 'sync-models') {
+  const result = syncModelsToOpencodeConfig();
+  if (result.success) {
+    console.log(`Models synced to ${result.path}`);
+    process.exit(0);
+  } else {
+    console.error(`Failed: ${result.error}`);
+    process.exit(1);
+  }
 }
 
 // ---------------------------------------------------------------------------

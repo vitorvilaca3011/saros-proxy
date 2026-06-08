@@ -224,7 +224,7 @@ describe('OpenCode Config Integration', () => {
 
       // Verify specific capabilities
       expect(models['glm-5'].tool_call).toBe(true);
-      expect(models['hy3-preview'].tool_call).toBe(false);
+      expect(models['hy3-preview'].tool_call).toBe(true);
       expect(models['qwen3.6-plus'].limit.context).toBe(1000000);
       expect(models['qwen3.5-plus'].limit.output).toBe(65536);
     });

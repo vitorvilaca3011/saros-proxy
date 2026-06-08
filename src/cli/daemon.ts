@@ -17,6 +17,7 @@ import { existsSync, writeFileSync, readFileSync, rmSync, mkdirSync } from 'node
 import { resolve as pathResolve, join as pathJoin } from 'node:path';
 import { homedir } from 'node:os';
 import { fileURLToPath } from 'node:url';
+import { syncModelsToOpencodeConfig } from './opencode-config.js';
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -135,6 +136,15 @@ export function daemonStart(port?: number, configPath?: string): void {
     if (isProcessAlive(pid)) {
       console.log(`Proxy started (PID ${pid}) on port ${port ?? 3000}`);
       console.log(`Logs: ${PID_DIR}/daemon.log`);
+
+      // Sync models to opencode.json — log warning on failure, don't block
+      const syncResult = syncModelsToOpencodeConfig();
+      if (syncResult.success) {
+        console.log(`Models synced to ${syncResult.path}`);
+      } else {
+        console.warn(`Model sync skipped: ${syncResult.error}`);
+      }
+
       process.exit(0);
     } else {
       console.error('Proxy exited shortly after starting. Check your config.');

@@ -28,7 +28,7 @@ export const WORKSPACE_ID_REGEX = /^wrk_[A-Za-z0-9]+$/;
 // Source: https://opencode.ai/zen/go/v1/models (18 models as of 2026-06-06)
 export const OPENCODE_MODELS: Record<string, unknown> = {
   // GLM series (Z.AI/Zhipu - 200K context, 128K output, text-only)
-  // Blocklisted in OpenCode - needs manual variants
+  // Blocklisted in OpenCode — no auto variants; reasoning always-on via upstream
   'glm-5': {
     id: 'glm-5',
     name: 'GLM-5',
@@ -36,11 +36,6 @@ export const OPENCODE_MODELS: Record<string, unknown> = {
     reasoning: true,
     limit: { context: 200000, output: 131072 },
     modalities: { input: ['text'], output: ['text'] },
-    variants: {
-      low: { reasoningEffort: 'low' },
-      medium: { reasoningEffort: 'medium' },
-      high: { reasoningEffort: 'high' },
-    },
   },
   'glm-5.1': {
     id: 'glm-5.1',
@@ -49,15 +44,10 @@ export const OPENCODE_MODELS: Record<string, unknown> = {
     reasoning: true,
     limit: { context: 200000, output: 131072 },
     modalities: { input: ['text'], output: ['text'] },
-    variants: {
-      low: { reasoningEffort: 'low' },
-      medium: { reasoningEffort: 'medium' },
-      high: { reasoningEffort: 'high' },
-    },
   },
 
   // Kimi series (Moonshot - 256K context, dynamic output up to 256K)
-  // Blocklisted in OpenCode - needs manual variants
+  // Blocklisted in OpenCode — no auto variants; reasoning always-on via upstream
   'kimi-k2.5': {
     id: 'kimi-k2.5',
     name: 'Kimi K2.5',
@@ -65,11 +55,6 @@ export const OPENCODE_MODELS: Record<string, unknown> = {
     reasoning: true,
     limit: { context: 256000, output: 256000 },
     modalities: { input: ['text', 'image'], output: ['text'] },
-    variants: {
-      low: { reasoningEffort: 'low' },
-      medium: { reasoningEffort: 'medium' },
-      high: { reasoningEffort: 'high' },
-    },
   },
   'kimi-k2.6': {
     id: 'kimi-k2.6',
@@ -78,11 +63,6 @@ export const OPENCODE_MODELS: Record<string, unknown> = {
     reasoning: true,
     limit: { context: 256000, output: 256000 },
     modalities: { input: ['text', 'image'], output: ['text'] },
-    variants: {
-      low: { reasoningEffort: 'low' },
-      medium: { reasoningEffort: 'medium' },
-      high: { reasoningEffort: 'high' },
-    },
   },
 
   // DeepSeek V4 series (1M context, 384K output, text-only)
@@ -105,7 +85,8 @@ export const OPENCODE_MODELS: Record<string, unknown> = {
   },
 
   // MiMo series (Xiaomi - 1M context except V2 Omni 256K)
-  // NOT blocklisted - OpenCode auto-generates low/medium/high variants
+  // NOT blocklisted - OpenCode would auto-generate low/medium/high, but upstream
+  // doesn't support reasoningEffort — disable auto variants
   'mimo-v2.5': {
     id: 'mimo-v2.5',
     name: 'MiMo V2.5',
@@ -113,6 +94,11 @@ export const OPENCODE_MODELS: Record<string, unknown> = {
     reasoning: true,
     limit: { context: 1000000, output: 128000 },
     modalities: { input: ['text', 'image'], output: ['text'] },
+    variants: {
+      low: { disabled: true },
+      medium: { disabled: true },
+      high: { disabled: true },
+    },
   },
   'mimo-v2.5-pro': {
     id: 'mimo-v2.5-pro',
@@ -121,6 +107,11 @@ export const OPENCODE_MODELS: Record<string, unknown> = {
     reasoning: true,
     limit: { context: 1000000, output: 128000 },
     modalities: { input: ['text'], output: ['text'] },
+    variants: {
+      low: { disabled: true },
+      medium: { disabled: true },
+      high: { disabled: true },
+    },
   },
   'mimo-v2-pro': {
     id: 'mimo-v2-pro',
@@ -129,6 +120,11 @@ export const OPENCODE_MODELS: Record<string, unknown> = {
     reasoning: true,
     limit: { context: 1000000, output: 128000 },
     modalities: { input: ['text'], output: ['text'] },
+    variants: {
+      low: { disabled: true },
+      medium: { disabled: true },
+      high: { disabled: true },
+    },
   },
   'mimo-v2-omni': {
     id: 'mimo-v2-omni',
@@ -137,10 +133,16 @@ export const OPENCODE_MODELS: Record<string, unknown> = {
     reasoning: true,
     limit: { context: 256000, output: 128000 },
     modalities: { input: ['text', 'image'], output: ['text'] },
+    variants: {
+      low: { disabled: true },
+      medium: { disabled: true },
+      high: { disabled: true },
+    },
   },
 
   // MiniMax series (1M context for M3, 200K for M2.x)
-  // Blocklisted in OpenCode - needs manual variants
+  // Blocklisted in OpenCode — no auto variants; thinking always-on for M2.x,
+  // adaptive for M3 — all handled upstream
   'minimax-m3': {
     id: 'minimax-m3',
     name: 'MiniMax M3',
@@ -148,11 +150,6 @@ export const OPENCODE_MODELS: Record<string, unknown> = {
     reasoning: true,
     limit: { context: 1000000, output: 524288 },
     modalities: { input: ['text', 'image'], output: ['text'] },
-    variants: {
-      low: { reasoningEffort: 'low' },
-      medium: { reasoningEffort: 'medium' },
-      high: { reasoningEffort: 'high' },
-    },
   },
   'minimax-m2.7': {
     id: 'minimax-m2.7',
@@ -161,11 +158,6 @@ export const OPENCODE_MODELS: Record<string, unknown> = {
     reasoning: true,
     limit: { context: 200000, output: 200000 },
     modalities: { input: ['text'], output: ['text'] },
-    variants: {
-      low: { reasoningEffort: 'low' },
-      medium: { reasoningEffort: 'medium' },
-      high: { reasoningEffort: 'high' },
-    },
   },
   'minimax-m2.5': {
     id: 'minimax-m2.5',
@@ -174,15 +166,10 @@ export const OPENCODE_MODELS: Record<string, unknown> = {
     reasoning: true,
     limit: { context: 200000, output: 200000 },
     modalities: { input: ['text'], output: ['text'] },
-    variants: {
-      low: { reasoningEffort: 'low' },
-      medium: { reasoningEffort: 'medium' },
-      high: { reasoningEffort: 'high' },
-    },
   },
 
   // Qwen series (Alibaba - all 1M context, 64K output)
-  // Blocklisted in OpenCode - needs manual variants
+  // Blocklisted in OpenCode — no auto variants; reasoning via enable_thinking upstream
   'qwen3.7-max': {
     id: 'qwen3.7-max',
     name: 'Qwen 3.7 Max',
@@ -190,11 +177,6 @@ export const OPENCODE_MODELS: Record<string, unknown> = {
     reasoning: true,
     limit: { context: 1000000, output: 65536 },
     modalities: { input: ['text'], output: ['text'] },
-    variants: {
-      low: { reasoningEffort: 'low' },
-      medium: { reasoningEffort: 'medium' },
-      high: { reasoningEffort: 'high' },
-    },
   },
   'qwen3.7-plus': {
     id: 'qwen3.7-plus',
@@ -203,11 +185,6 @@ export const OPENCODE_MODELS: Record<string, unknown> = {
     reasoning: true,
     limit: { context: 1000000, output: 65536 },
     modalities: { input: ['text', 'image'], output: ['text'] },
-    variants: {
-      low: { reasoningEffort: 'low' },
-      medium: { reasoningEffort: 'medium' },
-      high: { reasoningEffort: 'high' },
-    },
   },
   'qwen3.6-plus': {
     id: 'qwen3.6-plus',
@@ -216,11 +193,6 @@ export const OPENCODE_MODELS: Record<string, unknown> = {
     reasoning: true,
     limit: { context: 1000000, output: 65536 },
     modalities: { input: ['text', 'image'], output: ['text'] },
-    variants: {
-      low: { reasoningEffort: 'low' },
-      medium: { reasoningEffort: 'medium' },
-      high: { reasoningEffort: 'high' },
-    },
   },
   'qwen3.5-plus': {
     id: 'qwen3.5-plus',
@@ -229,15 +201,11 @@ export const OPENCODE_MODELS: Record<string, unknown> = {
     reasoning: true,
     limit: { context: 1000000, output: 65536 },
     modalities: { input: ['text', 'image'], output: ['text'] },
-    variants: {
-      low: { reasoningEffort: 'low' },
-      medium: { reasoningEffort: 'medium' },
-      high: { reasoningEffort: 'high' },
-    },
   },
 
   // HY3 Preview (Tencent - 256K context, 128K output)
-  // NOT blocklisted - OpenCode auto-generates low/medium/high variants
+  // NOT blocklisted - would auto-generate low/medium/high, but upstream uses
+  // chat_template_kwargs.reasoning_effort not reasoningEffort — disable
   'hy3-preview': {
     id: 'hy3-preview',
     name: 'HY3 Preview',
@@ -245,5 +213,10 @@ export const OPENCODE_MODELS: Record<string, unknown> = {
     reasoning: true,
     limit: { context: 262144, output: 131072 },
     modalities: { input: ['text'], output: ['text'] },
+    variants: {
+      low: { disabled: true },
+      medium: { disabled: true },
+      high: { disabled: true },
+    },
   },
 };
