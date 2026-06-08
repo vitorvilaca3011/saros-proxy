@@ -59,20 +59,20 @@ export const OPENCODE_MODELS: Record<string, unknown> = {
     modalities: { input: ['text', 'image'], output: ['text'] },
   },
 
-  // DeepSeek V4 series (1M context, 384K output)
+  // DeepSeek V4 series (1M context, 384K output, text-only)
   'deepseek-v4-pro': {
     id: 'deepseek-v4-pro',
     name: 'DeepSeek V4 Pro',
     tool_call: true,
     limit: { context: 1000000, output: 384000 },
-    modalities: { input: ['text', 'image'], output: ['text'] },
+    modalities: { input: ['text'], output: ['text'] },
   },
   'deepseek-v4-flash': {
     id: 'deepseek-v4-flash',
     name: 'DeepSeek V4 Flash',
     tool_call: true,
     limit: { context: 1000000, output: 384000 },
-    modalities: { input: ['text', 'image'], output: ['text'] },
+    modalities: { input: ['text'], output: ['text'] },
   },
 
   // MiMo series (Xiaomi - 1M context except V2 Omni 256K)
