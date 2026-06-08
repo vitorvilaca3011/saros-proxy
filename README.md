@@ -384,11 +384,36 @@ npx tsx src/index.ts
 npx tsx src/index.ts --config /etc/saros/config.yaml
 ```
 
-### Run as background service (Linux)
+### Run as background daemon (all platforms)
+
+The proxy ships with a built-in daemon. Once installed globally (`npm install -g saros-proxy`):
 
 ```bash
-nohup npx tsx src/index.ts > proxy.log 2>&1 &
+# Start the daemon (background)
+saros-proxy start --port 3000
+
+# Check status
+saros-proxy status
+
+# Stop it
+saros-proxy stop
+
+# Sync models from src/constants.ts to opencode.json
+saros-proxy sync-models
 ```
+
+The `start` command automatically syncs model definitions to `~/.config/opencode/opencode.json`.
+
+**Daemon config path:** By default the daemon looks for `config.yaml` at:
+- Linux/macOS: `~/.config/saros/config.yaml`
+- Windows: `%LOCALAPPDATA%\saros\config.yaml`
+
+Override with `--config`:
+```bash
+saros-proxy start --port 3000 --config /path/to/config.yaml
+```
+
+The PID file is stored at `~/.config/saros/daemon.pid`. The child process runs with `NODE_ENV=production` (JSON logging).
 
 ---
 
