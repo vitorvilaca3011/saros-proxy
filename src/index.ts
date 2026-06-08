@@ -20,6 +20,7 @@ import { startScraper, stopScraper } from './scraper.js';
 import { FORCE_SHUTDOWN_TIMEOUT_MS } from './constants.js';
 import { daemonStart, daemonStop, daemonStatus } from './cli/daemon.js';
 import { syncModelsToOpencodeConfig } from './cli/opencode-config.js';
+import { autostartInstall, autostartUninstall, autostartStatus } from './cli/autostart.js';
 
 // ---------------------------------------------------------------------------
 // Subcommand dispatch — if/else if prevents fallthrough to server code
@@ -58,6 +59,25 @@ if (subcommand === 'start') {
   const { getDefaultConfigPath } = await import('./config.js');
   await setup(dirname(getDefaultConfigPath()));
   process.exit(0);
+} else if (subcommand === 'autostart') {
+  const action = process.argv[3];
+  if (action === 'install') {
+    const args = process.argv.slice(4);
+    let port: number | undefined;
+    for (let i = 0; i < args.length; i++) {
+      if (args[i] === '--port' && args[i + 1]) {
+        port = Number(args[++i]);
+      }
+    }
+    autostartInstall(port);
+    process.exit(0);
+  } else if (action === 'uninstall') {
+    autostartUninstall();
+    process.exit(0);
+  } else {
+    autostartStatus();
+    process.exit(0);
+  }
 } else {
   // -----------------------------------------------------------------------
   // No subcommand — start proxy in foreground (original behavior)
