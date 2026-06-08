@@ -2,7 +2,7 @@
 
 Follow these two phases. Phase 1 gathers everything. Phase 2 executes.
 
-**Important:** Do NOT enable usage-based account switching (scraping). That feature requires the user to log into Firefox, extract auth cookies manually, and interact with browser sessions — agents can't do that. If the setup wizard asks about it, always answer **"n"**. Tell the user to run `npx saros-proxy setup` manually if they want that feature.
+**Important:** Do NOT enable usage-based account switching (scraping). If the setup wizard asks about it, always answer **"n"**. Instead, use the agent-friendly encryption method below (step 2.2a) — it generates the same encrypted config without any interactive prompts.
 
 ---
 
@@ -72,6 +72,22 @@ Use the `question` tool to ask the user all of these **at once** (batch into one
         { "label": "Yes", "description": "Auto-configure opencode.json" },
         { "label": "No", "description": "Skip OpenCode config" }
       ]
+    },
+    {
+      "question": "How should the proxy run?",
+      "header": "Run Mode",
+      "options": [
+        { "label": "Foreground", "description": "npx saros-proxy (stays in terminal)" },
+        { "label": "Background daemon", "description": "saros-proxy start (detached process)" }
+      ]
+    },
+    {
+      "question": "Start proxy automatically on login?",
+      "header": "Auto-Start",
+      "options": [
+        { "label": "Yes", "description": "Install auto-start entry" },
+        { "label": "No", "description": "I'll start it manually" }
+      ]
     }
   ]
 }
@@ -122,20 +138,72 @@ keys:
     key: {key2}
 ```
 
-If encryption was chosen, run setup wizard instead:
+If encryption was chosen, do NOT run the interactive wizard — use the Node.js encrypt script instead (no prompts, no TTY needed):
+
+```bash
+# 1. Generate a random encryption key and set it
+$env:OPENCODE_GO_ENCRYPTION_KEY = node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"
+
+# 2. Create config.yaml with plaintext keys first
+@"
+port: 3000
+host: 127.0.0.1
+upstreamBaseUrl: https://opencode.ai
+keys:
+  - label: primary
+    key: sk-your-key-here
+"@ | Set-Content config.yaml -Encoding UTF8
+
+# 3. Encrypt keys in-place using the proxy's own encryption module
+node --input-type=module -e "
+import { readFileSync, writeFileSync } from 'node:fs';
+import { parse as parseYaml, stringify as dumpYaml } from 'yaml';
+import { encryptKey } from './dist/key-encryption.js';
+
+const cfg = parseYaml(readFileSync('config.yaml', 'utf-8'));
+const key = process.env.OPENCODE_GO_ENCRYPTION_KEY;
+cfg.keys = cfg.keys.map(k => ({ ...k, key: encryptKey(k.key, key) }));
+writeFileSync('config.yaml', dumpYaml(cfg));
+console.log('Keys encrypted in config.yaml');
+"
+```
+
+Permanently set the env var in your shell profile or OpenCode launcher.
+
+**Old approach (fallback only):**
 ```bash
 npx saros-proxy setup
 ```
-**Warning:** The wizard will ask about usage-based account switching (scraping). Always answer **"n"** — agents can't log into browsers or extract Firefox cookies. If the user wants that feature, tell them to run the wizard manually in their terminal.
 
-After encryption setup, tell user to set `OPENCODE_GO_ENCRYPTION_KEY` env var.
+If encryption was NOT chosen:
+```yaml
+port: {port}
+host: 127.0.0.1
+upstreamBaseUrl: https://opencode.ai
+circuitBreakerThreshold: 3
+circuitBreakerCooldownMs: 60000
+requestTimeoutMs: 30000
+allowedOrigins:
+  - "http://localhost:*"
+  - "http://127.0.0.1:*"
+keys:
+  - label: {label1}
+    key: {key1}
+  - label: {label2}
+    key: {key2}
+```
 
 ### 2.3 Run
 
-| Method | Command |
-|--------|---------|
-| npm/Source | `npx tsx src/index.ts` or `node dist/index.js` |
-| Docker | `npm run docker:run` |
+| Mode | Method | Command |
+|------|--------|---------|
+| Foreground | npm/Source | `npx saros-proxy` or `node dist/index.js` |
+| Foreground | Docker | `npm run docker:run` |
+| Background daemon | npm global | `saros-proxy start --port {port}` |
+| Background daemon | stop | `saros-proxy stop` |
+| Background daemon | status | `saros-proxy status` |
+
+**Note:** The daemon child runs with `NODE_ENV=production` (JSON logging). For pretty-printed logs, run in foreground mode with `NODE_ENV=development`.
 
 ### 2.4 Verify
 
@@ -145,7 +213,18 @@ curl http://127.0.0.1:{port}/health
 
 Expected: `{"status":"ok","keyCount":2,"enabledCount":2,...}`
 
-### 2.5 OpenCode Config (if requested)
+### 2.5 Auto-Start on Login (if requested)
+
+```bash
+saros-proxy autostart install --port {port}
+```
+
+The proxy will start automatically on next login. Verify with:
+```bash
+saros-proxy autostart
+```
+
+### 2.6 OpenCode Config (if requested)
 
 Add to `~/.config/opencode/opencode.json`:
 ```json
@@ -163,9 +242,17 @@ Add to `~/.config/opencode/opencode.json`:
 }
 ```
 
-Restart OpenCode.
+ Restart OpenCode.
 
-### 2.6 Cleanup
+### 2.7 Sync Models to OpenCode
+
+After installing or updating the proxy, sync the model definitions:
+```bash
+saros-proxy sync-models
+```
+This copies all 18 model specs (context limits, outputs, modalities, reasoning support) from the proxy into `opencode.json`. Run anytime you update the proxy version.
+
+### 2.8 Cleanup
 
 Remind user to delete the keys file:
 ```bash
