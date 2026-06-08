@@ -32,6 +32,7 @@ import {
   MAX_RETRIES,
   RATE_LIMIT_WINDOW_MS,
   RATE_LIMIT_MAX,
+  OPENCODE_MODELS,
 } from './constants.js';
 
 // Augment Hono's ContextVariableMap for @hono/node-server remote address
@@ -622,6 +623,38 @@ function wrapStreamWithErrorDetection(
 }
 
 // ---------------------------------------------------------------------------
+// Models discovery (OpenAI-compatible /v1/models response)
+// ---------------------------------------------------------------------------
+
+/**
+ * Builds the OpenAI-compatible /v1/models response.
+ * Returns the full list of OPENCODE_MODELS so the OpenCode client can
+ * discover all available models. Without this, OpenCode falls back to a
+ * hardcoded list of ~3 models (one per series).
+ *
+ * Exported for testing. The response is lightweight (~18 models) so it's
+ * computed fresh on each request with no caching.
+ */
+export function buildModelsListResponse(): Response {
+  const now = Math.floor(Date.now() / 1000);
+  const data = Object.values(OPENCODE_MODELS).map((model) => {
+    const m = model as { id: string; name?: string };
+    return {
+      id: m.id,
+      object: 'model',
+      created: now,
+      owned_by: 'saros',
+      // Spread the rich model config (tool_call, limit, modalities, name, etc.)
+      ...(m as Record<string, unknown>),
+    };
+  });
+  return new Response(JSON.stringify({ object: 'list', data }), {
+    status: 200,
+    headers: { 'content-type': 'application/json' },
+  });
+}
+
+// ---------------------------------------------------------------------------
 // App factory
 // ---------------------------------------------------------------------------
 
@@ -706,6 +739,14 @@ export function createProxyApp(config: ProxyConfig): Hono {
       scraping: scrapingStatus,
     });
   });
+
+  // --- Models discovery endpoint (OpenAI-compatible) ---
+  // Returns the full model list so the OpenCode client can discover all
+  // available models. Without this, OpenCode falls back to a hardcoded
+  // list of ~3 models (one per series).
+  // NOTE: Rate limiting applies to these routes via the '*' middleware above.
+  app.get('/v1/models', (_c: Context) => buildModelsListResponse());
+  app.get('/zen/go/v1/models', (_c: Context) => buildModelsListResponse());
 
   // --- Upstream proxy routes ---
   app.all('/zen/go/v1/*', async (c: Context) => {

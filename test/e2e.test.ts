@@ -390,29 +390,40 @@ describe('2. Models Endpoint', () => {
   });
   afterAll(async () => { await proxy.close(); });
 
-  it('GET /zen/go/v1/models proxies correctly', async () => {
+  it('GET /zen/go/v1/models returns OPENCODE_MODELS locally', async () => {
     const res = await pf(proxy.port, '/zen/go/v1/models');
     expect(res.status).toBe(200);
     expect(res.headers.get('content-type')).toBe('application/json');
-    expect(res.headers.get('X-Custom')).toBe('models-header');
+    // Models are served locally — no upstream call, so X-Custom is absent.
+    expect(res.headers.get('X-Custom')).toBeNull();
 
     const body = await res.json() as Record<string, unknown>;
     expect(body.object).toBe('list');
     expect(Array.isArray(body.data)).toBe(true);
-    expect((body.data as Array<{ id: string }>).length).toBe(2);
 
+    const data = body.data as Array<{ id: string }>;
+    // OPENCODE_MODELS is the single source of truth — 18 entries.
+    expect(data.length).toBe(18);
+
+    // Upstream mock was NOT called for this path.
     const log = mockControl.getRequestLog();
-    expect(log.length).toBe(1);
-    expect(log[0].url).toBe('/zen/go/v1/models');
-    expect(log[0].auth).toMatch(/^Bearer sk-e2e-test-/);
+    expect(log.length).toBe(0);
   });
 
-  it('models response includes correct data', async () => {
+  it('models response preserves OPENCODE_MODELS ordering and IDs', async () => {
     const res = await pf(proxy.port, '/zen/go/v1/models');
     const body = await res.json() as Record<string, unknown>;
     const models = body.data as Array<{ id: string }>;
-    expect(models[0].id).toBe('gpt-4');
-    expect(models[1].id).toBe('gpt-3.5-turbo');
+    // Object.values() preserves insertion order — glm-5 is first.
+    expect(models[0].id).toBe('glm-5');
+    // Spot-check a few representative IDs from different series.
+    const ids = models.map((m) => m.id);
+    expect(ids).toContain('kimi-k2.5');
+    expect(ids).toContain('deepseek-v4-pro');
+    expect(ids).toContain('mimo-v2.5');
+    expect(ids).toContain('minimax-m3');
+    expect(ids).toContain('qwen3.7-plus');
+    expect(ids).toContain('hy3-preview');
   });
 });
 

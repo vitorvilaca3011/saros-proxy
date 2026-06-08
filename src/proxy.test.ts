@@ -1,5 +1,13 @@
-import { describe, it, expect } from 'vitest';
-import { buildUpstreamUrl, buildUpstreamHeaders, isStreamingRequest } from './proxy.js';
+import { describe, it, expect, beforeAll } from 'vitest';
+import {
+  buildUpstreamUrl,
+  buildUpstreamHeaders,
+  isStreamingRequest,
+  createProxyApp,
+  buildModelsListResponse,
+} from './proxy.js';
+import { OPENCODE_MODELS } from './constants.js';
+import type { ProxyConfig } from './config.js';
 
 describe('buildUpstreamUrl', () => {
   it('combines base URL and path', () => {
@@ -114,5 +122,110 @@ describe('isStreamingRequest', () => {
     expect(isStreamingRequest('{"stream": "true"}')).toBe(false);
     expect(isStreamingRequest('{"stream": 1}')).toBe(false);
     expect(isStreamingRequest('{"stream": null}')).toBe(false);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Models discovery endpoint
+// ---------------------------------------------------------------------------
+
+describe('buildModelsListResponse', () => {
+  it('returns a Response with status 200', () => {
+    const res = buildModelsListResponse();
+    expect(res.status).toBe(200);
+  });
+
+  it('has content-type application/json', () => {
+    const res = buildModelsListResponse();
+    expect(res.headers.get('content-type')).toBe('application/json');
+  });
+
+  it('returns object: list with data array', () => {
+    const res = buildModelsListResponse();
+    return res.json().then((body) => {
+      expect(body).toHaveProperty('object', 'list');
+      expect(Array.isArray(body.data)).toBe(true);
+    });
+  });
+
+  it('contains all OPENCODE_MODELS entries', () => {
+    const res = buildModelsListResponse();
+    return res.json().then((body) => {
+      expect(body.data).toHaveLength(Object.keys(OPENCODE_MODELS).length);
+    });
+  });
+
+  it('each model has required OpenAI-compatible fields', () => {
+    const res = buildModelsListResponse();
+    return res.json().then((body) => {
+      for (const model of body.data) {
+        expect(model).toHaveProperty('id');
+        expect(model).toHaveProperty('name');
+        expect(model).toHaveProperty('object', 'model');
+        expect(model).toHaveProperty('owned_by', 'saros');
+      }
+    });
+  });
+
+  it('each model includes rich metadata (tool_call, limit, modalities)', () => {
+    const res = buildModelsListResponse();
+    return res.json().then((body) => {
+      for (const model of body.data) {
+        expect(model).toHaveProperty('tool_call');
+        expect(model).toHaveProperty('limit');
+        expect(model).toHaveProperty('modalities');
+      }
+    });
+  });
+});
+
+describe('createProxyApp — /v1/models routes', () => {
+  let app: ReturnType<typeof createProxyApp>;
+
+  const testConfig: ProxyConfig = {
+    port: 0,
+    host: '127.0.0.1',
+    upstreamBaseUrl: 'https://example.com',
+    requestTimeoutMs: 30000,
+    circuitBreakerThreshold: 3,
+    circuitBreakerCooldownMs: 60000,
+    allowedOrigins: ['*'],
+    keys: [{ label: 'test', key: 'sk-test-key-12345' }],
+  };
+
+  beforeAll(() => {
+    app = createProxyApp(testConfig);
+  });
+
+  it('GET /v1/models returns 200 with object: list', async () => {
+    const res = await app.request('/v1/models');
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.object).toBe('list');
+    expect(Array.isArray(body.data)).toBe(true);
+  });
+
+  it('GET /v1/models returns all 18 models', async () => {
+    const res = await app.request('/v1/models');
+    const body = await res.json();
+    expect(body.data).toHaveLength(Object.keys(OPENCODE_MODELS).length);
+  });
+
+  it('GET /zen/go/v1/models returns 200 with object: list', async () => {
+    const res = await app.request('/zen/go/v1/models');
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    expect(body.object).toBe('list');
+    expect(body.data).toHaveLength(Object.keys(OPENCODE_MODELS).length);
+  });
+
+  it('POST /v1/models returns 404', async () => {
+    const res = await app.request('/v1/models', { method: 'POST' });
+    expect(res.status).toBe(404);
+  });
+
+  it('PUT /v1/models returns 404', async () => {
+    const res = await app.request('/v1/models', { method: 'PUT' });
+    expect(res.status).toBe(404);
   });
 });
