@@ -170,8 +170,8 @@ describe('LLM Instructions Smoke Test', () => {
       );
       expect(LLM_INSTRUCTIONS).toContain('always answer');
       expect(LLM_INSTRUCTIONS).toContain('"n"');
-      expect(LLM_INSTRUCTIONS).toContain("agents can't");
-      expect(LLM_INSTRUCTIONS).toContain('log into browsers');
+      expect(LLM_INSTRUCTIONS).toContain('setup wizard asks');
+      expect(LLM_INSTRUCTIONS).toContain('agent-friendly encryption');
     });
 
     it('each question has required fields (question, header, options)', () => {
