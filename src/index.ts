@@ -18,6 +18,38 @@ import { createProxyApp } from './proxy.js';
 import { logger, maskKey } from './logger.js';
 import { startScraper, stopScraper } from './scraper.js';
 import { FORCE_SHUTDOWN_TIMEOUT_MS } from './constants.js';
+import { daemonStart, daemonStop, daemonStatus } from './cli/daemon.js';
+
+// ---------------------------------------------------------------------------
+// Subcommand: 'start' | 'stop' | 'status' — daemon management
+// ---------------------------------------------------------------------------
+
+const subcommand = process.argv[2];
+
+if (subcommand === 'start') {
+  const args = process.argv.slice(3);
+  let port: number | undefined;
+  let configPath: string | undefined;
+  for (let i = 0; i < args.length; i++) {
+    if (args[i] === '--port' && args[i + 1]) {
+      port = Number(args[++i]);
+    } else if (args[i] === '--config' && args[i + 1]) {
+      configPath = args[++i];
+    }
+  }
+  daemonStart(port, configPath);
+  // daemonStart calls process.exit() — code below won't run
+}
+
+if (subcommand === 'stop') {
+  daemonStop();
+  // daemonStop calls process.exit()
+}
+
+if (subcommand === 'status') {
+  daemonStatus();
+  // daemonStatus calls process.exit()
+}
 
 // ---------------------------------------------------------------------------
 // Subcommand: 'setup' — delegate to the interactive setup wizard
