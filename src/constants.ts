@@ -47,7 +47,7 @@ export const OPENCODE_MODELS: Record<string, unknown> = {
   },
 
   // Kimi series (Moonshot - 262K context, 65K output, multimodal)
-  // Blocklisted in OpenCode — needs manual variants; supports reasoning_effort low/medium/high
+  // Blocklisted in OpenCode — no reasoning_effort support via opencode-go
   'kimi-k2.5': {
     id: 'kimi-k2.5',
     name: 'Kimi K2.5',
@@ -55,11 +55,6 @@ export const OPENCODE_MODELS: Record<string, unknown> = {
     reasoning: true,
     limit: { context: 262144, output: 65536 },
     modalities: { input: ['text', 'image', 'video'], output: ['text'] },
-    variants: {
-      low: { reasoningEffort: 'low' },
-      medium: { reasoningEffort: 'medium' },
-      high: { reasoningEffort: 'high' },
-    },
   },
   'kimi-k2.6': {
     id: 'kimi-k2.6',
@@ -68,11 +63,6 @@ export const OPENCODE_MODELS: Record<string, unknown> = {
     reasoning: true,
     limit: { context: 262144, output: 65536 },
     modalities: { input: ['text', 'image', 'video'], output: ['text'] },
-    variants: {
-      low: { reasoningEffort: 'low' },
-      medium: { reasoningEffort: 'medium' },
-      high: { reasoningEffort: 'high' },
-    },
   },
 
   // DeepSeek V4 series (1M context, 384K output, text-only)
