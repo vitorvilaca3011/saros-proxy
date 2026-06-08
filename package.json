@@ -4,8 +4,8 @@
   "description": "Saros — predictive multi-account proxy for the OpenCode-Go API. Cycles between accounts before they exhaust.",
   "type": "module",
   "bin": {
-    "saros-proxy": "./dist/index.js",
-    "saros-proxy-setup": "./dist/cli/setup.js"
+    "saros-proxy": "dist/index.js",
+    "saros-proxy-setup": "dist/cli/setup.js"
   },
   "files": [
     "dist",
@@ -25,6 +25,9 @@
     "lint": "tsc --noEmit",
     "prepublishOnly": "npm run build",
     "test": "vitest",
+    "test:npm": "vitest run test/npm-package.test.ts",
+    "test:source": "vitest run test/source-install.test.ts",
+    "test:docker": "vitest run test/docker-install.test.ts",
     "docker:build": "docker compose build proxy",
     "docker:run": "docker compose up proxy",
     "docker:test": "docker compose run --rm test"

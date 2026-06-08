@@ -7,9 +7,7 @@
 
 Saros — like the eclipse cycle, this proxy predicts exhaustion and rotates accounts before they run out. Built for the OpenCode-Go API.
 
-Manage multiple OpenCode-Go API keys behind a single endpoint. When one key is rate-limited, revoked, or returns server errors, the proxy automatically fails over to the next healthy key — with zero downtime.
-
-> **Migrating from `opencode-go-proxy`?** If upgrading, re-run `saros-proxy setup` to migrate your config from `~/.config/opencode-go-proxy/` to `~/.config/saros/`.
+Manage multiple OpenCode-Go API keys behind a single endpoint. When one key gets rate-limited, revoked, or returns server errors, the proxy automatically fails over to the next healthy key — zero downtime.
 
 ---
 
@@ -18,14 +16,16 @@ Manage multiple OpenCode-Go API keys behind a single endpoint. When one key is r
 - [Features](#features)
 - [Architecture](#architecture)
 - [Installation](#installation)
-- [Docker](#docker)
-- [Quick Start](#quick-start)
+  - [Prompt Install](#prompt-installfor-the-lazy-ones)
+  - [Quick Install (npm)](#quick-install-npm)
+  - [From Source](#from-source)
+  - [Docker](#docker)
+  - [Setup Wizard](#setup-wizard)
 - [Configuration Reference](#configuration-reference)
 - [Usage Examples](#usage-examples)
 - [OpenCode Integration](#opencode-integration)
 - [Troubleshooting](#troubleshooting)
 - [Development](#development)
-- [LLM Quick Reference](#llm-quick-reference)
 - [Security](#security)
 - [License](#license)
 
@@ -33,15 +33,15 @@ Manage multiple OpenCode-Go API keys behind a single endpoint. When one key is r
 
 ## Features
 
-- **Multi-key rotation** — Round-robin distribution across API keys.
-- **Automatic failover** — Retry failed requests with the next available key.
-- **Circuit breaker** — Disable failing keys after a configurable threshold, then lazily re-enable them after a cooldown period.
-- **Streaming support** — SSE pass-through with mid-stream error detection.
-- **Request timeout** — Configurable timeout with graceful 504 response.
-- **Graceful shutdown** — Drains active requests before exiting.
+- **Multi-key rotation** — Round-robin across all your API keys.
+- **Auto failover** — Retry failed requests with the next healthy key.
+- **Circuit breaker** — Disable flaky keys after a configurable threshold, then lazily re-enable them after cooldown.
+- **Streaming support** — SSE passthrough with mid-stream error detection.
+- **Request timeout** — Configurable timeout with a clean 504 response.
+- **Graceful shutdown** — Drains active requests before exiting (no dropped connections).
 - **Security hardening** — API key masking in logs, SSRF prevention (HTTPS-only upstream), configurable CORS, host binding validation.
-- **Config validation** — CLI args, YAML file, and environment variables with sensible defaults.
-- **Health endpoint** — `GET /health` returns key status, active requests, and circuit-breaker state.
+- **Config validation** — CLI args, YAML file, or environment variables with sensible defaults.
+- **Health endpoint** — `GET /health` shows key status, active requests, and circuit-breaker state.
 - **No database** — Stateless proxy, zero external dependencies beyond Node.js.
 
 ---
@@ -49,48 +49,49 @@ Manage multiple OpenCode-Go API keys behind a single endpoint. When one key is r
 ## Architecture
 
 ```
-┌──────────────────────────────────────────────────────┐
-│                   Client / OpenCode                  │
-│  ┌──────────┐   ┌──────────┐   ┌──────────┐         │
-│  │ Request 1 │   │ Request 2 │   │ Request 3 │  ...  │
-│  └────┬─────┘   └────┬─────┘   └────┬─────┘         │
-└───────┼──────────────┼──────────────┼────────────────┘
-        │              │              │
-        ▼              ▼              ▼
-┌──────────────────────────────────────────────────────┐
-│                    Saros (:3000)                     │
-│                                                       │
-│  ┌─────────────┐   ┌────────────┐   ┌─────────────┐  │
-│  │ Key Selector│──▶│ Circuit    │──▶│ Request     │  │
-│  │ Round-robin │   │ Breaker    │   │ Forwarder   │  │
-│  │ + Failover  │   │ Threshold  │   │ + Timeout   │  │
-│  └─────────────┘   │ + Cooldown │   └──────┬──────┘  │
-│                    └────────────┘          │         │
-│  ┌─────────────────────────────────────────┘         │
-│  │  ┌─────────────────────┐                          │
-│  └──▶ Streaming Detector  │  SSE passthrough         │
-│     └─────────────────────┘                          │
-└──────────────────────┬───────────────────────────────┘
-                       │
-           ┌────────────┼────────────┐
-           ▼            ▼            ▼
-    ┌──────────┐ ┌──────────┐ ┌──────────┐
-    │ Key A    │ │ Key B    │ │ Key C    │
-    │ sk-abc…  │ │ sk-def…  │ │ sk-ghi…  │
-    └────┬─────┘ └────┬─────┘ └────┬─────┘
-         │            │            │
-         ▼            ▼            ▼
-    ┌───────────────────────────────────────┐
-    │        OpenCode-Go API (upstream)     │
-    │        https://opencode.ai            │
-    └───────────────────────────────────────┘
+┌─────────────────────────────────────────────────────────────┐
+│                     Your App / OpenCode                       │
+│                                                              │
+│   ┌──────────┐   ┌──────────┐   ┌──────────┐                │
+│   │ Request 1│   │ Request 2│   │ Request 3│    ...         │
+│   └────┬─────┘   └────┬─────┘   └────┬─────┘                │
+└────────┼──────────────┼──────────────┼───────────────────────┘
+         │              │              │
+         └──────────────┼──────────────┘
+                        │
+                        ▼
+┌─────────────────────────────────────────────────────────────┐
+│                       Saros (:3000)                          │
+│                                                              │
+│  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐       │
+│  │ Key Selector │─▶│   Circuit    │─▶│   Request    │       │
+│  │ Round-Robin  │  │   Breaker    │  │   Forwarder  │       │
+│  │ + Failover   │  │ Threshold +  │  │ + Timeout +  │       │
+│  │              │  │   Cooldown   │  │     SSE      │       │
+│  └──────────────┘  └──────────────┘  └──────┬───────┘       │
+└─────────────────────────────────────────────┼────────────────┘
+                                              │
+                                  ┌───────────┼───────────┐
+                                  ▼           ▼           ▼
+                           ┌──────────┐ ┌──────────┐ ┌──────────┐
+                           │  Key A   │ │  Key B   │ │  Key C   │
+                           │ sk-abc…  │ │ sk-def…  │ │ sk-ghi…  │
+                           └────┬─────┘ └────┬─────┘ └────┬─────┘
+                                │            │            │
+                                └────────────┼────────────┘
+                                             ▼
+                                ┌──────────────────────────┐
+                                │    OpenCode-Go API       │
+                                │    https://opencode.ai   │
+                                └──────────────────────────┘
 ```
 
 ### How Request Distribution Works
 
-The proxy uses **two layers** to decide which API key handles each request:
+Here's how Saros picks which API key to use — it runs on two levels:
 
-#### Layer 1: Round-Robin (always active)
+#### Layer 1: Round-Robin (always on)
+
 Every new request cycles to the next key in order:
 
 ```
@@ -100,35 +101,50 @@ Request 3 → Key C
 Request 4 → Key A (wraps around)
 ```
 
-This gives you **even distribution by default** — no manual odd/even logic needed. If you have 2 accounts, odd requests go to account 1 and even to account 2 automatically.
+Even distribution by default. Got 2 accounts? Odd requests go to account 1, even to account 2. Simple.
 
 #### Layer 2: Usage-Based Gating (optional)
-If you enable [dashboard scraping](#usage-based-key-selection), the proxy checks each account's quota usage before selecting a key:
 
-- If an account's usage is **≥ threshold** (default 70%), that key is skipped
-- If **all** keys are over threshold, the proxy falls back to the **lowest-usage** key
-- If no usage data is available, round-robin continues unchanged
+If you enable dashboard scraping, Saros checks each account's quota before picking a key:
+
+- Usage **≥ threshold** (default 70%) → that key gets skipped
+- **All** keys over threshold → falls back to the lowest-usage key
+- No usage data available → pure round-robin, no change
 
 | Scenario | Behavior |
 |---|---|
-| Scraping disabled | Pure round-robin across all keys |
-| Scraping enabled + data available | Round-robin, skipping over-quota accounts |
-| Scraping enabled + no data | Falls back to pure round-robin |
+| Scraping off | Pure round-robin across all keys |
+| Scraping on + data available | Round-robin, skipping over-quota accounts |
+| Scraping on + no data | Falls back to pure round-robin |
 
 #### Concurrent Request Safety
-The proxy tracks which keys are **currently in use** by active requests. A key already handling a streaming request won't be assigned to another request until it completes. This prevents double-booking the same account under load.
+
+Saros tracks which keys are currently in use. A key handling a streaming request won't get assigned another one until it finishes. No double-booking.
 
 ---
 
 ## Installation
 
-### From npm (when published)
+### Prompt Install(for the lazy ones)
+
+Don't feel like reading through everything? Copy this prompt and paste it to your AI assistant. It'll read [`LLM_INSTRUCTIONS.md`](LLM_INSTRUCTIONS.md) and guide you through setup — no keys shared in chat.
+
+```
+Install Saros Proxy for my opencode. (https://github.com/vitorvilaca3011/saros-proxy)
+Follow the instructions on LLM_INSTRUCTIONS.md.
+```
+
+Your AI will take it from there. For a more detailed reference your assistant can read: [`LLM_INSTRUCTIONS.md`](LLM_INSTRUCTIONS.md).
+
+---
+
+### Quick Install (npm)
 
 ```bash
 npm install -g saros-proxy
 ```
 
-### From source
+### From Source
 
 ```bash
 git clone https://github.com/vitorvilaca3011/saros-proxy.git
@@ -137,22 +153,22 @@ npm install
 npm run build
 ```
 
-> **Requirements**: Node.js >= 22.0.0
+> **Requirements:** Node.js >= 22.0.0
 
 ---
 
-## Docker
+### Docker
 
-Run the proxy in a clean Linux container without installing Node.js locally.
+Run in a clean Linux container without installing Node.js locally.
 
-### Prerequisites
+#### Prerequisites
 
-- [Docker](https://docs.docker.com/get-docker/) (with Compose v2)
+- [Docker](https://docs.docker.com/get-docker/) (Compose v2)
 
-### Quick start
+#### Quick start
 
 ```bash
-# 1. Create config.yaml from the example (edit with your API keys)
+# 1. Create config.yaml from the example (edit with your keys)
 cp config.example.yaml config.yaml
 
 # 2. Build the image
@@ -162,16 +178,15 @@ npm run docker:build
 npm run docker:run
 ```
 
-The proxy is now available at `http://127.0.0.1:3000`.
+The proxy is now at `http://127.0.0.1:3000`.
 
-### Run tests in Docker
+#### Run tests in Docker
 
 ```bash
-# Run the full test suite inside a Linux container
 npm run docker:test
 ```
 
-### Manual Docker commands
+#### Manual Docker commands
 
 ```bash
 # Build
@@ -193,44 +208,41 @@ docker compose down
 docker compose run --rm test
 ```
 
-### Configuration with Docker
+#### Configuration with Docker
 
 Mount a custom `config.yaml` or use environment variables:
 
 ```bash
-# Using environment variables (no config.yaml needed)
+# Using env vars (no config.yaml needed)
 docker compose run --rm -e OPENCODE_GO_KEYS="home:sk-xxx,work:sk-yyy" proxy
 
-# Or edit docker-compose.yml to set env vars directly, then:
+# Or edit docker-compose.yml to set env vars, then:
 docker compose up proxy
 ```
 
 ---
 
-## Quick Start
+### Setup Wizard
 
-### Option A: Interactive Setup (Recommended)
+The easiest way to get going:
 
 ```bash
-# Run the setup wizard — it will guide you through everything
-npx saros-proxy setup
-
-# Or if installed globally:
+# If installed globally
 saros-proxy setup
+
+# Or with npx
+npx saros-proxy setup
 ```
 
 The wizard will:
 1. Ask for your proxy port (default: 3000)
-2. Ask for your API keys (name + key value)
+2. Ask for your API keys (name + key)
 3. Generate `config.yaml` automatically
 4. Run a smoke test to verify everything works
 
-### Option B: Manual Setup
-
-#### 1. Create a configuration file
+Want to run manually instead? Skip the wizard and just create a `config.yaml`:
 
 ```yaml
-# config.yaml
 port: 3000
 host: 127.0.0.1
 upstreamBaseUrl: https://opencode.ai
@@ -244,17 +256,17 @@ circuitBreakerCooldownMs: 60000
 requestTimeoutMs: 30000
 ```
 
-#### 2. Run the proxy
+Then run:
 
 ```bash
-# Using tsx (development)
+# Development (hot reload)
 npx tsx src/index.ts
 
-# Using built JavaScript
+# Production (built)
 node dist/index.js
 ```
 
-#### 3. Test it
+Test that it's alive:
 
 ```bash
 curl http://127.0.0.1:3000/health
@@ -270,23 +282,25 @@ curl http://127.0.0.1:3000/zen/go/v1/chat/completions \
 
 ---
 
+---
+
 ## Configuration Reference
 
-All configuration options can be set via YAML file (`config.yaml`), environment variables, or CLI flags. Priority order: CLI > YAML > env vars > defaults.
+Every option can be set via YAML (`config.yaml`), environment variables, or CLI flags. Priority: CLI > YAML > env vars > defaults.
 
-### YAML / Environment Variables
+### Options
 
-| Option | CLI Flag | Env Variable | Default | Description |
+| Option | CLI Flag | Env Variable | Default | Notes |
 |---|---|---|---|---|
-| `port` | `--port` | `PROXY_PORT` | `3000` | Listening port (1–65535) |
+| `port` | `--port` | `PROXY_PORT` | `3000` | 1–65535 |
 | `host` | `--host` | `PROXY_HOST` | `127.0.0.1` | Bind address |
-| `upstreamBaseUrl` | — | `UPSTREAM_BASE_URL` | `https://opencode.ai` | Upstream API base URL (HTTPS only) |
-| `circuitBreakerThreshold` | — | `CIRCUIT_BREAKER_THRESHOLD` | `3` | Consecutive failures before disabling a key (1–10) |
-| `circuitBreakerCooldownMs` | — | `CIRCUIT_BREAKER_COOLDOWN_MS` | `60000` | Cooldown in ms before re-enabling a key (1000–3600000) |
-| `requestTimeoutMs` | — | `REQUEST_TIMEOUT_MS` | `30000` | Upstream request timeout in ms (1000–300000) |
-| `allowedOrigins` | — | — | `["http://localhost:*", "http://127.0.0.1:*"]` | CORS allowed origins (use `[]` to allow all) |
-| `keys` | — | `OPENCODE_GO_KEYS` | — | Array of `{label, key}` objects or comma-separated env format |
-| `config` | `--config` | — | `config.yaml` | Path to YAML config file |
+| `upstreamBaseUrl` | — | `UPSTREAM_BASE_URL` | `https://opencode.ai` | HTTPS only |
+| `circuitBreakerThreshold` | — | `CIRCUIT_BREAKER_THRESHOLD` | `3` | Consecutive fails before disabling (1–10) |
+| `circuitBreakerCooldownMs` | — | `CIRCUIT_BREAKER_COOLDOWN_MS` | `60000` | Cooldown before re-enabling (1000–3600000) |
+| `requestTimeoutMs` | — | `REQUEST_TIMEOUT_MS` | `30000` | Upstream timeout (1000–300000) |
+| `allowedOrigins` | — | — | `["http://localhost:*", "http://127.0.0.1:*"]` | CORS origins (`[]` = allow all) |
+| `keys` | — | `OPENCODE_GO_KEYS` | — | Array of `{label, key}` |
+| `config` | `--config` | — | `config.yaml` | Path to YAML config |
 
 ### API Key Format
 
@@ -306,12 +320,12 @@ OPENCODE_GO_KEYS="account1:sk-xxx,account2:sk-yyy"
 
 ### API Key Encryption
 
-API keys can be encrypted at rest using AES-256-GCM with scrypt key derivation. When encrypted, keys are stored as `enc:scrypt:...` in `config.yaml` and decrypted at startup using the `OPENCODE_GO_ENCRYPTION_KEY` environment variable.
+Keys can be encrypted at rest using AES-256-GCM with scrypt key derivation. Encrypted keys look like `enc:scrypt:...` in `config.yaml` and get decrypted at startup using the `OPENCODE_GO_ENCRYPTION_KEY` environment variable.
 
 **Setup with encryption:**
 ```bash
 npm run setup
-# When prompted, choose to encrypt keys and enter a master key (min 16 characters)
+# Choose to encrypt keys and enter a master key (min 16 chars)
 ```
 
 **Running with encrypted keys:**
@@ -329,10 +343,10 @@ environment:
 
 **Notes:**
 - Encrypted keys use AES-256-GCM with scrypt KDF (N=16384, r=8, p=1)
-- Each key is encrypted with a random salt and IV
-- Plaintext keys (starting with `sk-`) are still supported for backward compatibility
-- The `OPENCODE_GO_KEYS` environment variable always uses plaintext keys (for CI/CD)
-- If keys are encrypted but `OPENCODE_GO_ENCRYPTION_KEY` is not set, the proxy will fail to start with a clear error message
+- Each key has its own random salt and IV
+- Plaintext keys (`sk-...`) still work — backward compatible
+- `OPENCODE_GO_KEYS` env var is always plaintext (for CI/CD)
+- If keys are encrypted but no `OPENCODE_GO_ENCRYPTION_KEY` is set, startup fails with a clear error
 
 ### CLI Flags
 
@@ -344,14 +358,14 @@ tsx src/index.ts --config my-config.yaml --port 4000 --host 0.0.0.0
 
 ## Usage Examples
 
-### Basic: Run with YAML config
+### Basic: YAML config
 
 ```bash
-# Create config.yaml (see Quick Start), then:
+# Create config.yaml, then:
 npx tsx src/index.ts
 ```
 
-### Advanced: Run with environment variables only
+### Advanced: Environment variables only
 
 ```bash
 export PROXY_PORT=4000
@@ -372,7 +386,7 @@ npx tsx src/index.ts
 npx tsx src/index.ts --config /etc/saros/config.yaml
 ```
 
-### Run as a background service (Linux)
+### Run as background service (Linux)
 
 ```bash
 nohup npx tsx src/index.ts > proxy.log 2>&1 &
@@ -382,9 +396,7 @@ nohup npx tsx src/index.ts > proxy.log 2>&1 &
 
 ## OpenCode Integration
 
-Configure OpenCode to route API requests through the proxy. Create or edit your OpenCode config file:
-
-**Location:** `~/.config/opencode/opencode.json` (global) or `opencode.json` in your project root
+Configure OpenCode to route API requests through the proxy. Edit your OpenCode config file at `~/.config/opencode/opencode.json` (global) or `opencode.json` in your project root:
 
 ```jsonc
 {
@@ -409,9 +421,9 @@ Configure OpenCode to route API requests through the proxy. Create or edit your 
 
 **Key points:**
 - `baseURL` must end at `/v1` — OpenCode appends route paths internally
-- `apiKey` can be any placeholder — the proxy handles real key selection
-- Model IDs must match what the upstream API expects (e.g., `glm-5`, not `opencode-go/glm-5`)
-- After editing the config, restart OpenCode
+- `apiKey` can be anything — the proxy handles real key selection
+- Model IDs must match what upstream expects (e.g., `glm-5`, not `opencode-go/glm-5`)
+- Restart OpenCode after editing the config
 
 **Alternative: Environment variable substitution**
 
@@ -434,7 +446,7 @@ Then set: `export OPENCODE_PROXY_URL=http://127.0.0.1:3000/zen/go/v1`
 
 **Using the proxy in OpenCode:**
 
-Once configured, select the proxy provider in OpenCode's model picker, or set it as default:
+Select the proxy provider in OpenCode's model picker, or set it as default:
 
 ```jsonc
 {
@@ -458,24 +470,23 @@ Returns JSON with key counts, active requests, and circuit-breaker state.
 ### View logs
 
 ```bash
-# Development (pretty-printed, colorized)
+# Dev mode (pretty-printed, colorized)
 NODE_ENV=development npx tsx src/index.ts
 
 # Production (structured JSON)
 NODE_ENV=production npx tsx src/index.ts
 ```
 
-### Verify which key served a request
+### See which key served a request
 
-The proxy returns two debug headers on every successful response:
+Saros adds two debug headers to every response:
 
-| Header | Example | Meaning |
+| Header | Example | What it is |
 |---|---|---|
-| `X-Proxy-Key-Label` | `primary` | Which configured key was used |
-| `X-Proxy-Request-Id` | `550e8400-e29b-41d4-a716-446655440000` | Unique request ID for log correlation |
+| `X-Proxy-Key-Label` | `primary` | Which key was used |
+| `X-Proxy-Request-Id` | `550e8400-e29b-41d4-a716-446655440000` | Unique ID for log correlation |
 
 ```bash
-# Check which key handled your request
 curl -s -D - http://127.0.0.1:3000/zen/go/v1/models | grep -i x-proxy
 # X-Proxy-Key-Label: primary
 # X-Proxy-Request-Id: 550e8400-e29b-41d4-a716-446655440000
@@ -485,11 +496,11 @@ curl -s -D - http://127.0.0.1:3000/zen/go/v1/models | grep -i x-proxy
 
 | Symptom | Likely cause | Fix |
 |---|---|---|
-| `No valid API keys configured` | Missing or invalid keys | Check `keys` in config.yaml or `OPENCODE_GO_KEYS` env var |
-| `ECONNREFUSED` on startup | Port already in use | Change `port` or kill the existing process |
-| `504 Gateway Timeout` | Upstream request exceeded timeout | Increase `requestTimeoutMs` or check upstream latency |
+| `No valid API keys configured` | Missing or bad keys | Check `keys` in config.yaml or `OPENCODE_GO_KEYS` |
+| `ECONNREFUSED` on startup | Port already in use | Change port or kill the existing process |
+| `504 Gateway Timeout` | Upstream too slow | Increase `requestTimeoutMs` |
 | `All API keys are temporarily unavailable` | All keys disabled by circuit breaker | Wait for cooldown or check upstream status |
-| `CORS violation` | Client origin not in `allowedOrigins` | Add the origin to `allowedOrigins` in config |
+| CORS error | Client origin not allowed | Add it to `allowedOrigins` in config |
 
 ---
 
@@ -498,10 +509,10 @@ curl -s -D - http://127.0.0.1:3000/zen/go/v1/models | grep -i x-proxy
 ### Run tests
 
 ```bash
-# Unit tests
+# All tests
 npm test
 
-# E2E tests (requires network)
+# Just E2E (needs network)
 npx vitest run test/e2e.test.ts
 
 # Watch mode
@@ -527,10 +538,10 @@ Output goes to `dist/`.
 ```
 src/
   index.ts          — Entry point, server startup, graceful shutdown
-  proxy.ts          — Hono HTTP app, routing, streaming, failover
+  proxy.ts          — Hono app, routing, streaming, failover
   proxy-logic.ts    — Pure logic: key selection, circuit breaker, error classification
   proxy-logic.test.ts — Unit tests for proxy logic
-  config.ts         — Configuration loading from YAML, env vars, CLI
+  config.ts         — Config loading from YAML, env vars, CLI
   logger.ts         — Structured logging with Pino + key masking
   cli/
     setup.ts        — Interactive setup wizard
@@ -540,74 +551,11 @@ test/
 
 ### Contributing
 
-1. Fork the repository.
+1. Fork the repo.
 2. Create a feature branch: `git checkout -b feat/my-feature`
-3. Commit changes: `git commit -am 'Add my feature'`
+3. Commit: `git commit -am 'Add my feature'`
 4. Push: `git push origin feat/my-feature`
 5. Open a pull request.
-
----
-
-## LLM Quick Reference
-
-If you're an AI assistant helping a user install this proxy, use these exact commands:
-
-**Prerequisites check:**
-```bash
-node --version  # Must be >= 22.0.0
-```
-
-**Install from source:**
-```bash
-git clone https://github.com/vitorvilaca3011/saros-proxy.git
-cd proxy
-npm install
-npm run build
-```
-
-**Configure:**
-```bash
-npm run setup  # Interactive wizard
-# OR manually: cp config.example.yaml config.yaml && edit config.yaml
-```
-
-**Run:**
-```bash
-npm run dev         # Development
-node dist/index.js  # Production
-```
-
-**Verify:**
-```bash
-curl http://127.0.0.1:3000/health
-```
-
-**Docker quick start:**
-```bash
-cp config.example.yaml config.yaml  # Edit with your keys
-npm run docker:build
-npm run docker:run
-```
-
-**Add to OpenCode config:**
-```bash
-# Run setup wizard and choose "Update OpenCode config automatically"
-npm run setup
-
-# Or manually edit ~/.config/opencode/opencode.json and add:
-{
-  "provider": {
-    "saros-proxy": {
-      "npm": "@ai-sdk/openai-compatible",
-      "name": "Saros",
-      "options": {
-        "baseURL": "http://127.0.0.1:3000/zen/go/v1",
-        "apiKey": "not-used"
-      }
-    }
-  }
-}
-```
 
 ---
 

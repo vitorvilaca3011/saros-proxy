@@ -1,3 +1,5 @@
+#!/usr/bin/env node
+
 /**
  * index.ts — Entry point for Saros.
  *
