@@ -134,8 +134,6 @@ Install Saros Proxy for my opencode. (https://github.com/vitorvilaca3011/saros-p
 Follow the instructions on LLM_INSTRUCTIONS.md.
 ```
 
-Your AI will take it from there. For a more detailed reference your assistant can read: [`LLM_INSTRUCTIONS.md`](LLM_INSTRUCTIONS.md).
-
 ---
 
 ### Quick Install (npm)
