@@ -116,7 +116,7 @@ export function daemonStart(port?: number, configPath?: string): void {
   // Spawn detached child (no console window on Windows)
   const child = spawn('node', args, {
     cwd: PACKAGE_ROOT,
-    stdio: ['ignore', 'pipe', 'pipe'],
+    stdio: ['ignore', 'ignore', 'ignore'], // child logs to its own stderr via pino
     detached: true,
     windowsHide: true,
     env: {
@@ -135,7 +135,6 @@ export function daemonStart(port?: number, configPath?: string): void {
   setTimeout(() => {
     if (isProcessAlive(pid)) {
       console.log(`Proxy started (PID ${pid}) on port ${port ?? 3000}`);
-      console.log(`Logs: ${PID_DIR}/daemon.log`);
 
       // Sync models to opencode.json — log warning on failure, don't block
       const syncResult = syncModelsToOpencodeConfig();

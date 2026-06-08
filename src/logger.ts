@@ -23,16 +23,35 @@ export function maskKey(key: string): string {
   return key.slice(0, 4) + '...' + key.slice(-4);
 }
 
-const isDev = process.env.NODE_ENV !== 'production';
+function createLogger() {
+  const isDev = process.env.NODE_ENV !== 'production';
 
-export const logger = pino({
-  level: process.env.LOG_LEVEL || 'info',
-  ...(isDev
-    ? {
-        transport: {
-          target: 'pino-pretty',
-          options: { colorize: true },
-        },
-      }
-    : {}),
-});
+  return pino({
+    level: process.env.LOG_LEVEL || 'info',
+    ...(isDev
+      ? {
+          transport: tryTransport('pino-pretty', { colorize: true }),
+        }
+      : {}),
+  });
+}
+
+/**
+ * Try to load a pino transport; return undefined if the target package
+ * is not available. This lets the CLI work from a `npm install -g` that
+ * only ships production dependencies.
+ */
+function tryTransport(
+  target: string,
+  options: Record<string, unknown>,
+): { target: string; options: Record<string, unknown> } | undefined {
+  try {
+    // pino.transport throws at runtime if the target package is missing
+    pino.transport({ target, options });
+    return { target, options };
+  } catch {
+    return undefined; // fall back to JSON logging
+  }
+}
+
+export const logger = createLogger();
