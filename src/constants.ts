@@ -32,15 +32,25 @@ export const OPENCODE_MODELS: Record<string, unknown> = {
     id: 'glm-5',
     name: 'GLM-5',
     tool_call: true,
+    reasoning: true,
     limit: { context: 200000, output: 131072 },
     modalities: { input: ['text'], output: ['text'] },
+    variants: {
+      none: { thinking: { type: 'disabled' } },
+      default: { thinking: { type: 'enabled' } },
+    },
   },
   'glm-5.1': {
     id: 'glm-5.1',
     name: 'GLM-5.1',
     tool_call: true,
+    reasoning: true,
     limit: { context: 200000, output: 131072 },
     modalities: { input: ['text'], output: ['text'] },
+    variants: {
+      none: { thinking: { type: 'disabled' } },
+      default: { thinking: { type: 'enabled' } },
+    },
   },
 
   // Kimi series (Moonshot - 256K context, dynamic output up to 256K)
@@ -48,15 +58,25 @@ export const OPENCODE_MODELS: Record<string, unknown> = {
     id: 'kimi-k2.5',
     name: 'Kimi K2.5',
     tool_call: true,
+    reasoning: true,
     limit: { context: 256000, output: 256000 },
     modalities: { input: ['text', 'image'], output: ['text'] },
+    variants: {
+      none: { thinking: { type: 'disabled' } },
+      default: { thinking: { type: 'enabled' } },
+    },
   },
   'kimi-k2.6': {
     id: 'kimi-k2.6',
     name: 'Kimi K2.6',
     tool_call: true,
+    reasoning: true,
     limit: { context: 256000, output: 256000 },
     modalities: { input: ['text', 'image'], output: ['text'] },
+    variants: {
+      none: { thinking: { type: 'disabled' } },
+      default: { thinking: { type: 'enabled' } },
+    },
   },
 
   // DeepSeek V4 series (1M context, 384K output, text-only)
@@ -64,15 +84,27 @@ export const OPENCODE_MODELS: Record<string, unknown> = {
     id: 'deepseek-v4-pro',
     name: 'DeepSeek V4 Pro',
     tool_call: true,
+    reasoning: true,
     limit: { context: 1000000, output: 384000 },
     modalities: { input: ['text'], output: ['text'] },
+    variants: {
+      none: { thinking: { type: 'disabled' } },
+      high: { thinking: { type: 'enabled' }, reasoningEffort: 'high' },
+      max: { thinking: { type: 'enabled' }, reasoningEffort: 'max' },
+    },
   },
   'deepseek-v4-flash': {
     id: 'deepseek-v4-flash',
     name: 'DeepSeek V4 Flash',
     tool_call: true,
+    reasoning: true,
     limit: { context: 1000000, output: 384000 },
     modalities: { input: ['text'], output: ['text'] },
+    variants: {
+      none: { thinking: { type: 'disabled' } },
+      high: { thinking: { type: 'enabled' }, reasoningEffort: 'high' },
+      max: { thinking: { type: 'enabled' }, reasoningEffort: 'max' },
+    },
   },
 
   // MiMo series (Xiaomi - 1M context except V2 Omni 256K)
@@ -80,29 +112,49 @@ export const OPENCODE_MODELS: Record<string, unknown> = {
     id: 'mimo-v2.5',
     name: 'MiMo V2.5',
     tool_call: true,
+    reasoning: true,
     limit: { context: 1000000, output: 128000 },
     modalities: { input: ['text', 'image'], output: ['text'] },
+    variants: {
+      none: { thinking: { type: 'disabled' } },
+      default: { thinking: { type: 'enabled' } },
+    },
   },
   'mimo-v2.5-pro': {
     id: 'mimo-v2.5-pro',
     name: 'MiMo V2.5 Pro',
     tool_call: true,
+    reasoning: true,
     limit: { context: 1000000, output: 128000 },
     modalities: { input: ['text'], output: ['text'] },
+    variants: {
+      none: { thinking: { type: 'disabled' } },
+      default: { thinking: { type: 'enabled' } },
+    },
   },
   'mimo-v2-pro': {
     id: 'mimo-v2-pro',
     name: 'MiMo V2 Pro',
     tool_call: true,
+    reasoning: true,
     limit: { context: 1000000, output: 128000 },
     modalities: { input: ['text'], output: ['text'] },
+    variants: {
+      none: { thinking: { type: 'disabled' } },
+      default: { thinking: { type: 'enabled' } },
+    },
   },
   'mimo-v2-omni': {
     id: 'mimo-v2-omni',
     name: 'MiMo V2 Omni',
     tool_call: true,
+    reasoning: true,
     limit: { context: 256000, output: 128000 },
     modalities: { input: ['text', 'image'], output: ['text'] },
+    variants: {
+      none: { thinking: { type: 'disabled' } },
+      default: { thinking: { type: 'enabled' } },
+    },
   },
 
   // MiniMax series (1M context for M3, 200K for M2.x)
@@ -110,13 +162,19 @@ export const OPENCODE_MODELS: Record<string, unknown> = {
     id: 'minimax-m3',
     name: 'MiniMax M3',
     tool_call: true,
+    reasoning: true,
     limit: { context: 1000000, output: 524288 },
     modalities: { input: ['text', 'image'], output: ['text'] },
+    variants: {
+      none: { thinking: { type: 'disabled' } },
+      default: { thinking: { type: 'adaptive' } },
+    },
   },
   'minimax-m2.7': {
     id: 'minimax-m2.7',
     name: 'MiniMax M2.7',
     tool_call: true,
+    reasoning: true,
     limit: { context: 200000, output: 200000 },
     modalities: { input: ['text'], output: ['text'] },
   },
@@ -124,6 +182,7 @@ export const OPENCODE_MODELS: Record<string, unknown> = {
     id: 'minimax-m2.5',
     name: 'MiniMax M2.5',
     tool_call: true,
+    reasoning: true,
     limit: { context: 200000, output: 200000 },
     modalities: { input: ['text'], output: ['text'] },
   },
@@ -133,37 +192,63 @@ export const OPENCODE_MODELS: Record<string, unknown> = {
     id: 'qwen3.7-max',
     name: 'Qwen 3.7 Max',
     tool_call: true,
+    reasoning: true,
     limit: { context: 1000000, output: 65536 },
     modalities: { input: ['text'], output: ['text'] },
+    variants: {
+      none: { enable_thinking: false },
+      default: { enable_thinking: true, thinking_budget: 256000 },
+    },
   },
   'qwen3.7-plus': {
     id: 'qwen3.7-plus',
     name: 'Qwen 3.7 Plus',
     tool_call: true,
+    reasoning: true,
     limit: { context: 1000000, output: 65536 },
     modalities: { input: ['text', 'image'], output: ['text'] },
+    variants: {
+      none: { enable_thinking: false },
+      default: { enable_thinking: true, thinking_budget: 80000 },
+    },
   },
   'qwen3.6-plus': {
     id: 'qwen3.6-plus',
     name: 'Qwen 3.6 Plus',
     tool_call: true,
+    reasoning: true,
     limit: { context: 1000000, output: 65536 },
     modalities: { input: ['text', 'image'], output: ['text'] },
+    variants: {
+      none: { enable_thinking: false },
+      default: { enable_thinking: true, thinking_budget: 80000 },
+    },
   },
   'qwen3.5-plus': {
     id: 'qwen3.5-plus',
     name: 'Qwen 3.5 Plus',
     tool_call: true,
+    reasoning: true,
     limit: { context: 1000000, output: 65536 },
     modalities: { input: ['text', 'image'], output: ['text'] },
+    variants: {
+      none: { enable_thinking: false },
+      default: { enable_thinking: true, thinking_budget: 80000 },
+    },
   },
 
-  // HY3 Preview (Tencent - 256K context, 256K output)
+  // HY3 Preview (Tencent - 256K context, 128K output)
   'hy3-preview': {
     id: 'hy3-preview',
     name: 'HY3 Preview',
     tool_call: true,
-    limit: { context: 262144, output: 262144 },
+    reasoning: true,
+    limit: { context: 262144, output: 131072 },
     modalities: { input: ['text'], output: ['text'] },
+    variants: {
+      no_think: { chat_template_kwargs: { reasoning_effort: 'no_think' } },
+      low: { chat_template_kwargs: { reasoning_effort: 'low' } },
+      high: { chat_template_kwargs: { reasoning_effort: 'high' } },
+    },
   },
 };
