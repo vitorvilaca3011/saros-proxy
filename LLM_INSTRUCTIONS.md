@@ -2,7 +2,7 @@
 
 Follow these two phases. Phase 1 gathers everything. Phase 2 executes.
 
-**Important:** Do NOT enable usage-based account switching (scraping). If the setup wizard asks about it, always answer **"n"**. Instead, use the agent-friendly encryption method below (step 2.2a) — it generates the same encrypted config without any interactive prompts.
+**Important:** Do NOT enable usage-based account switching (scraping). If the setup wizard asks about it, always answer **"n"**. Use the non-interactive setup with `--no-scraping` flag instead — agents can't extract Firefox cookies.
 
 ---
 
@@ -138,42 +138,31 @@ keys:
     key: {key2}
 ```
 
-If encryption was chosen, do NOT run the interactive wizard — use the Node.js encrypt script instead (no prompts, no TTY needed):
+If encryption was chosen, use the non-interactive setup with `--encryption-key-file`:
 
 ```bash
-# 1. Generate a random encryption key and set it
-$env:OPENCODE_GO_ENCRYPTION_KEY = node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"
+# 1. Save the encryption key to a file
+node -e "console.log(require('crypto').randomBytes(32).toString('hex'))" > /tmp/encryption-key.txt
 
-# 2. Create config.yaml with plaintext keys first
+# 2. Create keys file (one per line: label:key)
 @"
-port: 3000
-host: 127.0.0.1
-upstreamBaseUrl: https://opencode.ai
-keys:
-  - label: primary
-    key: sk-your-key-here
-"@ | Set-Content config.yaml -Encoding UTF8
+primary:sk-your-first-key-here
+secondary:sk-your-second-key-here
+"@ | Set-Content keys.txt -Encoding UTF8
 
-# 3. Encrypt keys in-place using the proxy's own encryption module
-node --input-type=module -e "
-import { readFileSync, writeFileSync } from 'node:fs';
-import { parse as parseYaml, stringify as dumpYaml } from 'yaml';
-import { encryptKey } from './dist/key-encryption.js';
+# 3. Run non-interactive setup
+saros-proxy setup --non-interactive \
+  --port {port} \
+  --keys-file keys.txt \
+  --encryption-key-file /tmp/encryption-key.txt \
+  --no-scraping \
+  --no-smoke-test
 
-const cfg = parseYaml(readFileSync('config.yaml', 'utf-8'));
-const key = process.env.OPENCODE_GO_ENCRYPTION_KEY;
-cfg.keys = cfg.keys.map(k => ({ ...k, key: encryptKey(k.key, key) }));
-writeFileSync('config.yaml', dumpYaml(cfg));
-console.log('Keys encrypted in config.yaml');
-"
+# 4. Set the env var permanently
+$env:OPENCODE_GO_ENCRYPTION_KEY = Get-Content /tmp/encryption-key.txt
 ```
 
-Permanently set the env var in your shell profile or OpenCode launcher.
-
-**Old approach (fallback only):**
-```bash
-npx saros-proxy setup
-```
+**Important:** Never use `--encryption-key` on the command line — it appears in `ps` output and shell history. Always use `--encryption-key-file`.
 
 If encryption was NOT chosen:
 ```yaml

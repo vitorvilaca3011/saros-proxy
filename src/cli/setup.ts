@@ -45,6 +45,178 @@ import * as ui from './ui.js';
 const PACKAGE_ROOT = pathResolve(fileURLToPath(import.meta.url), '..', '..', '..');
 
 // ---------------------------------------------------------------------------
+// Non-interactive setup options
+// ---------------------------------------------------------------------------
+
+export interface SetupOptions {
+  /** Skip all prompts — requires --keys or --keys-file */
+  nonInteractive?: boolean;
+  /** Proxy listen port */
+  port?: number;
+  /** Upstream API base URL */
+  upstream?: string;
+  /** Comma-separated label:key pairs */
+  keys?: string;
+  /** Path to keys file (one per line: label:key) */
+  keysFile?: string;
+  /** Master encryption key (prefer --encryption-key-file for security) */
+  encryptionKey?: string;
+  /** Path to file containing encryption key */
+  encryptionKeyFile?: string;
+  /** Skip encryption entirely */
+  noEncryption?: boolean;
+  /** Skip scraping setup */
+  noScraping?: boolean;
+  /** Skip proxy smoke test */
+  noSmokeTest?: boolean;
+  /** Skip opencode.json configuration */
+  noOpencodeConfig?: boolean;
+  /** Path to opencode.json */
+  opencodeConfig?: string;
+  /** Output config.yaml path (directory) */
+  configDir?: string;
+  /** Minimal output for agent parsing */
+  quiet?: boolean;
+  /** Legacy: config directory (for backward compatibility) */
+  legacyConfigDir?: string;
+  /** Legacy: skip smoke test (for backward compatibility) */
+  legacySkipSmokeTest?: boolean;
+}
+
+/** Parse CLI arguments for non-interactive setup. */
+export function parseSetupArgs(argv: string[] = process.argv.slice(2)): SetupOptions {
+  const opts: SetupOptions = {};
+
+  for (let i = 0; i < argv.length; i++) {
+    const arg = argv[i];
+    if (!arg) break;
+
+    switch (arg) {
+      case '--non-interactive':
+        opts.nonInteractive = true;
+        break;
+      case '--port':
+        opts.port = Number.parseInt(argv[++i] ?? '', 10);
+        break;
+      case '--upstream':
+        opts.upstream = argv[++i];
+        break;
+      case '--keys':
+        opts.keys = argv[++i];
+        break;
+      case '--keys-file':
+        opts.keysFile = argv[++i];
+        break;
+      case '--encryption-key':
+        opts.encryptionKey = argv[++i];
+        break;
+      case '--encryption-key-file':
+        opts.encryptionKeyFile = argv[++i];
+        break;
+      case '--no-encryption':
+        opts.noEncryption = true;
+        break;
+      case '--no-scraping':
+        opts.noScraping = true;
+        break;
+      case '--no-smoke-test':
+        opts.noSmokeTest = true;
+        break;
+      case '--no-opencode-config':
+        opts.noOpencodeConfig = true;
+        break;
+      case '--opencode-config':
+        opts.opencodeConfig = argv[++i];
+        break;
+      case '--config':
+        opts.configDir = argv[++i];
+        break;
+      case '--quiet':
+        opts.quiet = true;
+        break;
+    }
+  }
+
+  return opts;
+}
+
+/** Parse keys from comma-separated label:key pairs. */
+export function parseKeysFromArgs(keysStr: string): Array<{ label: string; key: string }> {
+  if (!keysStr.trim()) return [];
+  return keysStr.split(',').map((pair) => {
+    const trimmed = pair.trim();
+    const [label, ...rest] = trimmed.split(':');
+    const key = rest.join(':');
+    return { label: label ?? '', key };
+  });
+}
+
+/** Parse keys from file (one per line: label:key). */
+export function parseKeysFromFile(filePath: string): Array<{ label: string; key: string }> {
+  const content = readFileSync(filePath, 'utf-8');
+  return content
+    .split('\n')
+    .map((line) => line.trim())
+    .filter((line) => line && !line.startsWith('#'))
+    .map((line) => {
+      const [label, ...rest] = line.split(':');
+      const key = rest.join(':');
+      return { label: label ?? '', key };
+    });
+}
+
+interface ValidationError {
+  field: string;
+  message: string;
+}
+
+/** Validate non-interactive args. Returns array of errors (empty = valid). */
+export function validateNonInteractiveArgs(opts: SetupOptions): ValidationError[] {
+  const errors: ValidationError[] = [];
+
+  // Keys are required
+  if (!opts.keys && !opts.keysFile) {
+    errors.push({ field: 'keys', message: 'Either --keys or --keys-file is required in non-interactive mode' });
+  }
+
+  // Encryption: must specify one or the other
+  if (opts.encryptionKey && opts.noEncryption) {
+    errors.push({ field: 'encryption', message: 'Cannot use both --encryption-key and --no-encryption' });
+  }
+  if (!opts.encryptionKey && !opts.encryptionKeyFile && !opts.noEncryption) {
+    errors.push({ field: 'encryption', message: 'Must specify --encryption-key, --encryption-key-file, or --no-encryption' });
+  }
+
+  // Port validation
+  if (opts.port !== undefined && !isValidPort(String(opts.port))) {
+    errors.push({ field: 'port', message: 'Port must be a number between 1 and 65535' });
+  }
+
+  // Upstream validation
+  if (opts.upstream && !isValidHttpsUrl(opts.upstream)) {
+    errors.push({ field: 'upstream', message: 'Upstream must be a valid HTTPS URL' });
+  }
+
+  // Encryption key length
+  if (opts.encryptionKey && opts.encryptionKey.length < 16) {
+    errors.push({ field: 'encryptionKey', message: 'Encryption key must be at least 16 characters' });
+  }
+
+  // Validate keys
+  if (opts.keys) {
+    const keys = parseKeysFromArgs(opts.keys);
+    for (const k of keys) {
+      if (!k.label) errors.push({ field: 'keys', message: 'Key label cannot be empty' });
+      if (!isValidApiKey(k.key)) {
+        errors.push({ field: 'keys', message: `Key "${k.label}" must start with "sk-" and be at least 20 characters` });
+      }
+    }
+  }
+
+  return errors;
+}
+
+// ---------------------------------------------------------------------------
 // Environment variable persistence
 // ---------------------------------------------------------------------------
 
@@ -723,7 +895,99 @@ async function configureOpencodeClient(port: number): Promise<void> {
 // Main
 // ---------------------------------------------------------------------------
 
-export async function setup(configDir = dirname(getDefaultConfigPath()), skipSmokeTest = false): Promise<void> {
+export async function setup(configDir?: string, skipSmokeTest?: boolean): Promise<void> {
+  // Parse CLI args for non-interactive mode
+  const cliOpts = parseSetupArgs();
+
+  // Merge legacy args with CLI opts
+  const opts: SetupOptions = {
+    ...cliOpts,
+    legacyConfigDir: configDir,
+    legacySkipSmokeTest: skipSmokeTest,
+  };
+
+  // Resolve effective options
+  const effectiveConfigDir = opts.configDir ?? opts.legacyConfigDir ?? dirname(getDefaultConfigPath());
+  const effectiveSkipSmokeTest = opts.noSmokeTest ?? opts.legacySkipSmokeTest ?? false;
+
+  // -----------------------------------------------------------------------
+  // Non-interactive path
+  // -----------------------------------------------------------------------
+  if (opts.nonInteractive) {
+    // Validate args
+    const errors = validateNonInteractiveArgs(opts);
+    if (errors.length > 0) {
+      for (const e of errors) {
+        console.error(`Error: ${e.field} — ${e.message}`);
+      }
+      process.exit(1);
+    }
+
+    // Parse keys
+    let keys: Array<{ label: string; key: string }>;
+    if (opts.keysFile) {
+      keys = parseKeysFromFile(opts.keysFile);
+    } else {
+      keys = parseKeysFromArgs(opts.keys!);
+    }
+
+    // Resolve encryption key
+    let encryptionKey: string | undefined;
+    if (opts.encryptionKeyFile) {
+      encryptionKey = readFileSync(opts.encryptionKeyFile, 'utf-8').trim();
+    } else if (opts.encryptionKey) {
+      encryptionKey = opts.encryptionKey;
+    }
+
+    // Encrypt keys if needed
+    const finalKeys = encryptionKey
+      ? keys.map((k) => ({ ...k, key: encryptKey(k.key, encryptionKey!) }))
+      : keys;
+
+    const cfg: SetupConfig = {
+      port: opts.port ?? DEFAULT_PORT,
+      upstreamBaseUrl: opts.upstream ?? DEFAULT_UPSTREAM_URL,
+      keys: finalKeys,
+    };
+
+    // Write config
+    const configPath = await writeConfigFile(cfg, effectiveConfigDir, encryptionKey !== undefined);
+
+    // Smoke test (unless skipped)
+    if (!effectiveSkipSmokeTest) {
+      await runSmokeTestIfEnabled({
+        port: cfg.port,
+        configDir: effectiveConfigDir,
+        encryptionKey,
+        configPath,
+        skipSmokeTest: false,
+      });
+    }
+
+    // OpenCode config (unless skipped)
+    if (!opts.noOpencodeConfig) {
+      const opencodePath = opts.opencodeConfig ?? getDefaultOpencodeConfigPath();
+      if (existsSync(opencodePath)) {
+        const result = updateOpencodeConfig(cfg.port, { configPath: opencodePath });
+        if (result.success) {
+          if (!opts.quiet) console.log(`OpenCode config updated: ${result.path}`);
+        }
+      }
+    }
+
+    // Output
+    if (opts.quiet) {
+      console.log(configPath);
+    } else {
+      console.log(`Config written to ${configPath}`);
+    }
+
+    return;
+  }
+
+  // -----------------------------------------------------------------------
+  // Interactive path (default)
+  // -----------------------------------------------------------------------
   ui.intro('Saros — Setup');
 
   ui.step('Server Configuration');
@@ -752,14 +1016,14 @@ export async function setup(configDir = dirname(getDefaultConfigPath()), skipSmo
     scrapingIntervalMs: scraping?.intervalMs,
   };
 
-  const configPath = await writeConfigFile(cfg, configDir, encryptionKey !== undefined);
+  const configPath = await writeConfigFile(cfg, effectiveConfigDir, encryptionKey !== undefined);
 
   await runSmokeTestIfEnabled({
     port,
-    configDir,
+    configDir: effectiveConfigDir,
     encryptionKey,
     configPath,
-    skipSmokeTest,
+    skipSmokeTest: effectiveSkipSmokeTest,
   });
 
   ui.step('OpenCode Client Configuration');

@@ -32,7 +32,12 @@ import {
   backupExistingConfig,
   testProxy,
   setup,
+  parseSetupArgs,
+  parseKeysFromArgs,
+  parseKeysFromFile,
+  validateNonInteractiveArgs,
   type SetupConfig,
+  type SetupOptions,
 } from '../src/cli/setup.js';
 
 // ---------------------------------------------------------------------------
@@ -609,6 +614,174 @@ describe('CLI Setup Wizard', () => {
       // Should complete without error
       const configPath = join(tmpDir, 'config.yaml');
       expect(existsSync(configPath)).toBe(true);
+    });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Non-interactive setup tests
+// ---------------------------------------------------------------------------
+
+describe('Non-interactive Setup', () => {
+  let tmpDir: string;
+
+  beforeEach(() => {
+    tmpDir = mkdtempSync(join(tmpdir(), 'saros-ni-test-'));
+  });
+
+  afterEach(() => {
+    rmSync(tmpDir, { recursive: true, force: true });
+  });
+
+  describe('parseSetupArgs', () => {
+    it('parses --non-interactive flag', () => {
+      const opts = parseSetupArgs(['--non-interactive']);
+      expect(opts.nonInteractive).toBe(true);
+    });
+
+    it('parses --port', () => {
+      const opts = parseSetupArgs(['--non-interactive', '--port', '4000']);
+      expect(opts.port).toBe(4000);
+    });
+
+    it('parses --keys', () => {
+      const opts = parseSetupArgs(['--non-interactive', '--keys', 'primary:sk-xxx']);
+      expect(opts.keys).toBe('primary:sk-xxx');
+    });
+
+    it('parses --keys-file', () => {
+      const opts = parseSetupArgs(['--non-interactive', '--keys-file', '/path/to/keys.txt']);
+      expect(opts.keysFile).toBe('/path/to/keys.txt');
+    });
+
+    it('parses --encryption-key-file', () => {
+      const opts = parseSetupArgs(['--non-interactive', '--encryption-key-file', '/path/to/key.txt']);
+      expect(opts.encryptionKeyFile).toBe('/path/to/key.txt');
+    });
+
+    it('parses --no-encryption', () => {
+      const opts = parseSetupArgs(['--non-interactive', '--no-encryption']);
+      expect(opts.noEncryption).toBe(true);
+    });
+
+    it('parses --no-scraping', () => {
+      const opts = parseSetupArgs(['--non-interactive', '--no-scraping']);
+      expect(opts.noScraping).toBe(true);
+    });
+
+    it('parses --quiet', () => {
+      const opts = parseSetupArgs(['--non-interactive', '--quiet']);
+      expect(opts.quiet).toBe(true);
+    });
+  });
+
+  describe('parseKeysFromArgs', () => {
+    it('parses single key', () => {
+      const keys = parseKeysFromArgs('primary:sk-123456789012345678');
+      expect(keys).toEqual([{ label: 'primary', key: 'sk-123456789012345678' }]);
+    });
+
+    it('parses multiple keys', () => {
+      const keys = parseKeysFromArgs('primary:sk-xxx,secondary:sk-yyy');
+      expect(keys).toHaveLength(2);
+      expect(keys[0].label).toBe('primary');
+      expect(keys[1].label).toBe('secondary');
+    });
+
+    it('handles key with colons (encrypted)', () => {
+      const keys = parseKeysFromArgs('primary:enc:scrypt:salt:iv:ciphertext:authTag');
+      expect(keys[0].key).toBe('enc:scrypt:salt:iv:ciphertext:authTag');
+    });
+
+    it('returns empty array for empty string', () => {
+      const keys = parseKeysFromArgs('');
+      expect(keys).toEqual([]);
+    });
+  });
+
+  describe('parseKeysFromFile', () => {
+    it('parses keys from file', () => {
+      const keysPath = join(tmpDir, 'keys.txt');
+      writeFileSync(keysPath, 'primary:sk-xxx\nsecondary:sk-yyy\n');
+
+      const keys = parseKeysFromFile(keysPath);
+      expect(keys).toHaveLength(2);
+      expect(keys[0].label).toBe('primary');
+      expect(keys[1].label).toBe('secondary');
+    });
+
+    it('skips comments and empty lines', () => {
+      const keysPath = join(tmpDir, 'keys.txt');
+      writeFileSync(keysPath, '# Comment\n\nprimary:sk-xxx\n\n# Another comment\n');
+
+      const keys = parseKeysFromFile(keysPath);
+      expect(keys).toHaveLength(1);
+    });
+  });
+
+  describe('validateNonInteractiveArgs', () => {
+    it('requires --keys or --keys-file', () => {
+      const errors = validateNonInteractiveArgs({ nonInteractive: true });
+      expect(errors.some((e) => e.field === 'keys')).toBe(true);
+    });
+
+    it('requires encryption or --no-encryption', () => {
+      const errors = validateNonInteractiveArgs({
+        nonInteractive: true,
+        keys: 'primary:sk-123456789012345678',
+      });
+      expect(errors.some((e) => e.field === 'encryption')).toBe(true);
+    });
+
+    it('rejects both --encryption-key and --no-encryption', () => {
+      const errors = validateNonInteractiveArgs({
+        nonInteractive: true,
+        keys: 'primary:sk-123456789012345678',
+        encryptionKey: 'my-key-12345678',
+        noEncryption: true,
+      });
+      expect(errors.some((e) => e.field === 'encryption')).toBe(true);
+    });
+
+    it('validates port', () => {
+      const errors = validateNonInteractiveArgs({
+        nonInteractive: true,
+        keys: 'primary:sk-123456789012345678',
+        noEncryption: true,
+        port: 99999,
+      });
+      expect(errors).toHaveLength(1);
+      expect(errors[0].field).toBe('port');
+    });
+
+    it('validates upstream URL', () => {
+      const errors = validateNonInteractiveArgs({
+        nonInteractive: true,
+        keys: 'primary:sk-123456789012345678',
+        noEncryption: true,
+        upstream: 'http://insecure.com',
+      });
+      expect(errors).toHaveLength(1);
+      expect(errors[0].field).toBe('upstream');
+    });
+
+    it('validates encryption key length', () => {
+      const errors = validateNonInteractiveArgs({
+        nonInteractive: true,
+        keys: 'primary:sk-123456789012345678',
+        encryptionKey: 'short',
+      });
+      expect(errors).toHaveLength(1);
+      expect(errors[0].field).toBe('encryptionKey');
+    });
+
+    it('passes with valid args', () => {
+      const errors = validateNonInteractiveArgs({
+        nonInteractive: true,
+        keys: 'primary:sk-123456789012345678',
+        noEncryption: true,
+      });
+      expect(errors).toHaveLength(0);
     });
   });
 });
