@@ -21,6 +21,7 @@ import { FORCE_SHUTDOWN_TIMEOUT_MS } from './constants.js';
 import { daemonStart, daemonStop, daemonStatus } from './cli/daemon.js';
 import { syncModelsToOpencodeConfig } from './cli/opencode-config.js';
 import { autostartInstall, autostartUninstall, autostartStatus } from './cli/autostart.js';
+import { checkForUpdate } from './cli/update-check.js';
 
 // ---------------------------------------------------------------------------
 // Subcommand dispatch — if/else if prevents fallthrough to server code
@@ -126,6 +127,9 @@ if (subcommand === 'start') {
   }
 
   logSecurityWarnings(config);
+
+  // Fire-and-forget version check
+  checkForUpdate();
 
   // -----------------------------------------------------------------------
   // Server

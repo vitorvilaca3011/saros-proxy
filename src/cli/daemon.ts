@@ -18,6 +18,7 @@ import { resolve as pathResolve, join as pathJoin } from 'node:path';
 import { homedir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { syncModelsToOpencodeConfig } from './opencode-config.js';
+import { checkForUpdate } from './update-check.js';
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -143,6 +144,9 @@ export function daemonStart(port?: number, configPath?: string): void {
       } else {
         console.warn(`Model sync skipped: ${syncResult.error}`);
       }
+
+      // Check for newer version — fire-and-forget
+      checkForUpdate();
 
       process.exit(0);
     } else {
