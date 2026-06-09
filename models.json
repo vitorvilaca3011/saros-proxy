@@ -5,7 +5,12 @@
     "tool_call": true,
     "reasoning": true,
     "limit": { "context": 202752, "output": 32768 },
-    "modalities": { "input": ["text"], "output": ["text"] }
+    "modalities": { "input": ["text"], "output": ["text"] },
+    "variants": {
+      "low": { "reasoningEffort": "low" },
+      "medium": { "reasoningEffort": "medium" },
+      "high": { "reasoningEffort": "high" }
+    }
   },
   "glm-5.1": {
     "id": "glm-5.1",
@@ -13,7 +18,12 @@
     "tool_call": true,
     "reasoning": true,
     "limit": { "context": 202752, "output": 32768 },
-    "modalities": { "input": ["text"], "output": ["text"] }
+    "modalities": { "input": ["text"], "output": ["text"] },
+    "variants": {
+      "low": { "reasoningEffort": "low" },
+      "medium": { "reasoningEffort": "medium" },
+      "high": { "reasoningEffort": "high" }
+    }
   },
   "kimi-k2.5": {
     "id": "kimi-k2.5",
@@ -87,7 +97,12 @@
     "tool_call": true,
     "reasoning": true,
     "limit": { "context": 512000, "output": 131072 },
-    "modalities": { "input": ["text", "image", "video"], "output": ["text"] }
+    "modalities": { "input": ["text", "image", "video"], "output": ["text"] },
+    "variants": {
+      "low": { "reasoningEffort": "low" },
+      "medium": { "reasoningEffort": "medium" },
+      "high": { "reasoningEffort": "high" }
+    }
   },
   "minimax-m2.7": {
     "id": "minimax-m2.7",
@@ -95,7 +110,12 @@
     "tool_call": true,
     "reasoning": true,
     "limit": { "context": 204800, "output": 131072 },
-    "modalities": { "input": ["text"], "output": ["text"] }
+    "modalities": { "input": ["text"], "output": ["text"] },
+    "variants": {
+      "low": { "reasoningEffort": "low" },
+      "medium": { "reasoningEffort": "medium" },
+      "high": { "reasoningEffort": "high" }
+    }
   },
   "minimax-m2.5": {
     "id": "minimax-m2.5",
@@ -103,7 +123,12 @@
     "tool_call": true,
     "reasoning": true,
     "limit": { "context": 204800, "output": 65536 },
-    "modalities": { "input": ["text"], "output": ["text"] }
+    "modalities": { "input": ["text"], "output": ["text"] },
+    "variants": {
+      "low": { "reasoningEffort": "low" },
+      "medium": { "reasoningEffort": "medium" },
+      "high": { "reasoningEffort": "high" }
+    }
   },
   "qwen3.7-max": {
     "id": "qwen3.7-max",
@@ -111,7 +136,12 @@
     "tool_call": true,
     "reasoning": true,
     "limit": { "context": 1000000, "output": 65536 },
-    "modalities": { "input": ["text"], "output": ["text"] }
+    "modalities": { "input": ["text"], "output": ["text"] },
+    "variants": {
+      "low": { "reasoningEffort": "low" },
+      "medium": { "reasoningEffort": "medium" },
+      "high": { "reasoningEffort": "high" }
+    }
   },
   "qwen3.7-plus": {
     "id": "qwen3.7-plus",
@@ -119,7 +149,12 @@
     "tool_call": true,
     "reasoning": true,
     "limit": { "context": 1000000, "output": 65536 },
-    "modalities": { "input": ["text", "image", "video"], "output": ["text"] }
+    "modalities": { "input": ["text", "image", "video"], "output": ["text"] },
+    "variants": {
+      "low": { "reasoningEffort": "low" },
+      "medium": { "reasoningEffort": "medium" },
+      "high": { "reasoningEffort": "high" }
+    }
   },
   "qwen3.6-plus": {
     "id": "qwen3.6-plus",
@@ -127,7 +162,12 @@
     "tool_call": true,
     "reasoning": true,
     "limit": { "context": 1000000, "output": 65536 },
-    "modalities": { "input": ["text", "image", "video"], "output": ["text"] }
+    "modalities": { "input": ["text", "image", "video"], "output": ["text"] },
+    "variants": {
+      "low": { "reasoningEffort": "low" },
+      "medium": { "reasoningEffort": "medium" },
+      "high": { "reasoningEffort": "high" }
+    }
   },
   "qwen3.5-plus": {
     "id": "qwen3.5-plus",
@@ -136,7 +176,12 @@
     "reasoning": true,
     "limit": { "context": 262144, "output": 65536 },
     "modalities": { "input": ["text", "image", "video"], "output": ["text"] },
-    "_deprecated": true
+    "_deprecated": true,
+    "variants": {
+      "low": { "reasoningEffort": "low" },
+      "medium": { "reasoningEffort": "medium" },
+      "high": { "reasoningEffort": "high" }
+    }
   },
   "hy3-preview": {
     "id": "hy3-preview",
