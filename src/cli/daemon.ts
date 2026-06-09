@@ -30,6 +30,45 @@ const PACKAGE_ROOT = pathResolve(fileURLToPath(import.meta.url), '..', '..', '..
 const ENTRY_POINT = pathResolve(PACKAGE_ROOT, 'dist', 'index.js');
 
 // ---------------------------------------------------------------------------
+// Windows registry helper — reads env vars set at User scope
+// ---------------------------------------------------------------------------
+
+/**
+ * On Windows, env vars set via [System.Environment]::SetEnvironmentVariable
+ * at User scope are not visible to the current process until it restarts.
+ * This reads them from the registry so the daemon child inherits them.
+ */
+function readWindowsUserEnv(name: string): string | undefined {
+  if (process.platform !== 'win32') return undefined;
+  try {
+    const out = execFileSync('reg', [
+      'query',
+      'HKCU\\Environment',
+      '/v',
+      name,
+    ], { windowsHide: true, stdio: 'pipe', timeout: 5000 });
+    // Parse: "    name    REG_SZ    value"
+    const lines = out.toString().split('\n');
+    for (const line of lines) {
+      if (line.includes(name) && line.includes('REG_SZ')) {
+        const parts = line.split('REG_SZ');
+        if (parts[1]) return parts[1].trim();
+      }
+    }
+  } catch {
+    // Key doesn't exist or reg query failed
+  }
+  return undefined;
+}
+
+/**
+ * Get env var, falling back to Windows registry for User-scope vars.
+ */
+function getEnv(name: string): string | undefined {
+  return process.env[name] ?? readWindowsUserEnv(name);
+}
+
+// ---------------------------------------------------------------------------
 // PID file management
 // ---------------------------------------------------------------------------
 
@@ -135,15 +174,17 @@ export function daemonStart(port?: number, configPath?: string): void {
   if (configPath) args.push('--config', configPath);
 
   // Spawn detached child (no console window on Windows)
+  // Read env vars from registry if not in process.env (Windows User-scope fix)
+  const env: Record<string, string | undefined> = { ...process.env, NODE_ENV: 'production' };
+  const encKey = getEnv('OPENCODE_GO_ENCRYPTION_KEY');
+  if (encKey) env.OPENCODE_GO_ENCRYPTION_KEY = encKey;
+
   const child = spawn('node', args, {
     cwd: PACKAGE_ROOT,
     stdio: ['ignore', 'ignore', 'ignore'], // child logs to its own stderr via pino
     detached: true,
     windowsHide: true,
-    env: {
-      ...process.env,
-      NODE_ENV: 'production',
-    },
+    env,
   });
 
   // Allow parent to exit independently while child continues
