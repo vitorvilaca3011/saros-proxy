@@ -232,14 +232,13 @@ describe('OpenCode Config Integration', () => {
       );
     });
 
-    it('does not include models in snippet (discovered dynamically from /v1/models)', () => {
+    it('includes models in snippet from models.json', () => {
       const snippet = generateManualConfigSnippet(3000);
       const parsed = JSON.parse(snippet);
 
-      // Models should NOT be in the snippet — they're discovered from /v1/models
-      expect(parsed.provider['saros-proxy'].models).toBeUndefined();
-      // Only npm, name, options should be present
-      expect(Object.keys(parsed.provider['saros-proxy'])).toEqual(['npm', 'name', 'options']);
+      // Models should be in the snippet — loaded from models.json
+      expect(parsed.provider['saros-proxy'].models).toBeDefined();
+      expect(Object.keys(parsed.provider['saros-proxy'].models).length).toBeGreaterThan(0);
     });
   });
 

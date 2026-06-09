@@ -8,6 +8,7 @@
 import { existsSync, readFileSync, writeFileSync, copyFileSync, mkdirSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { homedir } from 'node:os';
+import { OPENCODE_MODELS } from '../constants.js';
 
 // ---------------------------------------------------------------------------
 // Path detection
@@ -17,6 +18,30 @@ import { homedir } from 'node:os';
 export function getDefaultOpencodeConfigPath(): string {
   const home = homedir();
   return join(home, '.config', 'opencode', 'opencode.json');
+}
+
+/** Return the path to models.json (source of truth for model definitions). */
+export function getModelsJsonPath(): string {
+  const home = homedir();
+  return join(home, '.config', 'saros', 'models.json');
+}
+
+/**
+ * Load models from models.json, falling back to bundled defaults.
+ * @param configPath — Explicit path to models.json (optional, for testing)
+ */
+export function loadModelsFromJson(configPath?: string): Record<string, unknown> {
+  const path = configPath ?? getModelsJsonPath();
+  if (existsSync(path)) {
+    try {
+      const raw = readFileSync(path, 'utf-8');
+      return JSON.parse(raw) as Record<string, unknown>;
+    } catch {
+      // Fall through to bundled defaults
+    }
+  }
+  // Fallback: use bundled constants
+  return OPENCODE_MODELS;
 }
 
 // ---------------------------------------------------------------------------
@@ -129,14 +154,15 @@ export function updateOpencodeConfig(
 // ---------------------------------------------------------------------------
 
 /**
- * Remove models from saros-proxy provider config.
- * Models are discovered dynamically from /v1/models — no need to store them in opencode.json.
+ * Sync models from models.json into an existing opencode.json.
+ * Only replaces the `saros-proxy.models` field — preserves everything else.
  *
  * @param options.configPath — Explicit path to opencode.json (optional, for testing)
+ * @param options.modelsPath — Explicit path to models.json (optional, for testing)
  * @returns Result object with success status and path
  */
 export function syncModelsToOpencodeConfig(
-  options: { configPath?: string } = {},
+  options: { configPath?: string; modelsPath?: string } = {},
 ): OpencodeConfigResult {
   const configPath = options.configPath ?? getDefaultOpencodeConfigPath();
 
@@ -158,17 +184,13 @@ export function syncModelsToOpencodeConfig(
       return { success: false, error: 'saros-proxy provider config is missing or malformed' };
     }
 
-    // Remove models if present — they're discovered dynamically from /v1/models
-    const hadModels = 'models' in (sarosProvider as Record<string, unknown>);
-    delete (sarosProvider as Record<string, unknown>).models;
-
-    if (!hadModels) {
-      return { success: true, path: configPath };
-    }
-
     // Backup before modifying
     const backupPath = `${configPath}.backup`;
     copyFileSync(configPath, backupPath);
+
+    // Load models from models.json (source of truth)
+    const models = loadModelsFromJson(options.modelsPath);
+    (sarosProvider as Record<string, unknown>).models = models;
 
     // Write
     const json = JSON.stringify(config, null, 2);
@@ -198,9 +220,9 @@ export function syncModelsToOpencodeConfig(
 
 /**
  * Generate a manual configuration snippet that users can paste.
- * Models are discovered dynamically from /v1/models — no need to include them.
  */
 export function generateManualConfigSnippet(port: number): string {
+  const models = loadModelsFromJson();
   const providerConfig = {
     npm: '@ai-sdk/openai-compatible',
       name: 'Saros',
@@ -208,6 +230,7 @@ export function generateManualConfigSnippet(port: number): string {
         baseURL: `http://127.0.0.1:${port}/zen/go/v1`,
         apiKey: 'not-used',
       },
+      models,
     };
 
   return JSON.stringify({

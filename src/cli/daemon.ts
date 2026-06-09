@@ -13,11 +13,11 @@
  */
 
 import { spawn, execFileSync } from 'node:child_process';
-import { existsSync, writeFileSync, readFileSync, rmSync, mkdirSync } from 'node:fs';
+import { existsSync, writeFileSync, readFileSync, rmSync, mkdirSync, copyFileSync } from 'node:fs';
 import { resolve as pathResolve, join as pathJoin } from 'node:path';
 import { homedir } from 'node:os';
 import { fileURLToPath } from 'node:url';
-import { syncModelsToOpencodeConfig } from './opencode-config.js';
+import { syncModelsToOpencodeConfig, getModelsJsonPath } from './opencode-config.js';
 import { checkForUpdate } from './update-check.js';
 
 // ---------------------------------------------------------------------------
@@ -57,6 +57,26 @@ function deletePid(): void {
     rmSync(PID_FILE);
   } catch {
     // ignore
+  }
+}
+
+/**
+ * Ensure models.json exists at ~/.config/saros/models.json.
+ * Copies the bundled default if missing.
+ */
+function ensureModelsJson(): void {
+  const modelsPath = getModelsJsonPath();
+  if (existsSync(modelsPath)) return;
+
+  const dir = pathJoin(homedir(), '.config', 'saros');
+  if (!existsSync(dir)) {
+    mkdirSync(dir, { recursive: true });
+  }
+
+  // Copy bundled models.json to default location
+  const bundledPath = pathJoin(PACKAGE_ROOT, 'models.json');
+  if (existsSync(bundledPath)) {
+    copyFileSync(bundledPath, modelsPath);
   }
 }
 
@@ -137,7 +157,8 @@ export function daemonStart(port?: number, configPath?: string): void {
     if (isProcessAlive(pid)) {
       console.log(`Proxy started (PID ${pid}) on port ${port ?? 3000}`);
 
-      // Clean up legacy models from opencode.json — models discovered dynamically from /v1/models
+      // Sync models from models.json to opencode.json
+      ensureModelsJson();
       syncModelsToOpencodeConfig();
 
       // Check for newer version — fire-and-forget

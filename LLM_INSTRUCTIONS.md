@@ -231,7 +231,12 @@ Add to `~/.config/opencode/opencode.json`:
 }
 ```
 
-Models are discovered automatically from the proxy's `/v1/models` endpoint — no need to list them in opencode.json.
+Then sync models from `~/.config/saros/models.json`:
+```bash
+saros-proxy sync-models
+```
+
+The `models.json` file is the source of truth for model definitions. Edit it to update context windows, output limits, or modalities.
 
 ### 2.7 Cleanup
 
