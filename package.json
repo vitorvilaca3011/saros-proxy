@@ -1,6 +1,6 @@
 {
   "name": "saros-proxy",
-  "version": "0.5.1",
+  "version": "0.5.2",
   "description": "Saros — predictive multi-account proxy for the OpenCode-Go API. Cycles between accounts before they exhaust.",
   "type": "module",
   "bin": {
