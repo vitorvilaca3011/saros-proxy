@@ -8,7 +8,6 @@
 import { existsSync, readFileSync, writeFileSync, copyFileSync, mkdirSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { homedir } from 'node:os';
-import { OPENCODE_MODELS } from '../constants.js';
 
 // ---------------------------------------------------------------------------
 // Path detection
@@ -80,7 +79,7 @@ export function updateOpencodeConfig(
       }
     }
 
-    // Build provider configuration
+    // Build provider configuration (models discovered dynamically from /v1/models)
     const providerConfig = {
       npm: '@ai-sdk/openai-compatible',
       name: 'Saros',
@@ -88,7 +87,6 @@ export function updateOpencodeConfig(
         baseURL: `http://127.0.0.1:${port}/zen/go/v1`,
         apiKey: 'not-used',
       },
-      models: OPENCODE_MODELS,
     };
 
     // Merge into existing config
@@ -131,8 +129,8 @@ export function updateOpencodeConfig(
 // ---------------------------------------------------------------------------
 
 /**
- * Sync models from OPENCODE_MODELS into an existing opencode.json.
- * Only replaces the `saros-proxy.models` field — preserves everything else.
+ * Remove models from saros-proxy provider config.
+ * Models are discovered dynamically from /v1/models — no need to store them in opencode.json.
  *
  * @param options.configPath — Explicit path to opencode.json (optional, for testing)
  * @returns Result object with success status and path
@@ -160,12 +158,17 @@ export function syncModelsToOpencodeConfig(
       return { success: false, error: 'saros-proxy provider config is missing or malformed' };
     }
 
+    // Remove models if present — they're discovered dynamically from /v1/models
+    const hadModels = 'models' in (sarosProvider as Record<string, unknown>);
+    delete (sarosProvider as Record<string, unknown>).models;
+
+    if (!hadModels) {
+      return { success: true, path: configPath };
+    }
+
     // Backup before modifying
     const backupPath = `${configPath}.backup`;
     copyFileSync(configPath, backupPath);
-
-    // Only replace models — preserve everything else
-    (sarosProvider as Record<string, unknown>).models = OPENCODE_MODELS;
 
     // Write
     const json = JSON.stringify(config, null, 2);
@@ -195,6 +198,7 @@ export function syncModelsToOpencodeConfig(
 
 /**
  * Generate a manual configuration snippet that users can paste.
+ * Models are discovered dynamically from /v1/models — no need to include them.
  */
 export function generateManualConfigSnippet(port: number): string {
   const providerConfig = {
@@ -204,7 +208,6 @@ export function generateManualConfigSnippet(port: number): string {
         baseURL: `http://127.0.0.1:${port}/zen/go/v1`,
         apiKey: 'not-used',
       },
-      models: OPENCODE_MODELS,
     };
 
   return JSON.stringify({

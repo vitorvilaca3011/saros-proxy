@@ -192,41 +192,18 @@ describe('OpenCode Config Integration', () => {
       );
     });
 
-    it('includes all 18 OpenCode-Go model definitions', () => {
+    it('does not include models in provider config (discovered dynamically from /v1/models)', () => {
       const configPath = join(tmpDir, 'opencode.json');
 
       updateOpencodeConfig(3000, { configPath });
 
       const content = JSON.parse(readFileSync(configPath, 'utf-8'));
-      const models = content.provider['saros-proxy'].models;
+      const provider = content.provider['saros-proxy'];
 
-      // All 18 models from the OpenCode-Go catalog
-      const expectedModels = [
-        'glm-5', 'glm-5.1',
-        'kimi-k2.5', 'kimi-k2.6',
-        'deepseek-v4-pro', 'deepseek-v4-flash',
-        'mimo-v2.5', 'mimo-v2.5-pro', 'mimo-v2-pro', 'mimo-v2-omni',
-        'minimax-m3', 'minimax-m2.7', 'minimax-m2.5',
-        'qwen3.7-max', 'qwen3.7-plus', 'qwen3.6-plus', 'qwen3.5-plus',
-        'hy3-preview',
-      ];
-
-      expect(Object.keys(models)).toHaveLength(expectedModels.length);
-
-      for (const modelId of expectedModels) {
-        expect(models[modelId]).toBeDefined();
-        expect(models[modelId].id).toBe(modelId);
-        expect(models[modelId].name).toBeDefined();
-        expect(models[modelId].tool_call).toBeDefined();
-        expect(models[modelId].limit).toBeDefined();
-        expect(models[modelId].modalities).toBeDefined();
-      }
-
-      // Verify specific capabilities
-      expect(models['glm-5'].tool_call).toBe(true);
-      expect(models['hy3-preview'].tool_call).toBe(true);
-      expect(models['qwen3.6-plus'].limit.context).toBe(1000000);
-      expect(models['qwen3.5-plus'].limit.output).toBe(65536);
+      // Models should NOT be in opencode.json — they're discovered from /v1/models
+      expect(provider.models).toBeUndefined();
+      // Provider config should only have npm, name, options
+      expect(Object.keys(provider)).toEqual(['npm', 'name', 'options']);
     });
 
     it('creates parent directories when creating new file', () => {
@@ -255,12 +232,14 @@ describe('OpenCode Config Integration', () => {
       );
     });
 
-    it('includes models in snippet', () => {
+    it('does not include models in snippet (discovered dynamically from /v1/models)', () => {
       const snippet = generateManualConfigSnippet(3000);
       const parsed = JSON.parse(snippet);
 
-      expect(parsed.provider['saros-proxy'].models).toBeDefined();
-      expect(parsed.provider['saros-proxy'].models['glm-5']).toBeDefined();
+      // Models should NOT be in the snippet — they're discovered from /v1/models
+      expect(parsed.provider['saros-proxy'].models).toBeUndefined();
+      // Only npm, name, options should be present
+      expect(Object.keys(parsed.provider['saros-proxy'])).toEqual(['npm', 'name', 'options']);
     });
   });
 

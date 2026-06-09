@@ -137,13 +137,8 @@ export function daemonStart(port?: number, configPath?: string): void {
     if (isProcessAlive(pid)) {
       console.log(`Proxy started (PID ${pid}) on port ${port ?? 3000}`);
 
-      // Sync models to opencode.json — log warning on failure, don't block
-      const syncResult = syncModelsToOpencodeConfig();
-      if (syncResult.success) {
-        console.log(`Models synced to ${syncResult.path}`);
-      } else {
-        console.warn(`Model sync skipped: ${syncResult.error}`);
-      }
+      // Clean up legacy models from opencode.json — models discovered dynamically from /v1/models
+      syncModelsToOpencodeConfig();
 
       // Check for newer version — fire-and-forget
       checkForUpdate();

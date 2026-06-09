@@ -231,17 +231,9 @@ Add to `~/.config/opencode/opencode.json`:
 }
 ```
 
- Restart OpenCode.
+Models are discovered automatically from the proxy's `/v1/models` endpoint — no need to list them in opencode.json.
 
-### 2.7 Sync Models to OpenCode
-
-After installing or updating the proxy, sync the model definitions:
-```bash
-saros-proxy sync-models
-```
-This copies all 18 model specs (context limits, outputs, modalities, reasoning support) from the proxy into `opencode.json`. Run anytime you update the proxy version.
-
-### 2.8 Cleanup
+### 2.7 Cleanup
 
 Remind user to delete the keys file:
 ```bash
