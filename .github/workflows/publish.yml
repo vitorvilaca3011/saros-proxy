@@ -12,15 +12,17 @@ jobs:
     permissions:
       contents: read
       packages: write
+      id-token: write
 
     steps:
       - uses: actions/checkout@v4
 
-      - name: Set up Node.js
+      - name: Set up Node.js for npmjs.org
         uses: actions/setup-node@v4
         with:
           node-version: 22
           cache: npm
+          registry-url: 'https://registry.npmjs.org'
 
       - name: Install dependencies
         run: npm ci
@@ -31,20 +33,17 @@ jobs:
       - name: Run tests
         run: npx vitest run
 
-      # ── Publish to npmjs.org ──────────────────────────────────────────────
-      - name: Configure npm registry for npmjs.org
-        run: |
-          echo "registry=https://registry.npmjs.org/" >> .npmrc
-          echo "//registry.npmjs.org/:_authToken=${{ secrets.NPM_TOKEN }}" >> .npmrc
-
       - name: Publish to npmjs.org
         run: npm publish --access public
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 
-      # ── Publish to GitHub Packages ────────────────────────────────────────
-      - name: Configure npm registry for GitHub Packages
-        run: |
-          echo "@vitorvilaca3011:registry=https://npm.pkg.github.com" >> .npmrc
-          echo "//npm.pkg.github.com/:_authToken=${{ secrets.GITHUB_TOKEN }}" >> .npmrc
+      - name: Set up Node.js for GitHub Packages
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          registry-url: 'https://npm.pkg.github.com'
+          scope: '@vitorvilaca3011'
 
       - name: Publish to GitHub Packages
         run: |
@@ -56,3 +55,5 @@ jobs:
           "
           npm publish --access public
           mv package.json.bak package.json
+        env:
+          NODE_AUTH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
