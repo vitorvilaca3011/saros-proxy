@@ -748,11 +748,10 @@ export function createProxyApp(config: ProxyConfig): Hono {
   app.get('/v1/models', (_c: Context) => buildModelsListResponse());
   app.get('/zen/go/v1/models', (_c: Context) => buildModelsListResponse());
 
-  // --- Upstream proxy handler (reused by multiple routes) ---
-  async function proxyRequest(c: Context): Promise<Response> {
+  // --- Upstream proxy handler (reused by both routes) ---
+  async function handleProxyRequest(c: Context, path: string): Promise<Response> {
     const requestId = generateRequestId();
     const method = c.req.method;
-    const path = c.req.path;
     const incomingHeaders = c.req.raw.headers;
 
     // Reject oversized requests early via Content-Length header
@@ -795,10 +794,13 @@ export function createProxyApp(config: ProxyConfig): Hono {
     });
   }
 
-  app.all('/zen/go/v1/*', proxyRequest);
+  // Unified catch-all: rewrites /v1/* → /zen/go/v1/* for upstream forwarding
+  app.all('/zen/go/v1/*', (c: Context) => handleProxyRequest(c, c.req.path));
   // OpenAI-compatible proxy path — lets standard API clients (e.g. Odysseus,
   // Cursor, LibreChat) use the proxy without the /zen/go/ prefix.
-  app.all('/v1/*', proxyRequest);
+  // The path is rewritten to the upstream's native prefix so the upstream
+  // receives /zen/go/v1/... and returns a valid response.
+  app.all('/v1/*', (c: Context) => handleProxyRequest(c, c.req.path.replace('/v1/', '/zen/go/v1/')));
 
   return app;
 }
