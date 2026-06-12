@@ -20,7 +20,7 @@ import { startScraper, stopScraper } from './scraper.js';
 import { FORCE_SHUTDOWN_TIMEOUT_MS } from './constants.js';
 import { daemonStart, daemonStop, daemonStatus } from './cli/daemon.js';
 import { syncModelsToOpencodeConfig } from './cli/opencode-config.js';
-import { autostartInstall, autostartUninstall, autostartStatus } from './cli/autostart.js';
+import { autostartInstall, autostartUninstall, autostartStatus, type AutostartMethod } from './cli/autostart.js';
 import { checkForUpdate } from './cli/update-check.js';
 
 // ---------------------------------------------------------------------------
@@ -65,18 +65,44 @@ if (subcommand === 'start') {
   if (action === 'install') {
     const args = process.argv.slice(4);
     let port: number | undefined;
+    let method: AutostartMethod | undefined;
     for (let i = 0; i < args.length; i++) {
       if (args[i] === '--port' && args[i + 1]) {
         port = Number(args[++i]);
+      } else if (args[i] === '--method' && args[i + 1]) {
+        const m = args[++i];
+        if (m === 'vbs' || m === 'registry' || m === 'auto') {
+          method = m;
+        }
       }
     }
-    autostartInstall(port);
+    autostartInstall(port, method);
     process.exit(0);
   } else if (action === 'uninstall') {
-    autostartUninstall();
+    const args = process.argv.slice(4);
+    let method: AutostartMethod | undefined;
+    for (let i = 0; i < args.length; i++) {
+      if (args[i] === '--method' && args[i + 1]) {
+        const m = args[++i];
+        if (m === 'vbs' || m === 'registry' || m === 'auto') {
+          method = m;
+        }
+      }
+    }
+    autostartUninstall(method);
     process.exit(0);
   } else {
-    autostartStatus();
+    const args = process.argv.slice(4);
+    let method: AutostartMethod | undefined;
+    for (let i = 0; i < args.length; i++) {
+      if (args[i] === '--method' && args[i + 1]) {
+        const m = args[++i];
+        if (m === 'vbs' || m === 'registry' || m === 'auto') {
+          method = m;
+        }
+      }
+    }
+    autostartStatus(method);
     process.exit(0);
   }
 } else {
