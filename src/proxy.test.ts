@@ -219,13 +219,15 @@ describe('createProxyApp — /v1/models routes', () => {
     expect(body.data).toHaveLength(Object.keys(OPENCODE_MODELS).length);
   });
 
-  it('POST /v1/models returns 404', async () => {
-    const res = await app.request('/v1/models', { method: 'POST' });
-    expect(res.status).toBe(404);
-  });
+  it('POST /v1/* paths are proxied to upstream (no longer 404)', async () => {
+    const res1 = await app.request('/v1/models', { method: 'POST' });
+    expect(res1.status).not.toBe(404);
 
-  it('PUT /v1/models returns 404', async () => {
-    const res = await app.request('/v1/models', { method: 'PUT' });
-    expect(res.status).toBe(404);
+    const res2 = await app.request('/v1/chat/completions', {
+      method: 'POST',
+      body: JSON.stringify({ model: 'test', messages: [{ role: 'user', content: 'hi' }] }),
+      headers: { 'content-type': 'application/json' },
+    });
+    expect(res2.status).not.toBe(404);
   });
 });

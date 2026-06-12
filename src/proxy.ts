@@ -748,8 +748,8 @@ export function createProxyApp(config: ProxyConfig): Hono {
   app.get('/v1/models', (_c: Context) => buildModelsListResponse());
   app.get('/zen/go/v1/models', (_c: Context) => buildModelsListResponse());
 
-  // --- Upstream proxy routes ---
-  app.all('/zen/go/v1/*', async (c: Context) => {
+  // --- Upstream proxy handler (reused by multiple routes) ---
+  async function proxyRequest(c: Context): Promise<Response> {
     const requestId = generateRequestId();
     const method = c.req.method;
     const path = c.req.path;
@@ -793,7 +793,12 @@ export function createProxyApp(config: ProxyConfig): Hono {
       incomingHeaders,
       bodyText,
     });
-  });
+  }
+
+  app.all('/zen/go/v1/*', proxyRequest);
+  // OpenAI-compatible proxy path — lets standard API clients (e.g. Odysseus,
+  // Cursor, LibreChat) use the proxy without the /zen/go/ prefix.
+  app.all('/v1/*', proxyRequest);
 
   return app;
 }
