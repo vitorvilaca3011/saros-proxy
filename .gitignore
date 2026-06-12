@@ -29,3 +29,6 @@ config.yaml.backup
 # Test output
 test-results.*
 coverage/
+
+# npm configuration (local per-project publish configs)
+.npmrc
