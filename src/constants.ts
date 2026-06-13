@@ -23,6 +23,29 @@ export const FORCE_SHUTDOWN_TIMEOUT_MS = 5_000;
 export const MAX_STREAMING_BUFFER = 10_000;
 export const DEFAULT_USAGE_THRESHOLD = 50;
 export const WORKSPACE_ID_REGEX = /^wrk_[A-Za-z0-9]+$/;
+export const MODELS_FETCH_TIMEOUT_MS = 5_000;
+export const MODELS_WARM_BUFFER_MS = 60_000;
+
+// models.dev canonical metadata
+export const MODELS_DEV_URL = 'https://models.dev/api.json';
+export const MODELS_DEV_CACHE_TTL_MS = 5 * 60 * 1000; // 5 minutes
+export const MODELS_DEV_TIMEOUT_MS = 10_000;
+export const MODELS_DEV_PROVIDER_ID = 'opencode-go';
+export const MODELS_DEV_SAFE_FIELDS = [
+  'id', 'name', 'tool_call', 'reasoning', 'limit',
+  'modalities', 'cost', 'reasoning_options',
+  'interleaved', 'structured_output',
+] as const;
+
+// Probe cache & request constants
+export const PROBE_CACHE_TTL_MS = 7 * 24 * 60 * 60 * 1000; // 7 days
+export const PROBE_REQUEST_TIMEOUT_MS = 30_000;
+export const PROBE_LIVENESS_PROMPT = "Reply with the word 'pong' and nothing else.";
+export const PROBE_REASONING_PROMPT = 'What is 2+2? Think step by step.';
+export const PROBE_TOOL_CALLING_PROMPT = 'What is the weather in Paris?';
+
+// Daemon auto-sync timeout (how long to wait for upstream sync before exiting)
+export const DAEMON_SYNC_TIMEOUT_MS = 30_000;
 
 // OpenCode client model definitions for proxy provider configuration
 // Source: https://opencode.ai/zen/go/v1/models (18 models as of 2026-06-06)
