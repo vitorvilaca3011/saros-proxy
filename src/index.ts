@@ -12,16 +12,54 @@
 
 import { serve } from '@hono/node-server';
 import type { ServerType } from '@hono/node-server';
-import { dirname } from 'node:path';
+import { dirname, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { loadConfig, type ProxyConfig } from './config.js';
 import { createProxyApp } from './proxy.js';
 import { logger, maskKey } from './logger.js';
 import { startScraper, stopScraper } from './scraper.js';
 import { FORCE_SHUTDOWN_TIMEOUT_MS } from './constants.js';
 import { daemonStart, daemonStop, daemonStatus } from './cli/daemon.js';
-import { syncModelsToOpencodeConfig } from './cli/opencode-config.js';
+import { syncModelsToOpencodeConfig, getDefaultOpencodeConfigPath } from './cli/opencode-config.js';
 import { autostartInstall, autostartUninstall, autostartStatus, type AutostartMethod } from './cli/autostart.js';
 import { checkForUpdate } from './cli/update-check.js';
+import { syncOpencodeModelsWithUpstream, getModelsFromOpencodeConfig } from './models-sync.js';
+import { probeModel } from './model-probe.js';
+import { getCachedProbe, setCachedProbe } from './probe-cache.js';
+import type { ModelProbe } from './probe-cache.js';
+import chalk from 'chalk';
+import { printHelp } from './cli/help.js';
+import { readFileSync } from 'node:fs';
+
+// ---------------------------------------------------------------------------
+// Help text (re-exported for testing)
+// ---------------------------------------------------------------------------
+
+export { printHelp } from './cli/help.js';
+
+// ---------------------------------------------------------------------------
+// Probe result formatter
+// ---------------------------------------------------------------------------
+
+function formatProbeStatus(status: string): string {
+  switch (status) {
+    case 'ok': return chalk.green('✓ ok');
+    case 'unsupported': return chalk.yellow('? unsupported');
+    case 'error': return chalk.red('✗ error');
+    case 'rate_limited': return chalk.yellow('! rate_limited');
+    default: return status;
+  }
+}
+
+function printProbeResult(probe: ModelProbe): void {
+  const livenessDetail = probe.liveness.details ? ` (${probe.liveness.details})` : '';
+  const reasoningDetail = probe.reasoning.details ? ` (${probe.reasoning.details})` : '';
+  const toolDetail = probe.toolCalling.details ? ` (${probe.toolCalling.details})` : '';
+
+  console.log(`  Liveness:     ${formatProbeStatus(probe.liveness.status)}${livenessDetail}`);
+  console.log(`  Reasoning:    ${formatProbeStatus(probe.reasoning.status)}${reasoningDetail}`);
+  console.log(`  Tool Calling: ${formatProbeStatus(probe.toolCalling.status)}${toolDetail}`);
+}
 
 // ---------------------------------------------------------------------------
 // Subcommand dispatch — if/else if prevents fallthrough to server code
@@ -49,13 +87,13 @@ if (subcommand === 'start') {
 } else if (subcommand === 'sync-models') {
   const result = syncModelsToOpencodeConfig();
   if (result.success) {
-    console.log(`Models synced to ${result.path}`);
+    console.log(chalk.green(`✓ Models synced to ${result.path}`));
     process.exit(0);
   } else {
-    console.error(`Failed: ${result.error}`);
+    console.error(chalk.red(`✗ Failed: ${result.error}`));
     process.exit(1);
   }
-} else if (process.argv[2] === 'setup') {
+} else if (subcommand === 'setup') {
   const { setup } = await import('./cli/setup.js');
   const { getDefaultConfigPath } = await import('./config.js');
   await setup(dirname(getDefaultConfigPath()));
@@ -105,6 +143,100 @@ if (subcommand === 'start') {
     autostartStatus(method);
     process.exit(0);
   }
+} else if (subcommand === '--version' || subcommand === '-v') {
+  const packageRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..');
+  const pkg = JSON.parse(readFileSync(resolve(packageRoot, 'package.json'), 'utf-8')) as { version: string };
+  console.log(pkg.version);
+  process.exit(0);
+} else if (subcommand === 'help' || subcommand === '--help' || subcommand === '-h') {
+  printHelp();
+  process.exit(0);
+} else if (subcommand === 'sync-upstream') {
+  let syncConfig: ProxyConfig;
+  try {
+    syncConfig = loadConfig();
+  } catch (err) {
+    console.error(chalk.red('Failed to load config:'), err instanceof Error ? err.message : String(err));
+    process.exit(1);
+  }
+  const result = await syncOpencodeModelsWithUpstream(syncConfig);
+  if (result.success) {
+    console.log(chalk.green(`✓ Models synced to ${result.path}`));
+    process.exit(0);
+  } else {
+    console.error(chalk.red(`✗ Failed: ${result.error}`));
+    process.exit(1);
+  }
+} else if (subcommand === 'probe') {
+  let probeConfig: ProxyConfig;
+  try {
+    probeConfig = loadConfig();
+  } catch (err) {
+    console.error('Failed to load config:', err instanceof Error ? err.message : String(err));
+    process.exit(1);
+  }
+
+  const configPath = getDefaultOpencodeConfigPath();
+  const allModelIds = getModelsFromOpencodeConfig(configPath);
+
+  if (allModelIds.length === 0) {
+    console.error(chalk.red('✗ No models found in opencode.json'));
+    process.exit(1);
+  }
+
+  const targetModelId = process.argv[3];
+  let modelsToProbe: string[];
+  if (targetModelId) {
+    if (!allModelIds.includes(targetModelId)) {
+      console.error(chalk.red(`✗ Model "${targetModelId}" not found in opencode.json`));
+      process.exit(1);
+    }
+    modelsToProbe = [targetModelId];
+  } else {
+    modelsToProbe = allModelIds;
+  }
+
+  // Check cache for each model
+  const toProbe: string[] = [];
+  const cached: string[] = [];
+  for (const id of modelsToProbe) {
+    if (getCachedProbe(id)) {
+      cached.push(id);
+    } else {
+      toProbe.push(id);
+    }
+  }
+
+  // Probe uncached models sequentially
+  for (const id of toProbe) {
+    console.log(chalk.cyan(`Probing ${id}...`));
+    try {
+      const result = await probeModel(probeConfig, id);
+      // Only cache results where at least one probe succeeded.
+      // Don't cache error or rate_limited — those may be transient (e.g.
+      // proxy was down on first run). An 'ok' result definitively
+      // confirms a capability, so it's safe to cache for the TTL.
+      if (result.liveness.status === 'ok' || result.reasoning.status === 'ok' || result.toolCalling.status === 'ok') {
+        setCachedProbe(id, result);
+      }
+      printProbeResult(result);
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      console.log(`  Error: ${message}`);
+    }
+  }
+
+  // Print cached results
+  for (const id of cached) {
+    const cachedResult = getCachedProbe(id);
+    if (cachedResult) {
+      console.log(chalk.dim(`${id} (cached)`));
+      printProbeResult(cachedResult);
+    }
+  }
+
+  console.log(chalk.dim(`\nSummary: ${toProbe.length + cached.length}/${modelsToProbe.length} models probed, ${cached.length} skipped (cached)`));
+  process.exit(0);
 } else {
   // -----------------------------------------------------------------------
   // No subcommand — start proxy in foreground (original behavior)

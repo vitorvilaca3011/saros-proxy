@@ -5,12 +5,7 @@
     "tool_call": true,
     "reasoning": true,
     "limit": { "context": 202752, "output": 32768 },
-    "modalities": { "input": ["text"], "output": ["text"] },
-    "variants": {
-      "low": { "reasoningEffort": "low" },
-      "medium": { "reasoningEffort": "medium" },
-      "high": { "reasoningEffort": "high" }
-    }
+    "modalities": { "input": ["text"], "output": ["text"] }
   },
   "glm-5.1": {
     "id": "glm-5.1",
@@ -18,12 +13,7 @@
     "tool_call": true,
     "reasoning": true,
     "limit": { "context": 202752, "output": 32768 },
-    "modalities": { "input": ["text"], "output": ["text"] },
-    "variants": {
-      "low": { "reasoningEffort": "low" },
-      "medium": { "reasoningEffort": "medium" },
-      "high": { "reasoningEffort": "high" }
-    }
+    "modalities": { "input": ["text"], "output": ["text"] }
   },
   "kimi-k2.5": {
     "id": "kimi-k2.5",
@@ -79,8 +69,7 @@
     "tool_call": true,
     "reasoning": true,
     "limit": { "context": 1048576, "output": 128000 },
-    "modalities": { "input": ["text"], "output": ["text"] },
-    "_deprecated": true
+    "modalities": { "input": ["text"], "output": ["text"] }
   },
   "mimo-v2-omni": {
     "id": "mimo-v2-omni",
@@ -88,8 +77,7 @@
     "tool_call": true,
     "reasoning": true,
     "limit": { "context": 262144, "output": 128000 },
-    "modalities": { "input": ["text", "image", "audio", "pdf"], "output": ["text"] },
-    "_deprecated": true
+    "modalities": { "input": ["text", "image", "audio", "pdf"], "output": ["text"] }
   },
   "minimax-m3": {
     "id": "minimax-m3",
@@ -97,12 +85,7 @@
     "tool_call": true,
     "reasoning": true,
     "limit": { "context": 512000, "output": 131072 },
-    "modalities": { "input": ["text", "image", "video"], "output": ["text"] },
-    "variants": {
-      "low": { "reasoningEffort": "low" },
-      "medium": { "reasoningEffort": "medium" },
-      "high": { "reasoningEffort": "high" }
-    }
+    "modalities": { "input": ["text", "image", "video"], "output": ["text"] }
   },
   "minimax-m2.7": {
     "id": "minimax-m2.7",
@@ -110,12 +93,7 @@
     "tool_call": true,
     "reasoning": true,
     "limit": { "context": 204800, "output": 131072 },
-    "modalities": { "input": ["text"], "output": ["text"] },
-    "variants": {
-      "low": { "reasoningEffort": "low" },
-      "medium": { "reasoningEffort": "medium" },
-      "high": { "reasoningEffort": "high" }
-    }
+    "modalities": { "input": ["text"], "output": ["text"] }
   },
   "minimax-m2.5": {
     "id": "minimax-m2.5",
@@ -123,12 +101,7 @@
     "tool_call": true,
     "reasoning": true,
     "limit": { "context": 204800, "output": 65536 },
-    "modalities": { "input": ["text"], "output": ["text"] },
-    "variants": {
-      "low": { "reasoningEffort": "low" },
-      "medium": { "reasoningEffort": "medium" },
-      "high": { "reasoningEffort": "high" }
-    }
+    "modalities": { "input": ["text"], "output": ["text"] }
   },
   "qwen3.7-max": {
     "id": "qwen3.7-max",
@@ -136,12 +109,7 @@
     "tool_call": true,
     "reasoning": true,
     "limit": { "context": 1000000, "output": 65536 },
-    "modalities": { "input": ["text"], "output": ["text"] },
-    "variants": {
-      "low": { "reasoningEffort": "low" },
-      "medium": { "reasoningEffort": "medium" },
-      "high": { "reasoningEffort": "high" }
-    }
+    "modalities": { "input": ["text"], "output": ["text"] }
   },
   "qwen3.7-plus": {
     "id": "qwen3.7-plus",
@@ -149,12 +117,7 @@
     "tool_call": true,
     "reasoning": true,
     "limit": { "context": 1000000, "output": 65536 },
-    "modalities": { "input": ["text", "image", "video"], "output": ["text"] },
-    "variants": {
-      "low": { "reasoningEffort": "low" },
-      "medium": { "reasoningEffort": "medium" },
-      "high": { "reasoningEffort": "high" }
-    }
+    "modalities": { "input": ["text", "image", "video"], "output": ["text"] }
   },
   "qwen3.6-plus": {
     "id": "qwen3.6-plus",
@@ -162,12 +125,7 @@
     "tool_call": true,
     "reasoning": true,
     "limit": { "context": 1000000, "output": 65536 },
-    "modalities": { "input": ["text", "image", "video"], "output": ["text"] },
-    "variants": {
-      "low": { "reasoningEffort": "low" },
-      "medium": { "reasoningEffort": "medium" },
-      "high": { "reasoningEffort": "high" }
-    }
+    "modalities": { "input": ["text", "image", "video"], "output": ["text"] }
   },
   "qwen3.5-plus": {
     "id": "qwen3.5-plus",
@@ -175,20 +133,6 @@
     "tool_call": true,
     "reasoning": true,
     "limit": { "context": 262144, "output": 65536 },
-    "modalities": { "input": ["text", "image", "video"], "output": ["text"] },
-    "_deprecated": true,
-    "variants": {
-      "low": { "reasoningEffort": "low" },
-      "medium": { "reasoningEffort": "medium" },
-      "high": { "reasoningEffort": "high" }
-    }
-  },
-  "hy3-preview": {
-    "id": "hy3-preview",
-    "name": "Hunyuan Preview",
-    "tool_call": true,
-    "reasoning": true,
-    "limit": { "context": 256000, "output": 64000 },
-    "modalities": { "input": ["text"], "output": ["text"] }
+    "modalities": { "input": ["text", "image", "video"], "output": ["text"] }
   }
 }

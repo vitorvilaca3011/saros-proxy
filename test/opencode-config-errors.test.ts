@@ -84,8 +84,9 @@ describe('opencode-config error paths', () => {
     // Using two queued mocks distinguishes the two reads without
     // self-referential recursion into the mock itself.
     mockedFs.readFileSync
-      .mockReturnValueOnce(existing)
-      .mockImplementationOnce(() => {
+      .mockReturnValueOnce(existing)           // readFileSync(configPath) — initial load
+      .mockReturnValueOnce('{}')               // readFileSync(getModelsJsonPath()) — loadModelsFromJson
+      .mockImplementationOnce(() => {          // readFileSync(configPath) — verify
         throw new Error('EIO: I/O error');
       });
 
@@ -111,8 +112,9 @@ describe('opencode-config error paths', () => {
     // causes JSON.parse(verifyRaw) to throw, triggering the inner catch
     // that restores from backup.
     mockedFs.readFileSync
-      .mockReturnValueOnce(existing)
-      .mockReturnValueOnce('this is not valid json {');
+      .mockReturnValueOnce(existing)           // readFileSync(configPath) — initial load
+      .mockReturnValueOnce('{}')               // readFileSync(getModelsJsonPath()) — loadModelsFromJson
+      .mockReturnValueOnce('this is not valid json {'); // readFileSync(configPath) — verify
 
     const result = updateOpencodeConfig(3000, { configPath });
 

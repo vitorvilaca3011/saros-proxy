@@ -124,7 +124,7 @@ describe('OpenCode Config Integration', () => {
       expect(content.plugins).toEqual(['some-plugin']);
     });
 
-    it('overwrites existing saros-proxy provider', () => {
+    it('preserves existing saros-proxy options while syncing models', () => {
       const configPath = join(tmpDir, 'opencode.json');
       const existing = {
         provider: {
@@ -140,9 +140,11 @@ describe('OpenCode Config Integration', () => {
       expect(result.success).toBe(true);
 
       const content = JSON.parse(readFileSync(configPath, 'utf-8'));
-      expect(content.provider['saros-proxy'].options.baseURL).toBe(
-        'http://127.0.0.1:4000/zen/go/v1',
-      );
+      // Options set by user are preserved
+      expect(content.provider['saros-proxy'].options.baseURL).toBe('http://old:3000/v1');
+      // But models are synced from bundled source
+      expect(content.provider['saros-proxy'].models).toBeDefined();
+      expect(Object.keys(content.provider['saros-proxy'].models).length).toBeGreaterThan(0);
     });
 
     it('creates backup before modifying existing file', () => {
@@ -192,7 +194,7 @@ describe('OpenCode Config Integration', () => {
       );
     });
 
-    it('does not include models in provider config (discovered dynamically from /v1/models)', () => {
+    it('includes models from models.json in provider config and preserves user options', () => {
       const configPath = join(tmpDir, 'opencode.json');
 
       updateOpencodeConfig(3000, { configPath });
@@ -200,10 +202,48 @@ describe('OpenCode Config Integration', () => {
       const content = JSON.parse(readFileSync(configPath, 'utf-8'));
       const provider = content.provider['saros-proxy'];
 
-      // Models should NOT be in opencode.json — they're discovered from /v1/models
-      expect(provider.models).toBeUndefined();
-      // Provider config should only have npm, name, options
-      expect(Object.keys(provider)).toEqual(['npm', 'name', 'options']);
+      // Models from bundled models.json should be present
+      expect(provider.models).toBeDefined();
+      expect(Object.keys(provider.models).length).toBeGreaterThan(0);
+      // Provider config includes npm, name, options, and models
+      expect(Object.keys(provider).sort()).toEqual(['models', 'name', 'npm', 'options']);
+    });
+
+    it('preserves existing user customizations while syncing models', () => {
+      const configPath = join(tmpDir, 'opencode.json');
+
+      // Pre-populate with user customizations
+      const initial = {
+        provider: {
+          'saros-proxy': {
+            npm: '@ai-sdk/openai-compatible',
+            name: 'My Custom Name',
+            options: {
+              baseURL: 'http://127.0.0.1:9999/zen/go/v1',
+              apiKey: 'my-key',
+              customHeader: 'x-custom-value',
+            },
+            extraField: 'should-survive',
+          },
+        },
+      };
+      writeFileSync(configPath, JSON.stringify(initial, null, 2), 'utf-8');
+
+      updateOpencodeConfig(3000, { configPath });
+
+      const content = JSON.parse(readFileSync(configPath, 'utf-8'));
+      const provider = content.provider['saros-proxy'];
+
+      // User customizations preserved
+      expect(provider.extraField).toBe('should-survive');
+      expect(provider.name).toBe('My Custom Name');
+      expect(provider.options.customHeader).toBe('x-custom-value');
+      // But models are synced from bundled source
+      expect(provider.models).toBeDefined();
+      expect(Object.keys(provider.models).length).toBeGreaterThan(0);
+      // baseURL and apiKey are preserved (user wins)
+      expect(provider.options.baseURL).toBe('http://127.0.0.1:9999/zen/go/v1');
+      expect(provider.options.apiKey).toBe('my-key');
     });
 
     it('creates parent directories when creating new file', () => {

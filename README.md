@@ -237,6 +237,7 @@ The wizard will:
 2. Ask for your API keys (name + key)
 3. Generate `config.yaml` automatically
 4. Run a smoke test to verify everything works
+5. Configure opencode.json with provider settings and model definitions
 
 Want to run manually instead? Skip the wizard and just create a `config.yaml`:
 
@@ -400,9 +401,46 @@ saros-proxy stop
 
 # Sync models from src/constants.ts to opencode.json
 saros-proxy sync-models
+
+# Probe model capabilities (liveness, reasoning, tool calling)
+saros-proxy probe [model-id]
+
+# Probe all models
+saros-proxy probe
+
+# Install autostart (Windows: VBS script or Registry)
+saros-proxy autostart install [--port <port>] [--method vbs|registry|auto]
+
+# Uninstall autostart
+saros-proxy autostart uninstall [--method vbs|registry|auto]
+
+# Check autostart status
+saros-proxy autostart status [--method vbs|registry|auto]
 ```
 
 The `start` command automatically syncs model definitions to `~/.config/opencode/opencode.json`.
+
+### Model Sync Commands
+
+Saros keeps your opencode.json in sync with the upstream API.
+
+```bash
+# Sync models from bundled models.json to opencode.json
+saros-proxy sync-models
+
+# Sync new models from upstream into opencode.json (adds missing models)
+saros-proxy sync-upstream
+
+# Probe model capabilities
+saros-proxy probe [model-id]
+
+# Probe all configured models
+saros-proxy probe
+```
+
+`sync-models` writes the bundled model definitions to your opencode.json provider config.
+`sync-upstream` fetches the live model list from upstream and adds any missing models with metadata from models.dev.
+`probe` tests each model's liveness, reasoning, and tool-calling capabilities via the proxy.
 
 **Daemon config path:** By default the daemon looks for `config.yaml` at:
 - Linux/macOS: `~/.config/saros/config.yaml`
@@ -560,16 +598,25 @@ Output goes to `dist/`.
 
 ```
 src/
-  index.ts          — Entry point, server startup, graceful shutdown
-  proxy.ts          — Hono app, routing, streaming, failover
-  proxy-logic.ts    — Pure logic: key selection, circuit breaker, error classification
-  proxy-logic.test.ts — Unit tests for proxy logic
-  config.ts         — Config loading from YAML, env vars, CLI
-  logger.ts         — Structured logging with Pino + key masking
+  index.ts              — Entry point, CLI dispatch, server startup
+  proxy.ts              — Hono app, routing, streaming, failover
+  proxy-logic.ts        — Pure logic: key selection, circuit breaker
+  config.ts             — Config loading from YAML, env vars, CLI
+  constants.ts          — All defaults and configuration values
+  logger.ts             — Structured logging with Pino + key masking
+  models-fetcher.ts     — Upstream model list fetching + caching
+  models-sync.ts        — Auto-sync models from upstream to opencode.json
   cli/
-    setup.ts        — Interactive setup wizard
+    setup.ts            — Interactive setup wizard
+    daemon.ts           — Background process management
+    opencode-config.ts  — opencode.json read/write/sync
+    autostart.ts        — Windows/Linux autostart install/uninstall
+    ui.ts               — CLI UI abstraction (@clack/prompts wrapper)
+    help.ts             — Help text
+    update-check.ts     — Version update check
 test/
-  e2e.test.ts       — End-to-end tests with mock upstream
+  e2e.test.ts           — End-to-end tests with mock upstream
+  cli-setup.test.ts     — CLI setup wizard tests
 ```
 
 ### Contributing

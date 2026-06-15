@@ -272,7 +272,7 @@ describe('buildMinimalStub', () => {
   it('hy3-preview', () => {
     const stub = buildMinimalStub('hy3-preview');
     expect(stub.id).toBe('hy3-preview');
-    expect(stub.name).toBe('HY3 Preview');
+    expect(stub.name).toBe('Hunyuan Preview');
     expect(stub.limit).toBeDefined();
     expect(stub.tool_call).toBe(true);
     expect(stub.reasoning).toBe(true);
@@ -421,7 +421,7 @@ describe('buildMinimalStub', () => {
     };
     const stub = buildMinimalStub('hy3-preview', devMetadata);
     expect(stub.id).toBe('hy3-preview');
-    expect(stub.name).toBe('HY3 Preview');
+    expect(stub.name).toBe('Hunyuan Preview');
     expect(stub.limit).toBeDefined();
     expect(stub.tool_call).toBe(true);
     expect(stub.reasoning).toBe(true);

@@ -13,12 +13,16 @@
  */
 
 import { spawn, execFileSync } from 'node:child_process';
+import chalk from 'chalk';
 import { existsSync, writeFileSync, readFileSync, rmSync, mkdirSync, copyFileSync } from 'node:fs';
 import { resolve as pathResolve, join as pathJoin } from 'node:path';
 import { homedir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { syncModelsToOpencodeConfig, getModelsJsonPath } from './opencode-config.js';
 import { checkForUpdate } from './update-check.js';
+import { loadConfig } from '../config.js';
+import { syncOpencodeModelsWithUpstream } from '../models-sync.js';
+import { DAEMON_SYNC_TIMEOUT_MS } from '../constants.js';
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -101,18 +105,17 @@ function deletePid(): void {
 
 /**
  * Ensure models.json exists at ~/.config/saros/models.json.
- * Copies the bundled default if missing.
+ * Always overwrites with the bundled copy on every daemon start.
  */
 function ensureModelsJson(): void {
   const modelsPath = getModelsJsonPath();
-  if (existsSync(modelsPath)) return;
 
   const dir = pathJoin(homedir(), '.config', 'saros');
   if (!existsSync(dir)) {
     mkdirSync(dir, { recursive: true });
   }
 
-  // Copy bundled models.json to default location
+  // Copy bundled models.json to default location (always overwrite)
   const bundledPath = pathJoin(PACKAGE_ROOT, 'models.json');
   if (existsSync(bundledPath)) {
     copyFileSync(bundledPath, modelsPath);
@@ -194,20 +197,31 @@ export function daemonStart(port?: number, configPath?: string): void {
   writePid(pid);
 
   // Wait briefly then verify the process is alive
-  setTimeout(() => {
+  setTimeout(async () => {
     if (isProcessAlive(pid)) {
-      console.log(`Proxy started (PID ${pid}) on port ${port ?? 3000}`);
+      console.log(chalk.green(`✓ Proxy started (PID ${pid}) on port ${port ?? 3000}`));
 
       // Sync models from models.json to opencode.json
       ensureModelsJson();
       syncModelsToOpencodeConfig();
+
+      // Auto-sync models from upstream — await with timeout before exit
+      try {
+        const cfg = loadConfig();
+        await Promise.race([
+          syncOpencodeModelsWithUpstream(cfg),
+          new Promise((resolve) => setTimeout(resolve, DAEMON_SYNC_TIMEOUT_MS)),
+        ]);
+      } catch {
+        /* silent — daemon exits regardless */
+      }
 
       // Check for newer version — fire-and-forget
       checkForUpdate();
 
       process.exit(0);
     } else {
-      console.error('Proxy exited shortly after starting. Check your config.');
+      console.error(chalk.red('✗ Proxy exited shortly after starting. Check your config.'));
       deletePid();
       process.exit(1);
     }
@@ -217,13 +231,13 @@ export function daemonStart(port?: number, configPath?: string): void {
 export function daemonStop(): void {
   const pid = readPid();
   if (!pid) {
-    console.log('No running proxy daemon found.');
+    console.log(chalk.yellow('No running proxy daemon found.'));
     process.exit(0);
   }
 
   const pidNum = Number(pid);
   if (!isProcessAlive(pidNum)) {
-    console.log(`Daemon process (PID ${pid}) is not running. Cleaning up PID file.`);
+    console.log(chalk.yellow(`Daemon process (PID ${pid}) is not running. Cleaning up PID file.`));
     deletePid();
     process.exit(0);
   }
@@ -234,10 +248,10 @@ export function daemonStop(): void {
   // Wait a moment to confirm it's gone
   setTimeout(() => {
     if (isProcessAlive(pidNum)) {
-      console.error(`Failed to stop daemon (PID ${pid}). Try: taskkill /F /PID ${pid}`);
+      console.error(chalk.red(`✗ Failed to stop daemon (PID ${pid}). Try: taskkill /F /PID ${pid}`));
       process.exit(1);
     } else {
-      console.log(`Proxy (PID ${pid}) stopped.`);
+      console.log(chalk.green(`✓ Proxy (PID ${pid}) stopped.`));
       process.exit(0);
     }
   }, 1000);
@@ -246,16 +260,16 @@ export function daemonStop(): void {
 export function daemonStatus(): void {
   const pid = readPid();
   if (!pid) {
-    console.log('Daemon is not running.');
+    console.log(chalk.yellow('Daemon is not running.'));
     process.exit(0);
   }
 
   const pidNum = Number(pid);
   if (isProcessAlive(pidNum)) {
-    console.log(`Proxy is running (PID ${pid}).`);
+    console.log(chalk.green(`✓ Proxy is running (PID ${pid}).`));
     process.exit(0);
   } else {
-    console.log(`Stale PID file (PID ${pid} is gone). Cleaning up.`);
+    console.log(chalk.yellow(`Stale PID file (PID ${pid} is gone). Cleaning up.`));
     deletePid();
     process.exit(1);
   }

@@ -89,9 +89,11 @@ export function updateOpencodeConfig(
         };
       }
 
-      // Create backup before modifying
+      // Create backup before modifying (never overwrite existing backup)
       const backupPath = `${configPath}.backup`;
-      copyFileSync(configPath, backupPath);
+      if (!existsSync(backupPath)) {
+        copyFileSync(configPath, backupPath);
+      }
     } else {
       // Create new config
       config = {};
@@ -104,7 +106,7 @@ export function updateOpencodeConfig(
       }
     }
 
-    // Build provider configuration (models discovered dynamically from /v1/models)
+    // Build provider configuration (models from bundled models.json)
     const providerConfig = {
       npm: '@ai-sdk/openai-compatible',
       name: 'Saros',
@@ -112,13 +114,22 @@ export function updateOpencodeConfig(
         baseURL: `http://127.0.0.1:${port}/zen/go/v1`,
         apiKey: 'not-used',
       },
+      models: loadModelsFromJson(),
     };
 
-    // Merge into existing config
+    // Merge into existing config, preserving any user customizations
     const existingProvider = (config.provider as Record<string, unknown> | undefined) ?? {};
+    const rawSaros = existingProvider['saros-proxy'];
+    const existingSaros = (rawSaros && typeof rawSaros === 'object' && !Array.isArray(rawSaros))
+      ? rawSaros as Record<string, unknown>
+      : {};
     config.provider = {
       ...existingProvider,
-      'saros-proxy': providerConfig,
+      'saros-proxy': {
+        ...providerConfig,
+        ...existingSaros,       // user wins for non-models fields; models always synced from bundled source
+        models: providerConfig.models, // always sync models from bundled source
+      },
     };
 
     // Write updated config
@@ -184,9 +195,11 @@ export function syncModelsToOpencodeConfig(
       return { success: false, error: 'saros-proxy provider config is missing or malformed' };
     }
 
-    // Backup before modifying
+    // Backup before modifying (never overwrite existing backup)
     const backupPath = `${configPath}.backup`;
-    copyFileSync(configPath, backupPath);
+    if (!existsSync(backupPath)) {
+      copyFileSync(configPath, backupPath);
+    }
 
     // Load models from models.json (source of truth)
     const models = loadModelsFromJson(options.modelsPath);

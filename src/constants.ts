@@ -202,16 +202,5 @@ export const OPENCODE_MODELS: Record<string, unknown> = {
     reasoning: true,
     limit: { context: 262144, output: 65536 },
     modalities: { input: ['text', 'image', 'video'], output: ['text'] },
-  },
-
-  // HY3 Preview (Tencent - 256K context, 64K output, text-only)
-  // NOT blocklisted - OpenCode auto-generates low/medium/high variants (reasoning_effort supported)
-  'hy3-preview': {
-    id: 'hy3-preview',
-    name: 'HY3 Preview',
-    tool_call: true,
-    reasoning: true,
-    limit: { context: 256000, output: 64000 },
-    modalities: { input: ['text'], output: ['text'] },
-  },
+  }
 };

@@ -10,13 +10,13 @@ import { existsSync, readFileSync, writeFileSync, copyFileSync } from 'node:fs';
 import { getDefaultOpencodeConfigPath } from './cli/opencode-config.js';
 import { getModelsList } from './models-fetcher.js';
 import {
-  OPENCODE_MODELS,
   MODELS_DEV_URL,
   MODELS_DEV_CACHE_TTL_MS,
   MODELS_DEV_TIMEOUT_MS,
   MODELS_DEV_PROVIDER_ID,
   MODELS_DEV_SAFE_FIELDS,
 } from './constants.js';
+import { loadModelsFromJson } from './cli/opencode-config.js';
 import { logger } from './logger.js';
 import type { ProxyConfig } from './config.js';
 import type { OpencodeConfigResult } from './cli/opencode-config.js';
@@ -184,8 +184,9 @@ export function buildMinimalStub(
     }
   }
 
-  // 2. OPENCODE_MODELS bundled constants
-  const known = OPENCODE_MODELS[modelId];
+  // 2. models.json bundled definitions
+  const bundled = loadModelsFromJson();
+  const known = bundled[modelId];
   if (known && typeof known === 'object' && !Array.isArray(known)) {
     return { ...(known as Record<string, unknown>), id: modelId };
   }
