@@ -23,11 +23,13 @@
 
 ## Running Tests
 
-**IMPORTANT:** Tests MUST be run from the user's terminal or VS Code (F5 via `.vscode/launch.json`). The bash tool's pipe capture mechanism cannot handle vitest's child process cleanup on Windows and will hang indefinitely — even though all tests pass.
+`npx vitest run` works from any invocation (terminal, VS Code, bash tool) — see "Vitest Hanging on Windows" below for the pool choice that makes this possible.
 
-- `npx vitest run` in terminal works fine (130 tests, ~5s)
+- `npx vitest run` — full suite (~7s, 582 tests)
+- `npx vitest run src/proxy-logic.test.ts` — single file
+- `npx vitest run -t "pattern"` — filter by test name
 - VS Code launch configs are in `.vscode/launch.json`
-- `tsc --noEmit` works fine from the bash tool for type checking
+- `tsc --noEmit` (`npm run lint`) works fine from the bash tool for type checking
 
 ### Test Structure
 
@@ -68,8 +70,9 @@ src/
 
 ### Vitest Hanging on Windows
 
-- Vitest's fork workers + child processes + Windows pipe capture = hang after tests complete.
-- **Fix:** `globalSetup` with `teardown()` that calls `process.exit(0)` after 1s delay.
+- Vitest's default `'forks'` pool hangs on Windows because tinypool fork workers don't shut down cleanly — they hold stdio pipes open, so the bash tool's pipe capture never returns.
+- **Fix:** `pool: 'vmThreads'` in `vitest.config.ts` (runs tests in a VM context backed by `worker_threads`, no OS-level process boundary to leak handles). Verified: 582/582 tests pass in ~7s with no hang.
+- **Also kept:** `globalSetup` with `teardown()` that calls `process.exit(0)` after 1s delay — belt-and-suspenders for the rare edge case.
 - **Also:** `closeAllConnections()` on HTTP servers before `server.close()` to kill keep-alive sockets.
 - `dist/` is excluded from vitest to prevent running tests twice (`.js` + `.ts`).
 

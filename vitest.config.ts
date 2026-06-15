@@ -23,8 +23,13 @@ export default defineConfig({
     },
     // Exclude compiled output to avoid running tests twice
     exclude: ['**/node_modules/**', '**/dist/**'],
-    // Force forks pool for child process cleanup on Windows
-    pool: 'forks',
+    // Use vmThreads pool: the default 'forks' pool causes the test process to
+    // hang on Windows (tinypool fork workers don't shut down cleanly, keeping
+    // stdio pipes open). vmThreads runs tests in a VM context backed by
+    // worker_threads — no OS-level process boundary, so there's nothing to
+    // leak. Verified: 582/582 tests pass in ~7s with no hang from the bash
+    // tool. Trade-off: no process.chdir() in tests (not used in this project).
+    pool: 'vmThreads',
     // Give workers enough time to clean up (especially on Windows)
     teardownTimeout: 15_000,
     // Don't watch for file changes
