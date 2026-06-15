@@ -1,12 +1,12 @@
-import { describe, it, expect, beforeAll } from 'vitest';
+import { describe, it, expect, beforeAll, beforeEach, vi } from 'vitest';
 import {
   buildUpstreamUrl,
   buildUpstreamHeaders,
   isStreamingRequest,
   createProxyApp,
-  buildModelsListResponse,
 } from './proxy.js';
-import { OPENCODE_MODELS } from './constants.js';
+import { resetModelsFetcherState } from './models-fetcher.js';
+import { loadModelsFromJson } from './cli/opencode-config.js';
 import type { ProxyConfig } from './config.js';
 
 describe('buildUpstreamUrl', () => {
@@ -125,60 +125,6 @@ describe('isStreamingRequest', () => {
   });
 });
 
-// ---------------------------------------------------------------------------
-// Models discovery endpoint
-// ---------------------------------------------------------------------------
-
-describe('buildModelsListResponse', () => {
-  it('returns a Response with status 200', () => {
-    const res = buildModelsListResponse();
-    expect(res.status).toBe(200);
-  });
-
-  it('has content-type application/json', () => {
-    const res = buildModelsListResponse();
-    expect(res.headers.get('content-type')).toBe('application/json');
-  });
-
-  it('returns object: list with data array', () => {
-    const res = buildModelsListResponse();
-    return res.json().then((body) => {
-      expect(body).toHaveProperty('object', 'list');
-      expect(Array.isArray(body.data)).toBe(true);
-    });
-  });
-
-  it('contains all OPENCODE_MODELS entries', () => {
-    const res = buildModelsListResponse();
-    return res.json().then((body) => {
-      expect(body.data).toHaveLength(Object.keys(OPENCODE_MODELS).length);
-    });
-  });
-
-  it('each model has required OpenAI-compatible fields', () => {
-    const res = buildModelsListResponse();
-    return res.json().then((body) => {
-      for (const model of body.data) {
-        expect(model).toHaveProperty('id');
-        expect(model).toHaveProperty('name');
-        expect(model).toHaveProperty('object', 'model');
-        expect(model).toHaveProperty('owned_by', 'saros');
-      }
-    });
-  });
-
-  it('each model includes rich metadata (tool_call, limit, modalities)', () => {
-    const res = buildModelsListResponse();
-    return res.json().then((body) => {
-      for (const model of body.data) {
-        expect(model).toHaveProperty('tool_call');
-        expect(model).toHaveProperty('limit');
-        expect(model).toHaveProperty('modalities');
-      }
-    });
-  });
-});
-
 describe('createProxyApp — /v1/models routes', () => {
   let app: ReturnType<typeof createProxyApp>;
 
@@ -193,6 +139,13 @@ describe('createProxyApp — /v1/models routes', () => {
     keys: [{ label: 'test', key: 'sk-test-key-12345' }],
   };
 
+  beforeEach(() => {
+    resetModelsFetcherState();
+    // Prevent real network calls — upstreamBaseUrl is https://example.com
+    // which would otherwise cause 5s AbortSignal.timeout waits.
+    vi.spyOn(globalThis, 'fetch').mockRejectedValue(new TypeError('fetch failed'));
+  });
+
   beforeAll(() => {
     app = createProxyApp(testConfig);
   });
@@ -205,10 +158,22 @@ describe('createProxyApp — /v1/models routes', () => {
     expect(Array.isArray(body.data)).toBe(true);
   });
 
-  it('GET /v1/models returns all 18 models', async () => {
+  it('GET /v1/models returns all models', async () => {
     const res = await app.request('/v1/models');
     const body = await res.json();
-    expect(body.data).toHaveLength(Object.keys(OPENCODE_MODELS).length);
+    expect(body.data).toHaveLength(Object.keys(loadModelsFromJson()).length);
+  });
+
+  it('GET /v1/models each model entry has minimal format (id, object, created, owned_by)', async () => {
+    const res = await app.request('/v1/models');
+    expect(res.status).toBe(200);
+    const body = await res.json();
+    for (const entry of body.data) {
+      expect(entry).toHaveProperty('id');
+      expect(entry.object).toBe('model');
+      expect(entry.owned_by).toBe('saros');
+      expect(typeof entry.created).toBe('number');
+    }
   });
 
   it('GET /zen/go/v1/models returns 200 with object: list', async () => {
@@ -216,7 +181,7 @@ describe('createProxyApp — /v1/models routes', () => {
     expect(res.status).toBe(200);
     const body = await res.json();
     expect(body.object).toBe('list');
-    expect(body.data).toHaveLength(Object.keys(OPENCODE_MODELS).length);
+    expect(body.data).toHaveLength(Object.keys(loadModelsFromJson()).length);
   });
 
   it('POST /v1/* paths are proxied to upstream (no longer 404)', async () => {

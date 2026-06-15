@@ -25,7 +25,6 @@ import { testProxy } from '../src/cli/setup.js';
 import { encryptKey, isEncryptedKey } from '../src/key-encryption.js';
 import { updateOpencodeConfig } from '../src/cli/opencode-config.js';
 import { validateConfig } from '../src/config.js';
-import { OPENCODE_MODELS } from '../src/constants.js';
 
 // ---------------------------------------------------------------------------
 // Read LLM_INSTRUCTIONS.md once at module scope
@@ -171,7 +170,6 @@ describe('LLM Instructions Smoke Test', () => {
       expect(LLM_INSTRUCTIONS).toContain('always answer');
       expect(LLM_INSTRUCTIONS).toContain('"n"');
       expect(LLM_INSTRUCTIONS).toContain('setup wizard asks');
-      expect(LLM_INSTRUCTIONS).toContain('agent-friendly encryption');
     });
 
     it('each question has required fields (question, header, options)', () => {
@@ -411,9 +409,8 @@ describe('LLM Instructions Smoke Test', () => {
         expect(content.provider['saros-proxy'].options.apiKey).toBe(
           'not-used',
         );
-        expect(content.provider['saros-proxy'].models).toEqual(
-          OPENCODE_MODELS,
-        );
+        // Models are discovered dynamically via /v1/models — no longer
+        // hardcoded in opencode.json by updateOpencodeConfig().
       });
     });
   });

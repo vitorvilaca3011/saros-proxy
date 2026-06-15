@@ -390,40 +390,42 @@ describe('2. Models Endpoint', () => {
   });
   afterAll(async () => { await proxy.close(); });
 
-  it('GET /zen/go/v1/models returns OPENCODE_MODELS locally', async () => {
+  it('GET /zen/go/v1/models proxies to upstream and returns upstream data', async () => {
     const res = await pf(proxy.port, '/zen/go/v1/models');
     expect(res.status).toBe(200);
     expect(res.headers.get('content-type')).toBe('application/json');
-    // Models are served locally — no upstream call, so X-Custom is absent.
-    expect(res.headers.get('X-Custom')).toBeNull();
 
     const body = await res.json() as Record<string, unknown>;
     expect(body.object).toBe('list');
     expect(Array.isArray(body.data)).toBe(true);
 
     const data = body.data as Array<{ id: string }>;
-    // OPENCODE_MODELS is the single source of truth — 18 entries.
-    expect(data.length).toBe(18);
+    // Upstream mock returns 2 models (gpt-4, gpt-3.5-turbo).
+    expect(data.length).toBe(2);
 
-    // Upstream mock was NOT called for this path.
+    // Upstream mock IS called for this path now (proxy-through).
     const log = mockControl.getRequestLog();
-    expect(log.length).toBe(0);
+    expect(log.length).toBeGreaterThanOrEqual(1);
   });
 
-  it('models response preserves OPENCODE_MODELS ordering and IDs', async () => {
+  it('models response reflects upstream model data', async () => {
     const res = await pf(proxy.port, '/zen/go/v1/models');
     const body = await res.json() as Record<string, unknown>;
     const models = body.data as Array<{ id: string }>;
-    // Object.values() preserves insertion order — glm-5 is first.
-    expect(models[0].id).toBe('glm-5');
-    // Spot-check a few representative IDs from different series.
+
+    expect(models).toHaveLength(2);
+
     const ids = models.map((m) => m.id);
-    expect(ids).toContain('kimi-k2.5');
-    expect(ids).toContain('deepseek-v4-pro');
-    expect(ids).toContain('mimo-v2.5');
-    expect(ids).toContain('minimax-m3');
-    expect(ids).toContain('qwen3.7-plus');
-    expect(ids).toContain('hy3-preview');
+    expect(ids).toContain('gpt-4');
+    expect(ids).toContain('gpt-3.5-turbo');
+
+    // Each entry has required OpenAI-compatible fields.
+    for (const m of models) {
+      expect(m).toHaveProperty('id');
+      expect((m as Record<string, unknown>).object).toBe('model');
+      expect(m).toHaveProperty('created');
+      expect(m).toHaveProperty('owned_by');
+    }
   });
 });
 
