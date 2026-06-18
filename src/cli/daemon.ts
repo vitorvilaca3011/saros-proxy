@@ -2,14 +2,16 @@
  * daemon.ts — Start/stop the proxy as a background process.
  *
  * Usage:
- *   saros-proxy start  [--port <port>] [--config <path>]
+ *   saros-proxy start    [--port <port>] [--config <path>]
  *   saros-proxy stop
+ *   saros-proxy restart  [--port <port>] [--config <path>]
  *   saros-proxy status
  *
  * Daemon lifecycle:
- *   start  → spawns detached `node dist/index.js` process, saves PID
- *   stop   → kills the process (taskkill /T /F on Windows), removes PID file
- *   status → checks if the process is still alive
+ *   start   → spawns detached `node dist/index.js` process, saves PID
+ *   stop    → kills the process (taskkill /T /F on Windows), removes PID file
+ *   restart → kills running instance (if any), waits, then starts fresh
+ *   status  → checks if the process is still alive
  */
 
 import { spawn, execFileSync } from 'node:child_process';
@@ -165,6 +167,30 @@ function killProcess(pid: number): void {
 }
 
 // ---------------------------------------------------------------------------
+// Internal helpers
+// ---------------------------------------------------------------------------
+
+/**
+ * Synchronously kill the running daemon if its PID file exists and the
+ * process is alive. Cleans up stale PID files. Does NOT call process.exit.
+ * Returns the PID string found (or null), and whether the process was
+ * running (killed) or the PID file was stale (cleaned up).
+ */
+function killRunningDaemon(): { pid: string | null; wasRunning: boolean; wasStale: boolean } {
+  const pid = readPid();
+  if (!pid) return { pid: null, wasRunning: false, wasStale: false };
+  const pidNum = Number(pid);
+  if (!isProcessAlive(pidNum)) {
+    // Stale PID file — clean it up
+    deletePid();
+    return { pid, wasRunning: false, wasStale: true };
+  }
+  killProcess(pidNum);
+  deletePid();
+  return { pid, wasRunning: true, wasStale: false };
+}
+
+// ---------------------------------------------------------------------------
 // Public API
 // ---------------------------------------------------------------------------
 
@@ -229,23 +255,18 @@ export function daemonStart(port?: number, configPath?: string): void {
 }
 
 export function daemonStop(): void {
-  const pid = readPid();
-  if (!pid) {
+  const { pid, wasRunning, wasStale } = killRunningDaemon();
+  if (pid === null) {
     console.log(chalk.yellow('No running proxy daemon found.'));
     process.exit(0);
   }
-
-  const pidNum = Number(pid);
-  if (!isProcessAlive(pidNum)) {
+  if (wasStale) {
     console.log(chalk.yellow(`Daemon process (PID ${pid}) is not running. Cleaning up PID file.`));
-    deletePid();
     process.exit(0);
   }
-
-  killProcess(pidNum);
-  deletePid();
-
-  // Wait a moment to confirm it's gone
+  // wasRunning === true — killRunningDaemon already killed the process and
+  // deleted the PID file. Now verify it's actually gone.
+  const pidNum = Number(pid);
   setTimeout(() => {
     if (isProcessAlive(pidNum)) {
       console.error(chalk.red(`✗ Failed to stop daemon (PID ${pid}). Try: taskkill /F /PID ${pid}`));
@@ -255,6 +276,27 @@ export function daemonStop(): void {
       process.exit(0);
     }
   }, 1000);
+}
+
+/**
+ * Restart the proxy daemon: stop the running instance (if any), wait
+ * briefly for the port to release, then start a fresh instance.
+ * Reuses daemonStart which owns its own exit path via setTimeout.
+ */
+export function daemonRestart(port?: number, configPath?: string): void {
+  const { pid, wasRunning, wasStale } = killRunningDaemon();
+  if (wasRunning && pid) {
+    console.log(chalk.dim(`Restarting: stopped daemon (PID ${pid}), starting new instance...`));
+    // Wait for the OS to release the port before respawning
+    setTimeout(() => daemonStart(port, configPath), 1500);
+  } else {
+    if (wasStale && pid) {
+      console.log(chalk.dim(`Stale PID file (PID ${pid}) cleaned up. Starting new instance...`));
+    } else {
+      console.log(chalk.dim('No running daemon found, starting new instance...'));
+    }
+    daemonStart(port, configPath);
+  }
 }
 
 export function daemonStatus(): void {

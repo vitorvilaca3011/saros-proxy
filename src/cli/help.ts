@@ -11,6 +11,7 @@ export function printHelp(): void {
 Commands:
   start [--port <port>] [--config <path>]   Start the proxy daemon
   stop                                       Stop the proxy daemon
+  restart [--port <port>] [--config <path>]  Restart the proxy daemon
   status                                     Check daemon status
   setup                                      Run interactive setup wizard
   sync-models                                Sync models from models.json to opencode.json

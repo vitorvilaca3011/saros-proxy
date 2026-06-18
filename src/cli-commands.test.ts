@@ -20,6 +20,7 @@ const mockSetCachedProbe = vi.hoisted(() => vi.fn());
 const mockDaemonStart = vi.hoisted(() => vi.fn());
 const mockDaemonStop = vi.hoisted(() => vi.fn());
 const mockDaemonStatus = vi.hoisted(() => vi.fn());
+const mockDaemonRestart = vi.hoisted(() => vi.fn());
 const mockSyncModels = vi.hoisted(() => vi.fn());
 const mockGetDefaultConfigPath = vi.hoisted(() => vi.fn(() => '/mock/opencode.json'));
 const mockAutostartInstall = vi.hoisted(() => vi.fn());
@@ -39,6 +40,7 @@ vi.mock('./cli/daemon.js', () => ({
   daemonStart: mockDaemonStart,
   daemonStop: mockDaemonStop,
   daemonStatus: mockDaemonStatus,
+  daemonRestart: mockDaemonRestart,
 }));
 vi.mock('./cli/opencode-config.js', () => ({
   syncModelsToOpencodeConfig: mockSyncModels,
@@ -188,5 +190,31 @@ describe('CLI: probe subcommand', () => {
     vi.spyOn(console, 'error').mockImplementation(() => {});
 
     await expect(import('./index.js')).rejects.toThrow('process.exit(1)');
+  });
+});
+
+describe('CLI: restart subcommand', () => {
+  beforeEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it('restart with no args — calls daemonRestart with undefined, undefined', async () => {
+    process.argv = ['node', 'saros-proxy', 'restart'];
+    vi.resetModules();
+    mockDaemonRestart.mockImplementation(() => { throw new Error('process.exit(0)'); });
+    const exitSpy = mockProcessExit();
+
+    await expect(import('./index.js')).rejects.toThrow('process.exit(0)');
+    expect(mockDaemonRestart).toHaveBeenCalledWith(undefined, undefined);
+  });
+
+  it('restart with --port and --config — passes parsed args', async () => {
+    process.argv = ['node', 'saros-proxy', 'restart', '--port', '4000', '--config', 'my.yaml'];
+    vi.resetModules();
+    mockDaemonRestart.mockImplementation(() => { throw new Error('process.exit(0)'); });
+    const exitSpy = mockProcessExit();
+
+    await expect(import('./index.js')).rejects.toThrow('process.exit(0)');
+    expect(mockDaemonRestart).toHaveBeenCalledWith(4000, 'my.yaml');
   });
 });

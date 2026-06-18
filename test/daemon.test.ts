@@ -72,6 +72,7 @@ describe('daemon PID lifecycle', () => {
     // Just verify the exported functions don't throw on missing files
     const daemon = await import('../src/cli/daemon.js');
     expect(daemon.daemonStop).toBeDefined();
+    expect(daemon.daemonRestart).toBeDefined();
     expect(daemon.daemonStatus).toBeDefined();
     // These call process.exit — we can't safely call them in tests
   });
