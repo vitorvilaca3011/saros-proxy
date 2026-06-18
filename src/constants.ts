@@ -68,6 +68,14 @@ export const OPENCODE_MODELS: Record<string, unknown> = {
     limit: { context: 202752, output: 32768 },
     modalities: { input: ['text'], output: ['text'] },
   },
+  'glm-5.2': {
+    id: 'glm-5.2',
+    name: 'GLM-5.2',
+    tool_call: true,
+    reasoning: true,
+    limit: { context: 1000000, output: 131072 },
+    modalities: { input: ['text'], output: ['text'] },
+  },
 
   // Kimi series (Moonshot - 262K context, 65K output, multimodal)
   // Blocklisted in OpenCode — no reasoning_effort support via opencode-go

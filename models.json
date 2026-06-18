@@ -15,6 +15,14 @@
     "limit": { "context": 202752, "output": 32768 },
     "modalities": { "input": ["text"], "output": ["text"] }
   },
+  "glm-5.2": {
+    "id": "glm-5.2",
+    "name": "GLM-5.2",
+    "tool_call": true,
+    "reasoning": true,
+    "limit": { "context": 1000000, "output": 131072 },
+    "modalities": { "input": ["text"], "output": ["text"] }
+  },
   "kimi-k2.5": {
     "id": "kimi-k2.5",
     "name": "Kimi K2.5",
