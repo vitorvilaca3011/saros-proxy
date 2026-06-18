@@ -127,7 +127,7 @@ if (subcommand === 'start') {
         }
       }
     }
-    autostartInstall(port, method);
+    await autostartInstall(port, method);
     process.exit(0);
   } else if (action === 'uninstall') {
     const args = process.argv.slice(4);

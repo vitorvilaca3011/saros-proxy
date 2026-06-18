@@ -22,6 +22,32 @@ vi.mock('node:child_process', () => ({
 }));
 
 // ---------------------------------------------------------------------------
+// Mock UI so interactive prompt tests never actually prompt
+// ---------------------------------------------------------------------------
+
+const mockUiIntro = vi.fn();
+const mockUiOutro = vi.fn();
+const mockUiSelect = vi.fn();
+const mockUiSuccess = vi.fn();
+const mockUiWarn = vi.fn();
+
+vi.mock('../src/cli/ui.js', () => ({
+  intro: mockUiIntro,
+  outro: mockUiOutro,
+  select: mockUiSelect,
+  success: mockUiSuccess,
+  warn: mockUiWarn,
+  info: vi.fn(),
+  error: vi.fn(),
+  step: vi.fn(),
+  panel: vi.fn(),
+  assertNotCancelled: vi.fn((value: unknown) => value),
+  printConfigSummary: vi.fn(),
+  printNextSteps: vi.fn(),
+  listWorkspaces: vi.fn(),
+}));
+
+// ---------------------------------------------------------------------------
 // Test helpers
 // ---------------------------------------------------------------------------
 
@@ -54,7 +80,7 @@ describe('autostart — VBS method', () => {
 
   it('install creates the VBS file in the startup directory', async () => {
     const { autostartInstall } = await import('../src/cli/autostart.js');
-    autostartInstall(undefined, 'vbs');
+    await autostartInstall(undefined, 'vbs');
 
     const vbsPath = join(startupDir, 'saros-proxy-daemon.vbs');
     expect(existsSync(vbsPath)).toBe(true);
@@ -62,7 +88,7 @@ describe('autostart — VBS method', () => {
 
   it('install with --port embeds the port in the VBS', async () => {
     const { autostartInstall } = await import('../src/cli/autostart.js');
-    autostartInstall(4000, 'vbs');
+    await autostartInstall(4000, 'vbs');
 
     const vbsPath = join(startupDir, 'saros-proxy-daemon.vbs');
     expect(existsSync(vbsPath)).toBe(true);
@@ -72,7 +98,7 @@ describe('autostart — VBS method', () => {
 
   it('status reports installed when VBS exists', async () => {
     const { autostartInstall, autostartStatus } = await import('../src/cli/autostart.js');
-    autostartInstall(undefined, 'vbs');
+    await autostartInstall(undefined, 'vbs');
 
     // Should not throw
     expect(() => autostartStatus('vbs')).not.toThrow();
@@ -80,7 +106,7 @@ describe('autostart — VBS method', () => {
 
   it('uninstall removes the VBS file', async () => {
     const { autostartInstall, autostartUninstall } = await import('../src/cli/autostart.js');
-    autostartInstall(undefined, 'vbs');
+    await autostartInstall(undefined, 'vbs');
     expect(existsSync(join(startupDir, 'saros-proxy-daemon.vbs'))).toBe(true);
 
     autostartUninstall('vbs');
@@ -107,7 +133,7 @@ describe('autostart — Registry method', () => {
     mockExecFileSync.mockReturnValue(Buffer.from(''));
     const { autostartInstall } = await import('../src/cli/autostart.js');
 
-    autostartInstall(undefined, 'registry');
+    await autostartInstall(undefined, 'registry');
 
     expect(mockExecFileSync).toHaveBeenCalledWith(
       'reg',
@@ -120,7 +146,7 @@ describe('autostart — Registry method', () => {
     mockExecFileSync.mockReturnValue(Buffer.from(''));
     const { autostartInstall } = await import('../src/cli/autostart.js');
 
-    autostartInstall(5000, 'registry');
+    await autostartInstall(5000, 'registry');
 
     // The /d value should contain --port 5000
     const call = mockExecFileSync.mock.calls.find(
@@ -192,8 +218,8 @@ describe('autostart — combined status/uninstall (no method)', () => {
     const { autostartInstall, autostartUninstall } = await import('../src/cli/autostart.js');
 
     // Install both
-    autostartInstall(undefined, 'vbs');
-    autostartInstall(undefined, 'registry');
+    await autostartInstall(undefined, 'vbs');
+    await autostartInstall(undefined, 'registry');
 
     // Uninstall both
     autostartUninstall();
@@ -271,5 +297,84 @@ describe('resolveMethod', () => {
   it('defaults to registry when no method and AV detected', async () => {
     const { resolveMethod } = await import('../src/cli/autostart.js');
     expect(resolveMethod(undefined, true)).toBe('registry');
+  });
+});
+
+describe('autostart — interactive method prompt', () => {
+  let startupDir: string;
+  const OENV = process.env;
+  let originalIsTTY: boolean | undefined;
+
+  beforeEach(() => {
+    startupDir = createStartupDir();
+    const baseAppData = join(startupDir, '..', '..', '..', '..', '..');
+    vi.stubEnv('APPDATA', baseAppData);
+    mockExecFileSync.mockReset();
+    mockUiSelect.mockReset();
+    mockUiIntro.mockReset();
+    mockUiOutro.mockReset();
+    mockUiWarn.mockReset();
+    mockUiSuccess.mockReset();
+    // Force TTY so the prompt path is taken
+    originalIsTTY = process.stdin.isTTY;
+    Object.defineProperty(process.stdin, 'isTTY', { value: true, configurable: true });
+  });
+
+  afterEach(() => {
+    const base = join(startupDir, '..', '..', '..', '..', '..');
+    try { rmSync(base, { recursive: true, force: true }); } catch { /* ok */ }
+    process.env = { ...OENV };
+    Object.defineProperty(process.stdin, 'isTTY', { value: originalIsTTY, configurable: true });
+  });
+
+  it('prompts and installs via registry when user selects registry', async () => {
+    mockExecFileSync.mockReturnValue(Buffer.from(''));
+    mockUiSelect.mockResolvedValue('registry');
+
+    const { autostartInstall } = await import('../src/cli/autostart.js');
+    await autostartInstall(undefined, undefined);
+
+    expect(mockUiIntro).toHaveBeenCalledWith('Saros — Autostart');
+    expect(mockUiSelect).toHaveBeenCalled();
+    expect(mockExecFileSync).toHaveBeenCalledWith(
+      'reg',
+      expect.arrayContaining(['add', 'HKCU\\Software\\Microsoft\\Windows\\CurrentVersion\\Run']),
+      expect.any(Object),
+    );
+    expect(mockUiOutro).toHaveBeenCalledWith('Autostart configured');
+  });
+
+  it('prompts and installs via VBS when user selects vbs', async () => {
+    mockUiSelect.mockResolvedValue('vbs');
+
+    const { autostartInstall } = await import('../src/cli/autostart.js');
+    await autostartInstall(undefined, undefined);
+
+    expect(mockUiSelect).toHaveBeenCalled();
+    const vbsPath = join(startupDir, 'saros-proxy-daemon.vbs');
+    expect(existsSync(vbsPath)).toBe(true);
+    expect(mockUiOutro).toHaveBeenCalled();
+  });
+
+  it('falls back to auto-detect when stdin is not a TTY', async () => {
+    Object.defineProperty(process.stdin, 'isTTY', { value: false, configurable: true });
+    mockExecFileSync.mockReturnValue(Buffer.from(''));
+
+    const { autostartInstall } = await import('../src/cli/autostart.js');
+    await autostartInstall(undefined, undefined);
+
+    // Should NOT prompt
+    expect(mockUiSelect).not.toHaveBeenCalled();
+    expect(mockUiWarn).toHaveBeenCalled();
+  });
+
+  it('does NOT prompt when method is explicitly provided', async () => {
+    mockExecFileSync.mockReturnValue(Buffer.from(''));
+
+    const { autostartInstall } = await import('../src/cli/autostart.js');
+    await autostartInstall(undefined, 'registry');
+
+    expect(mockUiSelect).not.toHaveBeenCalled();
+    expect(mockUiIntro).not.toHaveBeenCalled();
   });
 });

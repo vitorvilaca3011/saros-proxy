@@ -14,6 +14,7 @@ import { existsSync, writeFileSync, rmSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { homedir } from 'node:os';
 import { execFileSync } from 'node:child_process';
+import * as ui from './ui.js';
 
 // ---------------------------------------------------------------------------
 // Types
@@ -142,7 +143,7 @@ function registryInstall(port?: number): void {
     '/d', cmd,
     '/f',
   ], { windowsHide: true, stdio: 'pipe', timeout: 5000 });
-  console.log(`Auto-start installed via Registry: ${REG_RUN_KEY}\\${REG_VALUE_NAME}`);
+  ui.success(`Auto-start installed via Registry: ${REG_RUN_KEY}\\${REG_VALUE_NAME}`);
 }
 
 function registryUninstall(): void {
@@ -188,7 +189,7 @@ function vbsInstall(port?: number): void {
   ].join('\n');
 
   writeFileSync(vbsPath(), vbs, 'utf-8');
-  console.log(`Auto-start installed via VBS: ${vbsPath()}`);
+  ui.success(`Auto-start installed via VBS: ${vbsPath()}`);
 }
 
 function vbsUninstall(): void {
@@ -209,12 +210,42 @@ function vbsExists(): boolean {
 // Public API
 // ---------------------------------------------------------------------------
 
-export function autostartInstall(port?: number, method?: AutostartMethod): void {
-  const resolved = resolveMethod(method);
+export async function autostartInstall(port?: number, method?: AutostartMethod): Promise<void> {
+  let resolved: 'vbs' | 'registry';
+  let wasPrompted = false;
+
+  if (method === 'vbs' || method === 'registry') {
+    resolved = method;
+  } else if (method === 'auto') {
+    resolved = resolveMethod('auto');
+  } else {
+    // No method specified — prompt the user to choose
+    wasPrompted = true;
+    if (process.stdin.isTTY) {
+      ui.intro('Saros — Autostart');
+      const choice = ui.assertNotCancelled(await ui.select<AutostartMethod>({
+        message: 'Choose an autostart method',
+        options: [
+          { value: 'registry', label: 'Windows Registry', hint: 'recommended' },
+          { value: 'vbs', label: 'VBScript in Startup folder', hint: 'lighter, may trigger AV' },
+          { value: 'auto', label: 'Detect automatically', hint: 'picks based on AV detection' },
+        ],
+      }));
+      resolved = resolveMethod(choice);
+    } else {
+      ui.warn('No --method specified and stdin is not a TTY. Using auto-detect. Pass --method <vbs|registry|auto> to skip this.');
+      resolved = resolveMethod(undefined);
+    }
+  }
+
   if (resolved === 'registry') {
     registryInstall(port);
   } else {
     vbsInstall(port);
+  }
+
+  if (wasPrompted && process.stdin.isTTY) {
+    ui.outro('Autostart configured');
   }
 }
 
