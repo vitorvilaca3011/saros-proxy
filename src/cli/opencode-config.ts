@@ -2,7 +2,7 @@
  * opencode-config.ts — OpenCode client configuration management.
  *
  * Handles reading, merging, and writing the user's opencode.json
- * to add or update the proxy provider configuration.
+ * or opencode.jsonc to add or update the proxy provider configuration.
  */
 
 import { existsSync, readFileSync, writeFileSync, copyFileSync, mkdirSync } from 'node:fs';
@@ -11,13 +11,98 @@ import { homedir } from 'node:os';
 import { OPENCODE_MODELS } from '../constants.js';
 
 // ---------------------------------------------------------------------------
+// JSONC support
+// ---------------------------------------------------------------------------
+
+/**
+ * Strip JSONC comments (both single-line and multi-line) from a string,
+ * preserving string contents. JSONC allows comments that JSON does not.
+ */
+export function stripJsoncComments(text: string): string {
+  const result: string[] = [];
+  let i = 0;
+  const len = text.length;
+
+  while (i < len) {
+    const ch = text[i];
+
+    // Handle strings — preserve everything inside
+    if (ch === '"') {
+      let s = '"';
+      i++;
+      while (i < len) {
+        const c = text[i];
+        s += c;
+        if (c === '\\') {
+          i++;
+          if (i < len) { s += text[i]; i++; }
+        } else if (c === '"') {
+          i++;
+          break;
+        } else {
+          i++;
+        }
+      }
+      result.push(s);
+      continue;
+    }
+
+    // Handle single-line comment
+    if (ch === '/' && i + 1 < len && text[i + 1] === '/') {
+      i += 2;
+      while (i < len && text[i] !== '\n') i++;
+      continue;
+    }
+
+    // Handle multi-line comment
+    if (ch === '/' && i + 1 < len && text[i + 1] === '*') {
+      i += 2;
+      while (i < len) {
+        if (text[i] === '*' && i + 1 < len && text[i + 1] === '/') {
+          i += 2;
+          break;
+        }
+        i++;
+      }
+      continue;
+    }
+
+    result.push(ch);
+    i++;
+  }
+
+  return result.join('');
+}
+
+/**
+ * Read and parse a JSON or JSONC config file.
+ * For `.jsonc` files, comments are stripped before parsing.
+ */
+function readJsoncConfigFile(path: string): Record<string, unknown> {
+  const raw = readFileSync(path, 'utf-8');
+  const clean = path.endsWith('.jsonc') ? stripJsoncComments(raw) : raw;
+  return JSON.parse(clean) as Record<string, unknown>;
+}
+
+// ---------------------------------------------------------------------------
 // Path detection
 // ---------------------------------------------------------------------------
 
-/** Return the default opencode.json path for the current platform. */
+/** Return the default opencode config path for the current platform.
+ *
+ * Detects `opencode.jsonc` vs `opencode.json` — prefers `.jsonc` if it
+ * exists (modern OpenCode default), falls back to `.json`, and defaults
+ * to `.jsonc` for new setups.
+ */
 export function getDefaultOpencodeConfigPath(): string {
   const home = homedir();
-  return join(home, '.config', 'opencode', 'opencode.json');
+  const dir = join(home, '.config', 'opencode');
+  const jsoncPath = join(dir, 'opencode.jsonc');
+  const jsonPath = join(dir, 'opencode.json');
+
+  if (existsSync(jsoncPath)) return jsoncPath;
+  if (existsSync(jsonPath)) return jsonPath;
+  return jsoncPath; // default to jsonc for new installs
 }
 
 /** Return the path to models.json (source of truth for model definitions). */
@@ -77,15 +162,23 @@ export function updateOpencodeConfig(
     let created = false;
 
     if (existsSync(configPath)) {
-      // Read and parse existing config
-      const raw = readFileSync(configPath, 'utf-8');
+      // Read existing config (supports JSONC)
+      let raw: string;
       try {
-        config = JSON.parse(raw) as Record<string, unknown>;
+        raw = readFileSync(configPath, 'utf-8');
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        return { success: false, path: configPath, error: message };
+      }
+
+      try {
+        const clean = configPath.endsWith('.jsonc') ? stripJsoncComments(raw) : raw;
+        config = JSON.parse(clean) as Record<string, unknown>;
       } catch {
         return {
           success: false,
           path: configPath,
-          error: 'Existing opencode.json contains invalid JSON. Please fix it manually.',
+          error: 'Existing opencode config contains invalid JSON/JSONC. Please fix it manually.',
         };
       }
 
@@ -178,12 +271,11 @@ export function syncModelsToOpencodeConfig(
   const configPath = options.configPath ?? getDefaultOpencodeConfigPath();
 
   if (!existsSync(configPath)) {
-    return { success: false, error: 'opencode.json not found at ' + configPath };
+    return { success: false, error: 'opencode config not found at ' + configPath };
   }
 
   try {
-    const raw = readFileSync(configPath, 'utf-8');
-    const config = JSON.parse(raw) as Record<string, unknown>;
+    const config = readJsoncConfigFile(configPath);
 
     const provider = config.provider as Record<string, unknown> | undefined;
     if (!provider) {

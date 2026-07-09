@@ -193,7 +193,7 @@ if (subcommand === 'start') {
   const allModelIds = getModelsFromOpencodeConfig(configPath);
 
   if (allModelIds.length === 0) {
-    console.error(chalk.red('✗ No models found in opencode.json'));
+    console.error(chalk.red('✗ No models found in opencode config'));
     process.exit(1);
   }
 
@@ -201,7 +201,7 @@ if (subcommand === 'start') {
   let modelsToProbe: string[];
   if (targetModelId) {
     if (!allModelIds.includes(targetModelId)) {
-      console.error(chalk.red(`✗ Model "${targetModelId}" not found in opencode.json`));
+      console.error(chalk.red(`✗ Model "${targetModelId}" not found in opencode config`));
       process.exit(1);
     }
     modelsToProbe = [targetModelId];

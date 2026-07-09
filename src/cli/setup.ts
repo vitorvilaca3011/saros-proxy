@@ -849,7 +849,7 @@ async function configureOpencodeClient(port: number): Promise<void> {
   } else {
     ui.info(`Default OpenCode config not found at ${defaultOpencodePath}`);
     const customPath = ui.assertNotCancelled(await ui.text({
-      message: 'Path to opencode.json (or press Enter to skip)',
+      message: 'Path to opencode.json/.jsonc (or press Enter to skip)',
       placeholder: 'Press Enter to skip',
       validate: () => undefined,
     }));
@@ -859,14 +859,14 @@ async function configureOpencodeClient(port: number): Promise<void> {
   }
 
   if (!opencodePath) {
-    ui.info('Skipped OpenCode configuration. Add this to your opencode.json manually:');
+    ui.info('Skipped OpenCode configuration. Add this to your opencode.json/.jsonc manually:');
     console.log(chalk.dim(generateManualConfigSnippet(port)));
     return;
   }
 
   ui.info(`Found OpenCode config at ${opencodePath}`);
   const shouldConfigure = ui.assertNotCancelled(await ui.confirm({
-    message: 'Configure opencode.json to use this proxy?',
+    message: 'Configure opencode.json/.jsonc to use this proxy?',
     initialValue: true,
   }));
 
@@ -874,19 +874,19 @@ async function configureOpencodeClient(port: number): Promise<void> {
     const result = updateOpencodeConfig(port, { configPath: opencodePath });
     if (result.success) {
       if (result.created) {
-        ui.success(`Created opencode.json at ${result.path}`);
+        ui.success(`Created opencode config at ${result.path}`);
       } else {
-        ui.success(`Updated opencode.json at ${result.path}`);
-        ui.info('A backup was saved to opencode.json.backup');
+        ui.success(`Updated opencode config at ${result.path}`);
+        ui.info('A backup was saved to opencode config.backup');
       }
       ui.info('If OpenCode is running, restart it to pick up the changes');
     } else {
-      ui.warn(`Could not update opencode.json: ${result.error}`);
-      ui.info('You can manually add this to your opencode.json:');
+      ui.warn(`Could not update opencode config: ${result.error}`);
+      ui.info('You can manually add this to your opencode.json/.jsonc:');
       console.log(chalk.dim(generateManualConfigSnippet(port)));
     }
   } else {
-    ui.info('Skipped automatic configuration. Add this to your opencode.json manually:');
+    ui.info('Skipped automatic configuration. Add this to your opencode.json/.jsonc manually:');
     console.log(chalk.dim(generateManualConfigSnippet(port)));
   }
 }

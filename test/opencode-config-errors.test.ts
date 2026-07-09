@@ -31,7 +31,7 @@ describe('opencode-config error paths', () => {
     tmpDir = mkdtempSync(`${tmpdir()}${sep}opencode-config-err-`);
   });
 
-  afterEach(() => {
+  afterEach(async () => {
     if (existsSync(tmpDir)) {
       try {
         rmSync(tmpDir, { recursive: true, force: true });
@@ -40,6 +40,13 @@ describe('opencode-config error paths', () => {
       }
     }
     vi.clearAllMocks();
+    // Clear mockImplementationOnce/mockReturnValueOnce queues that
+    // clearAllMocks leaves behind, then re-spy on real implementations
+    const realFs = await vi.importActual<typeof fs>('node:fs');
+    mockedFs.readFileSync.mockReset();
+    mockedFs.readFileSync.mockImplementation(realFs.readFileSync);
+    mockedFs.writeFileSync.mockReset();
+    mockedFs.writeFileSync.mockImplementation(realFs.writeFileSync);
   });
 
   it('returns error when writeFileSync throws (e.g., EACCES)', () => {
@@ -85,7 +92,6 @@ describe('opencode-config error paths', () => {
     // self-referential recursion into the mock itself.
     mockedFs.readFileSync
       .mockReturnValueOnce(existing)           // readFileSync(configPath) — initial load
-      .mockReturnValueOnce('{}')               // readFileSync(getModelsJsonPath()) — loadModelsFromJson
       .mockImplementationOnce(() => {          // readFileSync(configPath) — verify
         throw new Error('EIO: I/O error');
       });
@@ -113,7 +119,6 @@ describe('opencode-config error paths', () => {
     // that restores from backup.
     mockedFs.readFileSync
       .mockReturnValueOnce(existing)           // readFileSync(configPath) — initial load
-      .mockReturnValueOnce('{}')               // readFileSync(getModelsJsonPath()) — loadModelsFromJson
       .mockReturnValueOnce('this is not valid json {'); // readFileSync(configPath) — verify
 
     const result = updateOpencodeConfig(3000, { configPath });

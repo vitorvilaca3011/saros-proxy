@@ -7,7 +7,7 @@
  */
 
 import { existsSync, readFileSync, writeFileSync, copyFileSync } from 'node:fs';
-import { getDefaultOpencodeConfigPath } from './cli/opencode-config.js';
+import { getDefaultOpencodeConfigPath, stripJsoncComments } from './cli/opencode-config.js';
 import { getModelsList } from './models-fetcher.js';
 import {
   MODELS_DEV_URL,
@@ -214,7 +214,8 @@ export function getModelsFromOpencodeConfig(configPath: string): string[] {
     if (!existsSync(configPath)) return [];
 
     const raw = readFileSync(configPath, 'utf-8');
-    const config = JSON.parse(raw) as Record<string, unknown>;
+    const clean = configPath.endsWith('.jsonc') ? stripJsoncComments(raw) : raw;
+    const config = JSON.parse(clean) as Record<string, unknown>;
 
     const provider = config.provider as Record<string, unknown> | undefined;
     if (!provider) return [];
@@ -255,19 +256,20 @@ export function addMissingModelsToOpencodeConfig(
     if (!existsSync(configPath)) {
       return {
         success: false,
-        error: `opencode.json not found at ${configPath}`,
+        error: `opencode config not found at ${configPath}`,
       };
     }
 
-    const raw = readFileSync(configPath, 'utf-8');
     let config: Record<string, unknown>;
 
     try {
-      config = JSON.parse(raw) as Record<string, unknown>;
+      const raw = readFileSync(configPath, 'utf-8');
+      const clean = configPath.endsWith('.jsonc') ? stripJsoncComments(raw) : raw;
+      config = JSON.parse(clean) as Record<string, unknown>;
     } catch {
       return {
         success: false,
-        error: 'Existing opencode.json contains invalid JSON',
+        error: 'Existing opencode config contains invalid JSON/JSONC',
       };
     }
 
