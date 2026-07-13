@@ -170,9 +170,9 @@ describe('C2 – Error Classification', () => {
     expect(classifyHttpError(401, 'invalid key')).toBe('KeyFault');
   });
 
-  it('classifyHttpError returns KeyFault for 429', () => {
-    expect(classifyHttpError(429)).toBe('KeyFault');
-    expect(classifyHttpError(429, 'rate limited')).toBe('KeyFault');
+  it('classifyHttpError returns ServerFault for 429 (transient rate-limit)', () => {
+    expect(classifyHttpError(429)).toBe('ServerFault');
+    expect(classifyHttpError(429, 'rate limited')).toBe('ServerFault');
   });
 
   it('classifyHttpError returns KeyFault for 5xx with quota/balance body', () => {
@@ -223,6 +223,23 @@ describe('C2 – Error Classification', () => {
     // Even with threshold=5, KeyFault bumps failures to threshold so it's disabled
     expect(state.keys[0].enabled).toBe(false);
     expect(state.keys[0].disabledAt).not.toBeNull();
+  });
+
+  it('429 uses incremental circuit breaker (not instant disable)', () => {
+    const state = makeState(3);
+    // First 429 → ServerFault → 1/3 failures, still enabled
+    markKeyFailed(state, 'alpha', classifyHttpError(429));
+    expect(state.keys[0].consecutiveFailures).toBe(1);
+    expect(state.keys[0].enabled).toBe(true);
+
+    // Second 429 → 2/3, still enabled
+    markKeyFailed(state, 'alpha', classifyHttpError(429));
+    expect(state.keys[0].consecutiveFailures).toBe(2);
+    expect(state.keys[0].enabled).toBe(true);
+
+    // Third 429 → 3/3, now disabled
+    markKeyFailed(state, 'alpha', classifyHttpError(429));
+    expect(state.keys[0].enabled).toBe(false);
   });
 });
 
@@ -429,6 +446,68 @@ describe('Round-robin rotation', () => {
     // beta should never appear
     expect(keys.every((k) => k !== 'beta')).toBe(true);
     expect(keys).toEqual(['alpha', 'gamma', 'alpha', 'gamma']);
+  });
+});
+
+describe('Key sharing when all keys are booked', () => {
+  it('falls back to round-robin when all healthy keys are booked', () => {
+    const state = makeState();
+
+    // Book all 3 keys with concurrent requests
+    const a = selectKeyForRequest(state, 'req-A'); // alpha
+    const b = selectKeyForRequest(state, 'req-B'); // beta
+    const c = selectKeyForRequest(state, 'req-C'); // gamma
+    expect([a!.label, b!.label, c!.label].sort()).toEqual(['alpha', 'beta', 'gamma']);
+
+    // 4th concurrent request should SHARE a key, not get null
+    const d = selectKeyForRequest(state, 'req-D');
+    expect(d).not.toBeNull();
+    // Must be one of the healthy keys
+    expect(['alpha', 'beta', 'gamma']).toContain(d!.label);
+  });
+
+  it('returns null when all keys are booked AND circuit-breaker disabled', () => {
+    const state = makeState(1, 60_000);
+    // Disable all keys
+    markKeyFailed(state, 'alpha', 'ServerFault');
+    markKeyFailed(state, 'beta', 'ServerFault');
+    markKeyFailed(state, 'gamma', 'ServerFault');
+
+    expect(selectKeyForRequest(state, 'req')).toBeNull();
+  });
+
+  it('failoverRequest shares a booked key when all remaining are booked', () => {
+    const state = makeState();
+
+    // req-A picks alpha, failovers to beta (alpha in triedKeys)
+    selectKeyForRequest(state, 'req-A'); // alpha
+    failoverRequest(state, 'req-A');     // → beta
+
+    // req-B and req-C book the remaining keys
+    selectKeyForRequest(state, 'req-B'); // picks gamma (beta booked by A)
+    selectKeyForRequest(state, 'req-C'); // alpha is free now (A moved off it)
+    // Now req-A fails beta → triedKeys = [alpha, beta]
+    // gamma is booked by B, alpha is booked by C → tier 1 fails
+    // Tier 2: only triedKeys excluded → gamma available (shared with B)
+    const next = failoverRequest(state, 'req-A');
+    expect(next).not.toBeNull();
+    expect(['alpha', 'beta', 'gamma']).toContain(next!.label);
+    // Must not be a key already tried by this request
+    expect(next!.label).not.toBe('alpha');
+    expect(next!.label).not.toBe('beta');
+  });
+
+  it('key sharing still respects per-request triedKeys', () => {
+    const state = makeState();
+
+    // req-A tries all 3 keys via failover
+    selectKeyForRequest(state, 'req-A');   // alpha
+    failoverRequest(state, 'req-A');       // → beta
+    failoverRequest(state, 'req-A');       // → gamma
+
+    // All keys tried — failover must return null even with sharing
+    const exhausted = failoverRequest(state, 'req-A');
+    expect(exhausted).toBeNull();
   });
 });
 

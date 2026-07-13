@@ -313,14 +313,21 @@ export function selectKeyForRequest(
   const ctx: RequestContext = { requestId, triedKeys: [], currentKey: null };
   state.activeRequests.set(requestId, ctx);
 
+  // Tier 1: prefer a key not booked by another active request (spread load)
   const excludeLabels = new Set(ctx.triedKeys);
-  // Avoid double-booking: don't assign a key that another request already has
   const booked = buildBookedLabels(state);
   for (const label of booked) {
     excludeLabels.add(label);
   }
 
-  const snapshot = selectKeyWithUsageFallback(state, excludeLabels, options);
+  let snapshot = selectKeyWithUsageFallback(state, excludeLabels, options);
+
+  // Tier 2: all healthy keys are booked — share one via round-robin.
+  // Better to share a key than return 503 when concurrent requests
+  // outnumber the key pool.
+  if (!snapshot) {
+    snapshot = selectKeyWithUsageFallback(state, new Set(ctx.triedKeys), options);
+  }
 
   ctx.currentKey = snapshot;
   return snapshot;
@@ -345,14 +352,21 @@ export function failoverRequest(
     ctx.triedKeys.push(ctx.currentKey.label);
   }
 
-  // Pick next excluding tried keys + double-booking guard
+  // Tier 1: prefer a key not tried AND not booked by another request
   const excludeLabels = new Set(ctx.triedKeys);
   const booked = buildBookedLabels(state);
   for (const label of booked) {
     excludeLabels.add(label);
   }
 
-  const snapshot = selectKeyWithUsageFallback(state, excludeLabels, options);
+  let snapshot = selectKeyWithUsageFallback(state, excludeLabels, options);
+
+  // Tier 2: all remaining healthy keys are booked — share one.
+  // Still respects per-request triedKeys (don't re-use a key this
+  // request already failed on).
+  if (!snapshot) {
+    snapshot = selectKeyWithUsageFallback(state, new Set(ctx.triedKeys), options);
+  }
 
   ctx.currentKey = snapshot;
   return snapshot;
@@ -469,14 +483,14 @@ function isKeyDisabled(state: ProxyState, keyLabel: string): boolean {
  *
  * Rules:
  *  401               → KeyFault  (invalid/revoked key — immediate disable)
- *  429               → KeyFault  (rate-limited)
+ *  429               → ServerFault (transient rate-limit — incremental circuit breaker)
  *  500 / 502 / 503   → KeyFault if body mentions quota/balance, else ServerFault
  *  400 / 404 / 422   → RequestFault (bad request — don't penalise the key)
  *  everything else   → ServerFault
  */
 export function classifyHttpError(status: number, _body?: string): ErrorType {
   if (status === 401) return 'KeyFault';
-  if (status === 429) return 'KeyFault';
+  if (status === 429) return 'ServerFault';
   if (status === 400 || status === 404 || status === 422) return 'RequestFault';
   if (status === 500 || status === 502 || status === 503) {
     // Server errors: if the body hints at a quota/balance issue treat as KeyFault
