@@ -229,7 +229,10 @@ describe('autostart — combined status/uninstall (no method)', () => {
   });
 });
 
-describe('detectThirdPartyAv', () => {
+// detectThirdPartyAv is Windows-only: the implementation short-circuits to
+// false on non-Windows before touching tasklist, so these tests are skipped
+// on other platforms.
+describe.skipIf(process.platform !== 'win32')('detectThirdPartyAv', () => {
   beforeEach(() => {
     mockExecFileSync.mockReset();
   });
@@ -284,12 +287,14 @@ describe('resolveMethod', () => {
     expect(resolveMethod('auto', true)).toBe('registry');
   });
 
-  it('returns vbs when no AV detected (auto mode)', async () => {
+  // VBS is only chosen on Windows — resolveMethod returns 'registry' before
+  // the AV check on other platforms.
+  it.skipIf(process.platform !== 'win32')('returns vbs when no AV detected (auto mode)', async () => {
     const { resolveMethod } = await import('../src/cli/autostart.js');
     expect(resolveMethod('auto', false)).toBe('vbs');
   });
 
-  it('defaults to vbs when no method and no AV', async () => {
+  it.skipIf(process.platform !== 'win32')('defaults to vbs when no method and no AV', async () => {
     const { resolveMethod } = await import('../src/cli/autostart.js');
     expect(resolveMethod(undefined, false)).toBe('vbs');
   });

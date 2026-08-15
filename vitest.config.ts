@@ -19,6 +19,10 @@ export default defineConfig({
         // Firefox cookie extraction requires a real Firefox profile + node:sqlite
         // to be meaningful. Mocking it would test the mocks, not the code.
         'src/firefox-cookies.ts',
+        // Daemon lifecycle (spawn/stop/status) owns process.exit() and
+        // process.kill() paths inside timers; unit-testing it safely requires
+        // exit/kill mocking that would test the mocks, not the daemon.
+        'src/cli/daemon.ts',
       ],
     },
     // Exclude compiled output to avoid running tests twice

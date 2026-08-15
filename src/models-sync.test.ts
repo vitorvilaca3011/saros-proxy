@@ -272,7 +272,8 @@ describe('buildMinimalStub', () => {
   it('hy3-preview', () => {
     const stub = buildMinimalStub('hy3-preview');
     expect(stub.id).toBe('hy3-preview');
-    expect(stub.name).toBe('Hunyuan Preview');
+    // Not in models.dev nor bundled — heuristic title-case of the ID
+    expect(stub.name).toBe('HY3 Preview');
     expect(stub.limit).toBeDefined();
     expect(stub.tool_call).toBe(true);
     expect(stub.reasoning).toBe(true);
@@ -415,13 +416,13 @@ describe('buildMinimalStub', () => {
     expect(stub.limit).toBeDefined();
   });
 
-  it('hy3-preview uses OPENCODE_MODELS fallback since not in models.dev', () => {
+  it('hy3-preview falls back to heuristic title-case when not in models.dev or bundled', () => {
     const devMetadata = {
       'kimi-k2.7-code': { id: 'kimi-k2.7-code', name: 'Kimi' },
     };
     const stub = buildMinimalStub('hy3-preview', devMetadata);
     expect(stub.id).toBe('hy3-preview');
-    expect(stub.name).toBe('Hunyuan Preview');
+    expect(stub.name).toBe('HY3 Preview');
     expect(stub.limit).toBeDefined();
     expect(stub.tool_call).toBe(true);
     expect(stub.reasoning).toBe(true);
