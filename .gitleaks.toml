@@ -1,0 +1,20 @@
+# gitleaks config for saros-proxy.
+#
+# Extends the default rule set. Only fixture API keys live under test/ and
+# *.test.ts — allowlisted by path so CI secret scanning does not fail on
+# intentionally fake credentials. prototype/ and api_keys.txt hold REAL
+# credentials (gitignored today) and are deliberately NOT allowlisted: if
+# either is ever committed (e.g. `git add -f`), the scan must fail loudly.
+
+title = "saros-proxy gitleaks config"
+
+[extend]
+useDefault = true
+
+[allowlist]
+paths = [
+  '''^test/.*''',
+  '''^src/.*\.test\.ts''',
+  # Fixture keys only — never prototype/scraper-creds.json or api_keys.txt
+  '''^prototype/usage-switching\.ts$''',
+]

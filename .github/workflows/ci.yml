@@ -3,22 +3,40 @@ name: CI
 on:
   push:
     branches: [master]
+    paths-ignore:
+      - '*.md'
+      - 'docs/**'
+      - 'LICENSE'
   pull_request:
     branches: [master]
+    paths-ignore:
+      - '*.md'
+      - 'docs/**'
+      - 'LICENSE'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   test:
     name: Test on Node.js ${{ matrix.node-version }}
     runs-on: ubuntu-latest
+    timeout-minutes: 15
     strategy:
+      fail-fast: false
       matrix:
-        node-version: [22, 23]
+        # 22 = maintenance LTS, 24 = active LTS
+        node-version: [22, 24]
 
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Set up Node.js ${{ matrix.node-version }}
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: ${{ matrix.node-version }}
           cache: npm
@@ -29,23 +47,86 @@ jobs:
       - name: Run type check
         run: npm run lint
 
-      - name: Run unit tests
-        run: npx vitest run --coverage
+      - name: Run unit tests with coverage
+        run: npm run coverage
 
       - name: Upload coverage to Codecov
-        uses: codecov/codecov-action@v5
+        uses: codecov/codecov-action@e53489f4d376d79066609109e7a95a29eb3740b1 # v7.0.0
         if: ${{ !cancelled() }}
         with:
           fail_ci_if_error: false
 
+  security:
+    name: Security scans
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      security-events: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0 # gitleaks scans full history
+
+      - name: Gitleaks secret scan
+        run: |
+          curl -sSfL https://github.com/gitleaks/gitleaks/releases/download/v8.30.1/gitleaks_8.30.1_linux_x64.tar.gz | tar -xz gitleaks
+          ./gitleaks detect --source . --config .gitleaks.toml --redact --report-format sarif --report-path gitleaks.sarif --exit-code 1
+
+      - name: Upload gitleaks SARIF
+        if: always()
+        uses: github/codeql-action/upload-sarif@faaa5d804fc648d0fdb28822a8e36cf7d0a6132c # v4.37.7
+        with:
+          sarif_file: gitleaks.sarif
+
+      - name: Set up Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Audit npm dependencies
+        run: npm audit --audit-level=high
+
+      - name: SonarQube Scan
+        # Skipped until SONAR_TOKEN + SONAR_HOST_URL are configured
+        # (SonarQube Cloud or self-hosted server). Step env is evaluated
+        # before `if`, so empty secrets gate the step.
+        if: ${{ env.SONAR_TOKEN != '' && env.SONAR_HOST_URL != '' }}
+        uses: SonarSource/sonarqube-scan-action@22918119ff8e1ca75a623e15c8296b6ea4fbe28f # v8.2.1
+        env:
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+          SONAR_HOST_URL: ${{ secrets.SONAR_HOST_URL }}
+
+  codeql:
+    name: CodeQL analysis
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      actions: read
+      security-events: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - uses: github/codeql-action/init@faaa5d804fc648d0fdb28822a8e36cf7d0a6132c # v4.37.7
+        with:
+          languages: javascript-typescript
+          queries: security-and-quality
+          # JS/TS extractor needs no build — avoids a redundant npm ci in this job
+          build-mode: none
+
+      - uses: github/codeql-action/analyze@faaa5d804fc648d0fdb28822a8e36cf7d0a6132c # v4.37.7
+
   docker-build:
     name: Verify Docker build
     runs-on: ubuntu-latest
+    timeout-minutes: 20
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
       - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
+        uses: docker/setup-buildx-action@bb05f3f5519dd87d3ba754cc423b652a5edd6d2c # v4.2.0
 
       - name: Build image (no push)
         run: docker build -t saros-proxy:ci .

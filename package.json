@@ -25,6 +25,7 @@
     "lint": "tsc --noEmit",
     "prepublishOnly": "npm run build",
     "test": "vitest",
+    "coverage": "vitest run --coverage",
     "test:npm": "vitest run test/npm-package.test.ts",
     "test:source": "vitest run test/source-install.test.ts",
     "test:docker": "vitest run test/docker-install.test.ts",
