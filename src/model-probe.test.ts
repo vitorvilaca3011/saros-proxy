@@ -101,6 +101,13 @@ describe('probeLiveness', () => {
     expect(result.details).toBe('Network failure');
   });
 
+  it("returns 'error' with String(err) message when fetch rejects with a non-Error", async () => {
+    mockFetch.mockRejectedValue('string error');
+    const result = await probeLiveness(mockConfig, 'test-model');
+    expect(result.status).toBe('error');
+    expect(result.details).toBe('string error');
+  });
+
   it("returns 'error' on timeout", async () => {
     mockFetch.mockRejectedValue(new Error('The operation was aborted'));
     const result = await probeLiveness(mockConfig, 'test-model');
@@ -144,6 +151,17 @@ describe('probeLiveness', () => {
     const result = await probeLiveness(mockConfig, 'test-model');
     expect(result.status).toBe('error');
     expect(result.details).toMatch(/400/);
+  });
+
+  it("returns 'error' with generic HTTP message when the error body is unreadable", async () => {
+    mockFetch.mockResolvedValue({
+      ok: false,
+      status: 500,
+      text: vi.fn().mockRejectedValue(new Error('body read failed')),
+    } as unknown as Response);
+    const result = await probeLiveness(mockConfig, 'test-model');
+    expect(result.status).toBe('error');
+    expect(result.details).toBe('HTTP 500');
   });
 });
 
@@ -209,6 +227,17 @@ describe('probeReasoning', () => {
     const result = await probeReasoning(mockConfig, 'test-model');
     expect(result.status).toBe('error');
     expect(result.details).toMatch(/503/);
+  });
+
+  it("returns 'error' with generic HTTP message when the error body is unreadable", async () => {
+    mockFetch.mockResolvedValue({
+      ok: false,
+      status: 500,
+      text: vi.fn().mockRejectedValue(new Error('body read failed')),
+    } as unknown as Response);
+    const result = await probeReasoning(mockConfig, 'test-model');
+    expect(result.status).toBe('error');
+    expect(result.details).toBe('HTTP 500');
   });
 
   it("returns 'error' when response has no reasoning field (still ok)", async () => {
@@ -314,6 +343,17 @@ describe('probeToolCalling', () => {
     const result = await probeToolCalling(mockConfig, 'test-model');
     expect(result.status).toBe('error');
     expect(result.details).toMatch(/502/);
+  });
+
+  it("returns 'error' with generic HTTP message when the error body is unreadable", async () => {
+    mockFetch.mockResolvedValue({
+      ok: false,
+      status: 500,
+      text: vi.fn().mockRejectedValue(new Error('body read failed')),
+    } as unknown as Response);
+    const result = await probeToolCalling(mockConfig, 'test-model');
+    expect(result.status).toBe('error');
+    expect(result.details).toBe('HTTP 500');
   });
 
   it("returns 'error' on fetch throw", async () => {
@@ -477,5 +517,30 @@ describe('probeAllModels', () => {
     expect(results[0].liveness.status).toBe('ok');
     expect(results[1].liveness.status).toBe('error');
     expect(results[2].liveness.status).toBe('ok');
+  });
+
+  it('records per-model error entries when probeModel itself throws', async () => {
+    // probeModel catastrophically rejects (unexpected): building the base URL
+    // throws before any fetch happens, so Promise.all rejects and the
+    // defensive catch in probeAllModels records per-model error entries.
+    // The port getter throws a non-Error so the String(err) fallback runs.
+    const throwingConfig = {
+      get port(): never {
+        throw 'port-boom';
+      },
+    } as unknown as Parameters<typeof probeAllModels>[0];
+
+    // Non-Error rejection → String(err) message
+    const stringResults = await probeAllModels(throwingConfig, ['m1']);
+    expect(stringResults).toHaveLength(1);
+    expect(stringResults[0].liveness.details).toBe('port-boom');
+
+    // Error rejection → err.message
+    const errorResults = await probeAllModels(
+      undefined as unknown as Parameters<typeof probeAllModels>[0],
+      ['m2'],
+    );
+    expect(errorResults).toHaveLength(1);
+    expect(errorResults[0].liveness.details).toMatch(/reading 'port'/);
   });
 });

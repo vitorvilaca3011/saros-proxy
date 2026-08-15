@@ -762,4 +762,110 @@ describe('Usage-based key selection', () => {
     // alpha is tried, beta is over threshold → gamma is picked
     expect(next!.label).toBe('gamma');
   });
+
+  it('fallback immediately returns a key absent from the usage map, even if already tried', () => {
+    // Two keys only: alpha (has usage data) and beta (NO usage-map entry at all)
+    const state = createProxyState(
+      [
+        { label: 'alpha', key: 'sk-a1' },
+        { label: 'beta', key: 'sk-b2' },
+      ],
+      { circuitBreakerThreshold: 3, circuitBreakerCooldownMs: 60_000 },
+    );
+    const usageMap = new Map<string, UsageInfo>([
+      ['alpha', usage(90, 90, 90)], // over threshold → excluded from findNextKey
+    ]);
+
+    // Tier 1: alpha is usage-excluded, so beta is picked via findNextKey
+    const first = selectKeyForRequest(state, 'req-fb', { usageMap, usageThreshold: 80 });
+    expect(first!.label).toBe('beta');
+
+    // Failover: beta is now tried AND booked → findNextKey returns null
+    // (alpha excluded by usage, beta by triedKeys).
+    // findFallbackKey iterates alpha (has usage → best so far), then beta
+    // (NO entry → the !usage branch fires and beta is returned immediately).
+    const next = failoverRequest(state, 'req-fb', { usageMap, usageThreshold: 80 });
+    expect(next).not.toBeNull();
+    expect(next!.label).toBe('beta');
+  });
+
+  it('treats a key with null windows as having usage data (not the no-entry branch)', () => {
+    const state = makeState();
+    // beta IS present in the map with all-null windows → not the !usage branch;
+    // it wins via lowest max usage (0) instead.
+    const usageMap = new Map<string, UsageInfo>([
+      ['alpha', usage(90, 90, 90)],
+      ['beta', usage(null, null, null)],
+      ['gamma', usage(80, 80, 80)],
+    ]);
+
+    const snap = selectKeyForRequest(state, 'req-fb2', { usageMap, usageThreshold: 50 });
+    // alpha/gamma excluded (over), beta under → beta picked by findNextKey
+    expect(snap!.label).toBe('beta');
+  });
+
+  it('fallback treats null usage windows as 0 when comparing max usage', () => {
+    // Two keys: alpha (over threshold, non-null windows), beta (null windows).
+    const state = createProxyState(
+      [
+        { label: 'alpha', key: 'sk-a1' },
+        { label: 'beta', key: 'sk-b2' },
+      ],
+      { circuitBreakerThreshold: 3, circuitBreakerCooldownMs: 60_000 },
+    );
+    const usageMap = new Map<string, UsageInfo>([
+      ['alpha', usage(90, 90, 90)],      // over threshold
+      ['beta', usage(null, null, null)], // in the map, but every window is null
+    ]);
+
+    // findNextKey picks beta (null windows → not usage-excluded, alpha is).
+    const first = selectKeyForRequest(state, 'req-fb3', { usageMap, usageThreshold: 80 });
+    expect(first!.label).toBe('beta');
+
+    // Failover without a circuit-breaker failure: beta is tried+booked, alpha
+    // is usage-excluded → findNextKey returns null → findFallbackKey runs.
+    // beta's null windows become 0 via `?? 0` inside Math.max() → lowest max.
+    const next = failoverRequest(state, 'req-fb3', { usageMap, usageThreshold: 80 });
+    expect(next).not.toBeNull();
+    expect(next!.label).toBe('beta');
+  });
+
+  it('does not lazily re-enable a disabled key whose disabledAt was cleared', () => {
+    const state = makeState(1, 60_000);
+    markKeyFailed(state, 'alpha', 'ServerFault'); // disabled + disabledAt set
+    // Simulate a defensive edge: disabled key with no cooldown timestamp
+    state.keys[0].disabledAt = null;
+
+    // isKeyAvailable: enabled=false, disabledAt===null → NOT re-enabled
+    const snap = selectKeyForRequest(state, 'req-cd-edge');
+    expect(snap).not.toBeNull();
+    expect(snap!.label).not.toBe('alpha');
+    expect(state.keys[0].enabled).toBe(false);
+  });
+});
+
+describe('Failover edge cases', () => {
+  it('failoverRequest handles a request whose context has no current key', () => {
+    const state = makeState(1, 60_000);
+    markKeyFailed(state, 'alpha', 'ServerFault');
+    markKeyFailed(state, 'beta', 'ServerFault');
+    markKeyFailed(state, 'gamma', 'ServerFault');
+
+    // All keys disabled → selectKeyForRequest creates the context but returns null
+    expect(selectKeyForRequest(state, 'req-nokey')).toBeNull();
+    // ctx exists with currentKey null → failover must not throw and returns null
+    expect(failoverRequest(state, 'req-nokey')).toBeNull();
+    expect(state.activeRequests.get('req-nokey')!.triedKeys).toEqual([]);
+  });
+
+  it('failoverRequest keeps a null current key when no keys are available', () => {
+    const state = makeState(1, 60_000);
+    markKeyFailed(state, 'alpha', 'KeyFault');
+
+    selectKeyForRequest(state, 'req-nokey2'); // picks beta (alpha disabled)
+    markKeyFailed(state, 'beta', 'KeyFault');
+    const next = failoverRequest(state, 'req-nokey2');
+    // gamma is still healthy → picked
+    expect(next!.label).toBe('gamma');
+  });
 });

@@ -16,6 +16,7 @@ import {
   rmSync,
   mkdirSync,
 } from 'node:fs';
+import * as fs from 'node:fs';
 import { join, sep, dirname } from 'node:path';
 import { tmpdir } from 'node:os';
 import { parse as parseYaml, stringify as stringifyYaml } from 'yaml';
@@ -28,15 +29,58 @@ vi.mock('node:os', async (importOriginal) => {
   return { ...actual, homedir: () => mockHomeRef.current };
 });
 
-import { toPiOmpModel, toPiOmpModelArray } from '../src/cli/harness-models.js';
+// Wrap fs read/write in spies (defaulting to the real implementations) so
+// error paths like corrupt post-write validation and write failures can be
+// simulated per-call.
+vi.mock('node:fs', async (importOriginal) => {
+  const real = await importOriginal<typeof import('node:fs')>();
+  return {
+    ...real,
+    writeFileSync: vi.fn(real.writeFileSync),
+    readFileSync: vi.fn(real.readFileSync),
+  };
+});
+
+// Live (non-offline) model-sync paths hit the network; stub them so
+// buildCanonicalModels/syncModelsInAllHarnesses tests stay deterministic.
+vi.mock('../src/models-sync.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../src/models-sync.js')>();
+  return {
+    ...actual,
+    fetchUpstreamModelIds: vi.fn(),
+    fetchModelsDevMetadata: vi.fn(),
+    buildMinimalStub: vi.fn(),
+    syncOpencodeModelsWithUpstream: vi.fn(),
+  };
+});
+
+import {
+  buildCanonicalModels,
+  toPiOmpModel,
+  toPiOmpModelArray,
+} from '../src/cli/harness-models.js';
 import { syncModelsToPiConfig } from '../src/cli/pi-config.js';
 import { syncModelsToOmpConfig } from '../src/cli/omp-config.js';
+import { loadModelsFromJson } from '../src/cli/opencode-config.js';
+import {
+  fetchUpstreamModelIds,
+  fetchModelsDevMetadata,
+  buildMinimalStub,
+  syncOpencodeModelsWithUpstream,
+} from '../src/models-sync.js';
+import type { ProxyConfig } from '../src/config.js';
 import {
   parseHarnessArgs,
   readHarnessSettings,
   writeHarnessSettings,
   syncModelsInAllHarnesses,
 } from '../src/cli/harness-sync.js';
+
+const mockedFs = vi.mocked(fs);
+const mockedFetchUpstreamIds = vi.mocked(fetchUpstreamModelIds);
+const mockedFetchModelsDevMetadata = vi.mocked(fetchModelsDevMetadata);
+const mockedBuildMinimalStub = vi.mocked(buildMinimalStub);
+const mockedSyncOpencodeUpstream = vi.mocked(syncOpencodeModelsWithUpstream);
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -199,6 +243,107 @@ describe('toPiOmpModel transform', () => {
   it('toPiOmpModelArray maps every entry in order', () => {
     expect(toPiOmpModelArray(TEST_MODELS_MAP)).toEqual(EXPECTED_PI_OMP_MODELS);
   });
+
+  it('defaults id and name to empty strings when id is not a string', () => {
+    const result = toPiOmpModel({ id: 42 });
+    expect(result.id).toBe('');
+    expect(result.name).toBe('');
+  });
+
+  it('defaults cache costs to zero when neither camelCase nor snake_case is present', () => {
+    const result = toPiOmpModel({ id: 'm', cost: { input: 1, output: 2 } });
+    expect(result.cost).toEqual({ input: 1, output: 2, cacheRead: 0, cacheWrite: 0 });
+  });
+
+  it('coerces non-numeric cache costs to zero', () => {
+    const result = toPiOmpModel({
+      id: 'm',
+      cost: { input: 1, output: 2, cacheRead: 'x', cacheWrite: true },
+    });
+    expect(result.cost).toEqual({ input: 1, output: 2, cacheRead: 0, cacheWrite: 0 });
+  });
+});
+
+describe('buildCanonicalModels', () => {
+  let tmpDir: string;
+
+  beforeEach(() => {
+    tmpDir = createTempDir();
+    mockHomeRef.current = tmpDir;
+    mockedFetchUpstreamIds.mockReset();
+    mockedFetchModelsDevMetadata.mockReset();
+    mockedBuildMinimalStub.mockReset();
+    mockedSyncOpencodeUpstream.mockReset();
+  });
+
+  afterEach(async () => {
+    mockHomeRef.current = '';
+    await removeTempDir(tmpDir);
+  });
+
+  it('returns bundled models immediately when offline or without a config', async () => {
+    const offline = await buildCanonicalModels({ port: 3000 } as ProxyConfig, {
+      offline: true,
+    });
+    const noConfig = await buildCanonicalModels(undefined);
+
+    expect(offline).toEqual(loadModelsFromJson());
+    expect(noConfig).toEqual(loadModelsFromJson());
+    expect(mockedFetchUpstreamIds).not.toHaveBeenCalled();
+  });
+
+  it('builds the map from upstream ids enriched with models.dev metadata', async () => {
+    mockedFetchUpstreamIds.mockResolvedValue(['m1', 'm2']);
+    mockedFetchModelsDevMetadata.mockResolvedValue({
+      m1: { id: 'm1', name: 'M One' },
+      m2: { id: 'm2', name: 'M Two' },
+    });
+    mockedBuildMinimalStub.mockImplementation((id, meta) => ({
+      id,
+      name: meta?.[id]?.name,
+      stub: true,
+    }));
+
+    const result = await buildCanonicalModels({ port: 3000 } as ProxyConfig);
+
+    expect(mockedFetchUpstreamIds).toHaveBeenCalledWith({ port: 3000 });
+    expect(mockedBuildMinimalStub).toHaveBeenCalledTimes(2);
+    expect(result).toEqual({
+      m1: { id: 'm1', name: 'M One', stub: true },
+      m2: { id: 'm2', name: 'M Two', stub: true },
+    });
+  });
+
+  it('falls back to bundled models when the upstream fetch throws', async () => {
+    mockedFetchUpstreamIds.mockRejectedValue(new Error('network down'));
+    mockedFetchModelsDevMetadata.mockResolvedValue(null);
+
+    const result = await buildCanonicalModels({ port: 3000 } as ProxyConfig);
+
+    expect(result).toEqual(loadModelsFromJson());
+    expect(mockedBuildMinimalStub).not.toHaveBeenCalled();
+  });
+
+  it('falls back to bundled models when upstream returns no ids', async () => {
+    mockedFetchUpstreamIds.mockResolvedValue([]);
+    mockedFetchModelsDevMetadata.mockResolvedValue(null);
+
+    const result = await buildCanonicalModels({ port: 3000 } as ProxyConfig);
+
+    expect(result).toEqual(loadModelsFromJson());
+    expect(mockedBuildMinimalStub).not.toHaveBeenCalled();
+  });
+
+  it('passes undefined metadata to the stub builder when models.dev yields nothing', async () => {
+    mockedFetchUpstreamIds.mockResolvedValue(['m1']);
+    mockedFetchModelsDevMetadata.mockResolvedValue(null);
+    mockedBuildMinimalStub.mockImplementation((id, meta) => ({ id, meta }));
+
+    const result = await buildCanonicalModels({ port: 3000 } as ProxyConfig);
+
+    expect(mockedBuildMinimalStub).toHaveBeenCalledWith('m1', undefined);
+    expect(result).toEqual({ m1: { id: 'm1', meta: undefined } });
+  });
 });
 
 describe('syncModelsToPiConfig (JSON)', () => {
@@ -212,6 +357,11 @@ describe('syncModelsToPiConfig (JSON)', () => {
 
   afterEach(async () => {
     await removeTempDir(tmpDir);
+    const realFs = await vi.importActual<typeof import('node:fs')>('node:fs');
+    mockedFs.writeFileSync.mockReset();
+    mockedFs.writeFileSync.mockImplementation(realFs.writeFileSync);
+    mockedFs.readFileSync.mockReset();
+    mockedFs.readFileSync.mockImplementation(realFs.readFileSync);
   });
 
   it('preserves other providers and top-level keys; replaces only saros-proxy.models', () => {
@@ -344,6 +494,54 @@ describe('syncModelsToPiConfig (JSON)', () => {
     expect(result.success).toBe(false);
     expect(result.error).toContain('invalid');
   });
+
+  it('restores from backup and reports failure when the written file fails validation', () => {
+    writeFileSync(piPath, JSON.stringify(richPiFixture(), null, 2), 'utf-8');
+    const original = readFileSync(piPath, 'utf-8');
+
+    mockedFs.writeFileSync.mockImplementationOnce((path, data, options) => {
+      // Simulate a write that produces corrupt output (e.g. encoding issue).
+      return writeFileSync(piPath, '{ this is not json', options);
+    });
+
+    const result = syncModelsToPiConfig(TEST_MODELS_MAP, 3000, { configPath: piPath });
+    expect(result.success).toBe(false);
+    expect(result.error).toContain('Restored from backup');
+    expect(readFileSync(piPath, 'utf-8')).toBe(original);
+  });
+
+  it('returns the underlying error when writeFileSync throws', () => {
+    writeFileSync(piPath, JSON.stringify(richPiFixture(), null, 2), 'utf-8');
+
+    mockedFs.writeFileSync.mockImplementationOnce(() => {
+      throw new Error('EACCES: permission denied, open');
+    });
+
+    const result = syncModelsToPiConfig(TEST_MODELS_MAP, 3000, { configPath: piPath });
+    expect(result.success).toBe(false);
+    expect(result.path).toBe(piPath);
+    expect(result.error).toContain('EACCES');
+  });
+
+  it('reports non-Error throw values verbatim', () => {
+    writeFileSync(piPath, JSON.stringify(richPiFixture(), null, 2), 'utf-8');
+
+    mockedFs.writeFileSync.mockImplementationOnce(() => {
+      throw 'disk on fire';
+    });
+
+    const result = syncModelsToPiConfig(TEST_MODELS_MAP, 3000, { configPath: piPath });
+    expect(result.success).toBe(false);
+    expect(result.error).toBe('disk on fire');
+  });
+
+  it('handles a config without a providers key', () => {
+    writeFileSync(piPath, JSON.stringify({ version: '1.0' }), 'utf-8');
+    const result = syncModelsToPiConfig(TEST_MODELS_MAP, 3000, { configPath: piPath });
+    expect(result.success).toBe(true);
+    const updated = JSON.parse(readFileSync(piPath, 'utf-8')) as Record<string, unknown>;
+    expect((updated.providers as Record<string, unknown>)['saros-proxy']).toBeDefined();
+  });
 });
 
 describe('syncModelsToOmpConfig (YAML)', () => {
@@ -357,6 +555,11 @@ describe('syncModelsToOmpConfig (YAML)', () => {
 
   afterEach(async () => {
     await removeTempDir(tmpDir);
+    const realFs = await vi.importActual<typeof import('node:fs')>('node:fs');
+    mockedFs.writeFileSync.mockReset();
+    mockedFs.writeFileSync.mockImplementation(realFs.writeFileSync);
+    mockedFs.readFileSync.mockReset();
+    mockedFs.readFileSync.mockImplementation(realFs.readFileSync);
   });
 
   it('preserves other providers and top-level keys; replaces only saros-proxy.models', () => {
@@ -444,6 +647,73 @@ describe('syncModelsToOmpConfig (YAML)', () => {
     expect(result.success).toBe(false);
     expect(result.error).toContain('invalid');
   });
+
+  it('rejects YAML that parses to a non-object (array or scalar)', () => {
+    writeFileSync(ompPath, '- just\n- a list\n', 'utf-8');
+    expect(syncModelsToOmpConfig(TEST_MODELS_MAP, 3000, { configPath: ompPath }).error).toContain(
+      'invalid YAML',
+    );
+
+    writeFileSync(ompPath, 'just a scalar string\n', 'utf-8');
+    expect(syncModelsToOmpConfig(TEST_MODELS_MAP, 3000, { configPath: ompPath }).error).toContain(
+      'invalid YAML',
+    );
+  });
+
+  it('treats a null document and a missing providers key as empty configs', () => {
+    writeFileSync(ompPath, 'null\n', 'utf-8');
+    const fromNull = syncModelsToOmpConfig(TEST_MODELS_MAP, 4242, { configPath: ompPath });
+    expect(fromNull.success).toBe(true);
+    const nullUpdated = parseYaml(readFileSync(ompPath, 'utf-8')) as Record<string, unknown>;
+    expect(
+      ((nullUpdated.providers as Record<string, unknown>)['saros-proxy'] as Record<string, unknown>)
+        .baseUrl,
+    ).toBe('http://127.0.0.1:4242/zen/go/v1');
+
+    writeFileSync(ompPath, 'version: 1.0\n', 'utf-8');
+    const noProviders = syncModelsToOmpConfig(TEST_MODELS_MAP, 4243, { configPath: ompPath });
+    expect(noProviders.success).toBe(true);
+    const updated = parseYaml(readFileSync(ompPath, 'utf-8')) as Record<string, unknown>;
+    expect((updated.providers as Record<string, unknown>)['saros-proxy']).toBeDefined();
+  });
+
+  it('restores from backup and reports failure when the written YAML fails validation', () => {
+    writeFileSync(ompPath, stringifyYaml(richOmpFixture()), 'utf-8');
+    const original = readFileSync(ompPath, 'utf-8');
+
+    mockedFs.writeFileSync.mockImplementationOnce((path, data, options) => {
+      return writeFileSync(ompPath, 'providers: [unclosed', options);
+    });
+
+    const result = syncModelsToOmpConfig(TEST_MODELS_MAP, 3000, { configPath: ompPath });
+    expect(result.success).toBe(false);
+    expect(result.error).toContain('Restored from backup');
+    expect(readFileSync(ompPath, 'utf-8')).toBe(original);
+  });
+
+  it('returns the underlying error when writeFileSync throws', () => {
+    writeFileSync(ompPath, stringifyYaml(richOmpFixture()), 'utf-8');
+
+    mockedFs.writeFileSync.mockImplementationOnce(() => {
+      throw new Error('EACCES: permission denied, open');
+    });
+
+    const result = syncModelsToOmpConfig(TEST_MODELS_MAP, 3000, { configPath: ompPath });
+    expect(result.success).toBe(false);
+    expect(result.error).toContain('EACCES');
+  });
+
+  it('reports non-Error throw values verbatim', () => {
+    writeFileSync(ompPath, stringifyYaml(richOmpFixture()), 'utf-8');
+
+    mockedFs.writeFileSync.mockImplementationOnce(() => {
+      throw 'disk on fire';
+    });
+
+    const result = syncModelsToOmpConfig(TEST_MODELS_MAP, 3000, { configPath: ompPath });
+    expect(result.success).toBe(false);
+    expect(result.error).toBe('disk on fire');
+  });
 });
 
 describe('harness selection settings', () => {
@@ -483,6 +753,21 @@ describe('harness selection settings', () => {
     mkdirSync(dir, { recursive: true });
     writeFileSync(join(dir, 'harnesses.json'), JSON.stringify({ harnesses: ['pi', 'bogus'] }), 'utf-8');
     expect(readHarnessSettings()).toEqual(['pi']);
+  });
+
+  it('returns [] when the file exists but has no harnesses array', () => {
+    const dir = join(tmpDir, '.config', 'saros');
+    mkdirSync(dir, { recursive: true });
+    const settingsPath = join(dir, 'harnesses.json');
+
+    writeFileSync(settingsPath, 'null', 'utf-8');
+    expect(readHarnessSettings()).toEqual([]);
+
+    writeFileSync(settingsPath, '"just a string"', 'utf-8');
+    expect(readHarnessSettings()).toEqual([]);
+
+    writeFileSync(settingsPath, JSON.stringify({ harnesses: 'pi' }), 'utf-8');
+    expect(readHarnessSettings()).toEqual([]);
   });
 
   it('parseHarnessArgs maps aliases and reports unknown names', () => {
@@ -569,5 +854,36 @@ describe('syncModelsInAllHarnesses', () => {
       ((ocContent.provider as Record<string, unknown>)['saros-proxy'] as Record<string, unknown>)
         .models,
     ).toEqual({});
+  });
+
+  it('syncs opencode via upstream when a config is provided (live path)', async () => {
+    mockedSyncOpencodeUpstream.mockResolvedValue({ success: true, path: '/tmp/opencode.json' });
+
+    const results = await syncModelsInAllHarnesses({ port: 3000 } as ProxyConfig);
+
+    expect(results.map((r) => r.harness)).toEqual(['opencode']);
+    expect(mockedSyncOpencodeUpstream).toHaveBeenCalledWith({ port: 3000 });
+    expect(results[0].result.success).toBe(true);
+  });
+
+  it('syncs omp using the default config path when enabled', async () => {
+    const ompPath = join(tmpDir, '.omp', 'agent', 'models.yml');
+    mkdirSync(dirname(ompPath), { recursive: true });
+    writeFileSync(ompPath, stringifyYaml({ providers: { lmstudio: { models: [] } } }), 'utf-8');
+
+    writeHarnessSettings(['omp']);
+
+    const results = await syncModelsInAllHarnesses(undefined, { offline: true });
+    expect(results.map((r) => r.harness)).toEqual(['omp']);
+    expect(results[0].result.success).toBe(true);
+
+    const updated = parseYaml(readFileSync(ompPath, 'utf-8')) as Record<string, unknown>;
+    const saros = (updated.providers as Record<string, unknown>)[
+      'saros-proxy'
+    ] as Record<string, unknown>;
+    expect(Array.isArray(saros.models)).toBe(true);
+    expect(
+      (saros.models as Array<{ id: string }>).some((m) => m.id === 'deepseek-v4-pro'),
+    ).toBe(true);
   });
 });

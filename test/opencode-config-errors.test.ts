@@ -17,11 +17,14 @@ vi.mock('node:fs', async (importOriginal) => {
     ...real,
     writeFileSync: vi.fn(real.writeFileSync),
     readFileSync: vi.fn(real.readFileSync),
+    copyFileSync: vi.fn(real.copyFileSync),
   };
 });
 
 // Imports MUST come after vi.mock
-const { updateOpencodeConfig } = await import('../src/cli/opencode-config.js');
+const { updateOpencodeConfig, syncModelsToOpencodeConfig } = await import(
+  '../src/cli/opencode-config.js'
+);
 const mockedFs = vi.mocked(fs);
 
 describe('opencode-config error paths', () => {
@@ -47,6 +50,8 @@ describe('opencode-config error paths', () => {
     mockedFs.readFileSync.mockImplementation(realFs.readFileSync);
     mockedFs.writeFileSync.mockReset();
     mockedFs.writeFileSync.mockImplementation(realFs.writeFileSync);
+    mockedFs.copyFileSync.mockReset();
+    mockedFs.copyFileSync.mockImplementation(realFs.copyFileSync);
   });
 
   it('returns error when writeFileSync throws (e.g., EACCES)', () => {
@@ -147,6 +152,24 @@ describe('opencode-config error paths', () => {
     expect(result.error).toContain('EACCES');
   });
 
+  it('returns string error when initial read throws a non-Error value', () => {
+    const configPath = join(tmpDir, 'opencode.json');
+
+    // Pre-create the file
+    fs.writeFileSync(configPath, '{}', 'utf-8');
+
+    // Simulate a non-Error throw (e.g., a string)
+    mockedFs.readFileSync.mockImplementationOnce(() => {
+      // eslint-disable-next-line @typescript-eslint/no-throw-literal
+      throw 'read failed';
+    });
+
+    const result = updateOpencodeConfig(3000, { configPath });
+
+    expect(result.success).toBe(false);
+    expect(result.error).toBe('read failed');
+  });
+
   it('returns clear error message when existing file contains invalid JSON', () => {
     const configPath = join(tmpDir, 'opencode.json');
 
@@ -157,5 +180,148 @@ describe('opencode-config error paths', () => {
 
     expect(result.success).toBe(false);
     expect(result.error).toContain('invalid JSON');
+  });
+
+  it('returns error on verify failure when no backup exists', () => {
+    const configPath = join(tmpDir, 'fresh.json');
+
+    // Config does not exist initially → created=true, so no backup is made.
+    // The post-write verify read then fails, and the catch must return the
+    // error without trying to restore (there is no backup to restore).
+    mockedFs.readFileSync.mockImplementationOnce(() => {
+      throw new Error('EIO: verify read failed');
+    });
+
+    const result = updateOpencodeConfig(3000, { configPath });
+
+    expect(result.success).toBe(false);
+    expect(result.error).toContain('Failed to write valid JSON');
+    expect(existsSync(`${configPath}.backup`)).toBe(false);
+  });
+
+  it('sync returns error when writeFileSync throws (e.g., EACCES)', () => {
+    const configPath = join(tmpDir, 'opencode.json');
+    fs.writeFileSync(
+      configPath,
+      JSON.stringify({ provider: { 'saros-proxy': { options: {} } } }),
+      'utf-8',
+    );
+
+    mockedFs.writeFileSync.mockImplementationOnce(() => {
+      throw new Error('EACCES: permission denied, open');
+    });
+
+    const result = syncModelsToOpencodeConfig({ configPath });
+
+    expect(result.success).toBe(false);
+    expect(result.path).toBe(configPath);
+    expect(result.error).toContain('EACCES');
+  });
+
+  it('sync returns string error when writeFileSync throws a non-Error value', () => {
+    const configPath = join(tmpDir, 'opencode.json');
+    fs.writeFileSync(
+      configPath,
+      JSON.stringify({ provider: { 'saros-proxy': {} } }),
+      'utf-8',
+    );
+
+    // Simulate a non-Error throw (e.g., a string)
+    mockedFs.writeFileSync.mockImplementationOnce(() => {
+      // eslint-disable-next-line @typescript-eslint/no-throw-literal
+      throw 'disk full';
+    });
+
+    const result = syncModelsToOpencodeConfig({ configPath });
+
+    expect(result.success).toBe(false);
+    expect(result.path).toBe(configPath);
+    expect(result.error).toBe('disk full');
+  });
+
+  it('sync returns error on verify failure when no backup can be restored', () => {
+    const configPath = join(tmpDir, 'opencode.json');
+    const existing = JSON.stringify({ provider: { 'saros-proxy': {} } }, null, 2);
+    fs.writeFileSync(configPath, existing, 'utf-8');
+
+    // Prevent the backup from being created so the restore branch has
+    // nothing to copy back.
+    mockedFs.copyFileSync.mockImplementation(() => {});
+
+    // First read (initial load) returns the valid existing content.
+    // Second read (the post-write verify) throws EIO.
+    mockedFs.readFileSync
+      .mockReturnValueOnce(existing)
+      .mockImplementationOnce(() => {
+        throw new Error('EIO: I/O error');
+      });
+
+    const result = syncModelsToOpencodeConfig({ configPath });
+
+    expect(result.success).toBe(false);
+    expect(result.error).toContain('Restored from backup');
+    // No backup existed, so nothing was restored — the synced content stays
+    expect(JSON.parse(readFileSync(configPath, 'utf-8')).provider['saros-proxy'].models).toBeDefined();
+  });
+
+  it('sync returns error when reading config fails', () => {
+    const configPath = join(tmpDir, 'opencode.json');
+    fs.writeFileSync(
+      configPath,
+      JSON.stringify({ provider: { 'saros-proxy': {} } }),
+      'utf-8',
+    );
+
+    mockedFs.readFileSync.mockImplementationOnce(() => {
+      throw new Error('EACCES: cannot read file');
+    });
+
+    const result = syncModelsToOpencodeConfig({ configPath });
+
+    expect(result.success).toBe(false);
+    expect(result.error).toContain('EACCES');
+  });
+
+  it('sync restores from backup and returns error when verify read fails', () => {
+    const configPath = join(tmpDir, 'opencode.json');
+    const existing = JSON.stringify(
+      { provider: { 'saros-proxy': { options: {} } } },
+      null,
+      2,
+    );
+    fs.writeFileSync(configPath, existing, 'utf-8');
+
+    // First read (initial load) returns the valid existing content.
+    // Second read (the post-write verify) throws EIO.
+    mockedFs.readFileSync
+      .mockReturnValueOnce(existing)
+      .mockImplementationOnce(() => {
+        throw new Error('EIO: I/O error');
+      });
+
+    const result = syncModelsToOpencodeConfig({ configPath });
+
+    expect(result.success).toBe(false);
+    expect(result.error).toContain('Restored from backup');
+    // Original file should be restored from backup
+    expect(JSON.parse(readFileSync(configPath, 'utf-8'))).toEqual(JSON.parse(existing));
+  });
+
+  it('sync restores from backup and returns error when verify parse fails', () => {
+    const configPath = join(tmpDir, 'opencode.json');
+    const existing = JSON.stringify({ provider: { 'saros-proxy': {} } }, null, 2);
+    fs.writeFileSync(configPath, existing, 'utf-8');
+
+    // First read (initial load) returns the valid existing content.
+    // Second read (the post-write verify) returns invalid JSON.
+    mockedFs.readFileSync
+      .mockReturnValueOnce(existing)
+      .mockReturnValueOnce('this is not valid json {');
+
+    const result = syncModelsToOpencodeConfig({ configPath });
+
+    expect(result.success).toBe(false);
+    expect(result.error).toContain('Restored from backup');
+    expect(JSON.parse(readFileSync(configPath, 'utf-8'))).toEqual(JSON.parse(existing));
   });
 });

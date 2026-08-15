@@ -17,6 +17,14 @@ import {
 } from './scraper.js';
 
 // ---------------------------------------------------------------------------
+// Mocks
+// ---------------------------------------------------------------------------
+
+vi.mock('./logger.js', () => ({
+  logger: { info: vi.fn(), warn: vi.fn(), error: vi.fn() },
+}));
+
+// ---------------------------------------------------------------------------
 // Fixtures
 // ---------------------------------------------------------------------------
 
@@ -353,6 +361,81 @@ describe('scraper', () => {
     });
 
     it('isScraperRunning returns false when scraper was never started', () => {
+      expect(isScraperRunning()).toBe(false);
+    });
+
+    it('logs "Scrape cycle failed" when a cycle throws', async () => {
+      const { logger } = await import('./logger.js');
+      vi.stubGlobal(
+        'fetch',
+        vi.fn().mockResolvedValue(mockFetchResponse({ text: MOCK_HTML })),
+      );
+
+      // Make the success-path log call throw so scrapeAndStore rejects and
+      // runScrapeCycle propagates the rejection to schedule()'s catch.
+      const originalInfo = vi.mocked(logger.info).getMockImplementation();
+      vi.mocked(logger.info).mockImplementation((...args: unknown[]) => {
+        if (args[1] === 'Scraped dashboard for %s') {
+          throw new Error('log failure');
+        }
+      });
+      try {
+        startScraper([MOCK_ACCOUNTS[0]], 1000);
+        await vi.advanceTimersByTimeAsync(0);
+
+        expect(logger.error).toHaveBeenCalledWith(
+          expect.objectContaining({ err: expect.any(Error) }),
+          'Scrape cycle failed',
+        );
+      } finally {
+        vi.mocked(logger.info).mockImplementation(originalInfo!);
+      }
+    });
+
+    it('logs "Initial scrape cycle failed" when the first schedule rejects', async () => {
+      const { logger } = await import('./logger.js');
+      vi.stubGlobal(
+        'fetch',
+        vi.fn().mockResolvedValue(mockFetchResponse({ text: MOCK_HTML })),
+      );
+      // The scheduled setTimeout handle's unref() throws, so the initial
+      // schedule() promise rejects after the first cycle completes.
+      vi.stubGlobal(
+        'setTimeout',
+        vi.fn(() => ({
+          unref: () => {
+            throw new Error('unref boom');
+          },
+        })),
+      );
+
+      startScraper([MOCK_ACCOUNTS[0]], 1000);
+      await vi.advanceTimersByTimeAsync(0);
+
+      expect(logger.error).toHaveBeenCalledWith(
+        expect.objectContaining({ err: expect.any(Error) }),
+        'Initial scrape cycle failed',
+      );
+    });
+
+    it('short-circuits a scheduled cycle that fires after stop', async () => {
+      const mockFetch = vi
+        .fn()
+        .mockResolvedValue(mockFetchResponse({ text: MOCK_HTML }));
+      vi.stubGlobal('fetch', mockFetch);
+      // Keep the scheduled timer alive across stopScraper() so it fires with
+      // an already-aborted controller signal.
+      vi.spyOn(globalThis, 'clearTimeout').mockImplementation(() => {});
+
+      startScraper([MOCK_ACCOUNTS[0]], 1000);
+      await vi.advanceTimersByTimeAsync(1); // first cycle completes, timer scheduled
+
+      stopScraper(); // aborts the controller; timer intentionally not cancelled
+
+      await vi.advanceTimersByTimeAsync(1000); // timer fires → schedule short-circuits
+
+      // No additional scrape cycle ran after the abort
+      expect(mockFetch).toHaveBeenCalledTimes(1);
       expect(isScraperRunning()).toBe(false);
     });
   });

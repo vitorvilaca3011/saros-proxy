@@ -8,6 +8,18 @@ import {
 import { resetModelsFetcherState } from './models-fetcher.js';
 import { loadModelsFromJson } from './cli/opencode-config.js';
 import type { ProxyConfig } from './config.js';
+import { MAX_BODY_SIZE } from './constants.js';
+
+// Mock the scraper usage store so usage-gated key selection and the health
+// endpoint can be exercised without a real scraper. Module-level mock (the
+// AGENTS.md rule): vi.mock/vi.hoisted live at the top level of the test file.
+const scraperMocks = vi.hoisted(() => ({
+  getAllUsage: vi.fn(),
+  isScraperRunning: vi.fn(),
+  clearUsageStore: vi.fn(),
+}));
+
+vi.mock('./scraper.js', () => scraperMocks);
 
 describe('buildUpstreamUrl', () => {
   it('combines base URL and path', () => {
@@ -194,5 +206,696 @@ describe('createProxyApp — /v1/models routes', () => {
       headers: { 'content-type': 'application/json' },
     });
     expect(res2.status).not.toBe(404);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Upstream proxy pipeline — standard (non-streaming) requests
+// ---------------------------------------------------------------------------
+
+function makeConfig(overrides: Partial<ProxyConfig> = {}): ProxyConfig {
+  return {
+    port: 0,
+    host: '127.0.0.1',
+    upstreamBaseUrl: 'https://example.com',
+    requestTimeoutMs: 30_000,
+    circuitBreakerThreshold: 3,
+    circuitBreakerCooldownMs: 60_000,
+    allowedOrigins: ['*'],
+    keys: [
+      { label: 'alpha', key: 'sk-alpha-key-0001' },
+      { label: 'beta', key: 'sk-beta-key-0002' },
+    ],
+    ...overrides,
+  };
+}
+
+function sseStream(...chunks: string[]): ReadableStream<Uint8Array> {
+  const encoder = new TextEncoder();
+  return new ReadableStream<Uint8Array>({
+    start(controller) {
+      for (const chunk of chunks) {
+        controller.enqueue(encoder.encode(chunk));
+      }
+      controller.close();
+    },
+  });
+}
+
+/** Minimal structural view of the Hono app used by request helpers. */
+interface AppLike {
+  request(input: string | Request, requestInit?: RequestInit): Promise<Response>;
+}
+
+describe('createProxyApp — standard proxy pipeline', () => {
+  beforeEach(() => {
+    vi.restoreAllMocks();
+    scraperMocks.getAllUsage.mockReturnValue(new Map());
+    scraperMocks.isScraperRunning.mockReturnValue(false);
+    resetModelsFetcherState();
+  });
+
+  it('forwards successful requests and sanitizes downstream headers', async () => {
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockResolvedValue(
+      new Response('{"ok":true}', {
+        status: 200,
+        headers: {
+          'content-type': 'application/json',
+          'set-cookie': 'session=abc',
+          'x-request-id': 'upstream-123',
+          'connection': 'keep-alive',
+          'transfer-encoding': 'chunked',
+          'keep-alive': 'timeout=5',
+          'proxy-authenticate': 'Basic',
+          'proxy-authorization': 'secret',
+          'te': 'trailers',
+          'trailer': 'x-checksum',
+          'upgrade': 'h2c',
+        },
+      }),
+    );
+
+    const app = createProxyApp(makeConfig());
+    const res = await app.request('/v1/chat/completions', {
+      method: 'POST',
+      body: JSON.stringify({ model: 'm', messages: [] }),
+      headers: { 'content-type': 'application/json', authorization: 'Bearer old-token' },
+    });
+
+    expect(res.status).toBe(200);
+    expect(await res.text()).toBe('{"ok":true}');
+    // Hop-by-hop / sensitive / internal headers must be stripped downstream
+    expect(res.headers.get('set-cookie')).toBeNull();
+    expect(res.headers.get('x-request-id')).toBeNull();
+    expect(res.headers.get('connection')).toBeNull();
+    expect(res.headers.get('transfer-encoding')).toBeNull();
+    expect(res.headers.get('keep-alive')).toBeNull();
+    expect(res.headers.get('proxy-authenticate')).toBeNull();
+    expect(res.headers.get('proxy-authorization')).toBeNull();
+    expect(res.headers.get('te')).toBeNull();
+    expect(res.headers.get('trailer')).toBeNull();
+    expect(res.headers.get('upgrade')).toBeNull();
+    // Proxy annotations are added
+    expect(res.headers.get('X-Proxy-Key-Label')).toBe('alpha');
+    expect(res.headers.get('X-Proxy-Request-Id')).toBeTruthy();
+
+    // Upstream call: path rewritten to /zen/go/v1/, auth replaced by key
+    expect(String(fetchMock.mock.calls[0][0])).toBe('https://example.com/zen/go/v1/chat/completions');
+    const init = fetchMock.mock.calls[0][1] as RequestInit;
+    const headers = init.headers as Headers;
+    expect(headers.get('authorization')).toBe('Bearer sk-alpha-key-0001');
+  });
+
+  it('returns sanitized client errors for 400 without penalising keys', async () => {
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue(
+      new Response(JSON.stringify({ error: { message: 'bad input' } }), { status: 400 }),
+    );
+    const app = createProxyApp(makeConfig());
+    const res = await app.request('/v1/chat/completions', {
+      method: 'POST',
+      body: '{}',
+      headers: { 'content-type': 'application/json' },
+    });
+    expect(res.status).toBe(400);
+    const body = await res.json();
+    expect(body.error).toBe('bad input');
+    expect(body.requestId).toBeTruthy();
+    // RequestFault does not penalise the key
+    const health = await app.request('/health');
+    const h = await health.json();
+    expect(h.enabledCount).toBe(2);
+    expect(h.disabledCount).toBe(0);
+  });
+
+  it('falls back to the raw error string when the upstream error body has one', async () => {
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue(
+      new Response('{"error": "plain string"}', { status: 400 }),
+    );
+    const app = createProxyApp(makeConfig());
+    const res = await app.request('/v1/chat/completions', {
+      method: 'POST',
+      body: '{}',
+      headers: { 'content-type': 'application/json' },
+    });
+    const body = await res.json();
+    expect(body.error).toBe('plain string');
+  });
+
+  it('uses a generic message when the upstream error body has no error field', async () => {
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response('{}', { status: 400 }));
+    const app = createProxyApp(makeConfig());
+    const res = await app.request('/v1/chat/completions', {
+      method: 'POST',
+      body: '{}',
+      headers: { 'content-type': 'application/json' },
+    });
+    const body = await res.json();
+    expect(body.error).toBe('Bad Request');
+  });
+
+  it('uses a generic message when the upstream error body is not JSON', async () => {
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response('oops not json', { status: 400 }));
+    const app = createProxyApp(makeConfig());
+    const res = await app.request('/v1/chat/completions', {
+      method: 'POST',
+      body: '{}',
+      headers: { 'content-type': 'application/json' },
+    });
+    const body = await res.json();
+    expect(body.error).toBe('Bad Request');
+  });
+
+  it('fails over on 401 and returns 502 after retries are exhausted', async () => {
+    vi.spyOn(globalThis, 'fetch').mockImplementation(() =>
+      Promise.resolve(new Response('invalid api key', { status: 401 })),
+    );
+    const app = createProxyApp(makeConfig());
+    const res = await app.request('/v1/chat/completions', {
+      method: 'POST',
+      body: '{}',
+      headers: { 'content-type': 'application/json' },
+    });
+    expect(res.status).toBe(502);
+    const body = await res.json();
+    expect(body.error).toBe('Bad Gateway');
+    expect(body.message).toBe('Upstream service unavailable after multiple attempts');
+    // KeyFault disables keys immediately → both keys disabled
+    const health = await app.request('/health');
+    const h = await health.json();
+    expect(h.enabledCount).toBe(0);
+    expect(h.disabledCount).toBe(2);
+  });
+
+  it('classifies 5xx quota/balance bodies as KeyFault and fails over', async () => {
+    vi.spyOn(globalThis, 'fetch').mockImplementation(() =>
+      Promise.resolve(new Response('quota exceeded', { status: 500 })),
+    );
+    const app = createProxyApp(makeConfig());
+    const res = await app.request('/v1/chat/completions', {
+      method: 'POST',
+      body: '{}',
+      headers: { 'content-type': 'application/json' },
+    });
+    expect(res.status).toBe(502);
+    const health = await app.request('/health');
+    const h = await health.json();
+    expect(h.enabledCount).toBe(0);
+  });
+
+  it('handles non-Error fetch rejections', async () => {
+    vi.spyOn(globalThis, 'fetch').mockRejectedValue('network glitch');
+    const app = createProxyApp(makeConfig());
+    const res = await app.request('/v1/chat/completions', {
+      method: 'POST',
+      body: '{}',
+      headers: { 'content-type': 'application/json' },
+    });
+    expect(res.status).toBe(502);
+  });
+
+  it('treats aborted upstream requests as timeouts and fails over', async () => {
+    vi.useFakeTimers();
+    try {
+      vi.spyOn(globalThis, 'fetch').mockImplementation((_url, init) => {
+        const { promise, reject } = Promise.withResolvers<Response>();
+        (init as RequestInit & { signal?: AbortSignal }).signal?.addEventListener('abort', () => {
+          reject(new DOMException('The operation was aborted.', 'AbortError'));
+        });
+        return promise;
+      });
+      const app = createProxyApp(makeConfig({ requestTimeoutMs: 1000 }));
+      const pending = app.request('/v1/chat/completions', {
+        method: 'POST',
+        body: '{}',
+        headers: { 'content-type': 'application/json' },
+      });
+      await vi.advanceTimersByTimeAsync(10_000);
+      const res = await pending;
+      expect(res.status).toBe(502);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('returns 503 when failover exhausts the key pool', async () => {
+    vi.spyOn(globalThis, 'fetch').mockRejectedValue(new TypeError('fetch failed'));
+    const app = createProxyApp(makeConfig({ keys: [{ label: 'only', key: 'sk-only-key-0001' }] }));
+    const res = await app.request('/v1/chat/completions', {
+      method: 'POST',
+      body: '{}',
+      headers: { 'content-type': 'application/json' },
+    });
+    expect(res.status).toBe(503);
+    const body = await res.json();
+    expect(body.error).toBe('All API keys are temporarily unavailable');
+  });
+
+  it('forwards GET requests without a body', async () => {
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response('{}', { status: 200 }));
+    const app = createProxyApp(makeConfig());
+    const res = await app.request('/zen/go/v1/chat/completions');
+    expect(res.status).toBe(200);
+    expect(String(fetchMock.mock.calls[0][0])).toBe('https://example.com/zen/go/v1/chat/completions');
+    const init = fetchMock.mock.calls[0][1] as RequestInit;
+    expect(init.body).toBeUndefined();
+  });
+});
+
+describe('createProxyApp — streaming pipeline', () => {
+  beforeEach(() => {
+    vi.restoreAllMocks();
+    scraperMocks.getAllUsage.mockReturnValue(new Map());
+    scraperMocks.isScraperRunning.mockReturnValue(false);
+    resetModelsFetcherState();
+  });
+
+  function streamRequest(app: AppLike): Promise<Response> {
+    return app.request('/v1/chat/completions', {
+      method: 'POST',
+      body: JSON.stringify({ model: 'm', stream: true }),
+      headers: { 'content-type': 'application/json' },
+    });
+  }
+
+  it('streams SSE chunks and sets streaming headers', async () => {
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue(
+      new Response(sseStream('data: {"type":"chat","content":"hi"}\n\n'), {
+        status: 200,
+        headers: { 'content-type': 'text/event-stream' },
+      }),
+    );
+    const app = createProxyApp(makeConfig());
+    const res = await streamRequest(app);
+    expect(res.status).toBe(200);
+    expect(res.headers.get('content-type')).toBe('text/event-stream');
+    expect(res.headers.get('cache-control')).toBe('no-cache');
+    expect(res.headers.get('connection')).toBe('keep-alive');
+    expect(res.headers.get('X-Proxy-Key-Label')).toBe('alpha');
+    const text = await res.text();
+    expect(text).toContain('"content":"hi"');
+  });
+
+  it('detects SSE error markers and emits proxy_error', async () => {
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue(
+      new Response(sseStream('data: {"error":"boom"}\n\n'), { status: 200 }),
+    );
+    const app = createProxyApp(makeConfig({ circuitBreakerThreshold: 1 }));
+    const res = await streamRequest(app);
+    const text = await res.text();
+    expect(text).toContain('proxy_error');
+    expect(text).toContain('Upstream stream error');
+    // error marker penalised the key (threshold 1 → disabled)
+    const health = await app.request('/health');
+    const h = await health.json();
+    expect(h.enabledCount).toBe(1);
+    expect(h.disabledCount).toBe(1);
+  });
+
+  it('passes through comment events, benign data, and invalid JSON', async () => {
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue(
+      new Response(
+        sseStream(
+          ': keep-alive\n\n',
+          'data: {"type":"chat","content":"ok"}\n\n',
+          'data: not-json\n\n',
+          'data: null\n\n',
+        ),
+        { status: 200 },
+      ),
+    );
+    const app = createProxyApp(makeConfig());
+    const res = await streamRequest(app);
+    const text = await res.text();
+    expect(text).toContain(': keep-alive');
+    expect(text).toContain('"content":"ok"');
+    expect(text).not.toContain('proxy_error');
+  });
+
+  it('buffers partial SSE events split across chunks', async () => {
+    const encoder = new TextEncoder();
+    const upstream = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(encoder.encode('')); // empty chunk
+        controller.enqueue(encoder.encode('data: {"type":"ch'));
+        controller.enqueue(encoder.encode('at","content":"partial"}\n\n'));
+        controller.close();
+      },
+    });
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response(upstream, { status: 200 }));
+    const app = createProxyApp(makeConfig());
+    const res = await streamRequest(app);
+    const text = await res.text();
+    expect(text).toContain('"content":"partial"');
+  });
+
+  it('returns 502 when the streaming response has no body', async () => {
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response(null, { status: 200 }));
+    const app = createProxyApp(makeConfig());
+    const res = await streamRequest(app);
+    expect(res.status).toBe(502);
+    const body = await res.json();
+    expect(body.message).toBe('Upstream response missing body');
+  });
+
+  it('reports stream read errors with proxy_error', async () => {
+    const upstream = new ReadableStream<Uint8Array>({
+      pull() {
+        throw new Error('connection reset');
+      },
+    });
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response(upstream, { status: 200 }));
+    const app = createProxyApp(makeConfig());
+    const res = await streamRequest(app);
+    const text = await res.text();
+    expect(text).toContain('proxy_error');
+    expect(text).toContain('Stream interrupted');
+  });
+
+  it('fails over streaming requests on network errors and returns 502', async () => {
+    vi.spyOn(globalThis, 'fetch').mockRejectedValue(new TypeError('fetch failed'));
+    const app = createProxyApp(makeConfig());
+    const res = await streamRequest(app);
+    expect(res.status).toBe(502);
+    const body = await res.json();
+    expect(body.message).toBe('Streaming service unavailable after multiple attempts');
+  });
+
+  it('fails over streaming requests on upstream error responses', async () => {
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response('oops', { status: 500 }));
+    const app = createProxyApp(makeConfig());
+    const res = await streamRequest(app);
+    expect(res.status).toBe(502);
+  });
+
+  it('returns 503 for streaming when no keys remain', async () => {
+    vi.spyOn(globalThis, 'fetch').mockRejectedValue(new TypeError('fetch failed'));
+    const app = createProxyApp(makeConfig({ keys: [{ label: 'only', key: 'sk-only-key-0001' }] }));
+    const res = await streamRequest(app);
+    expect(res.status).toBe(503);
+  });
+
+  it('cancels the upstream stream when the client disconnects', async () => {
+    let upstreamCancelled = false;
+    const encoder = new TextEncoder();
+    const upstream = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(encoder.encode('data: {"type":"chat","content":"hi"}\n\n'));
+        // deliberately keep the stream open
+      },
+      cancel() {
+        upstreamCancelled = true;
+      },
+    });
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response(upstream, { status: 200 }));
+    const app = createProxyApp(makeConfig());
+    const res = await streamRequest(app);
+    const reader = res.body!.getReader();
+    await reader.read(); // pull the first chunk
+    await reader.cancel(); // client disconnect → wrapped stream cancel → upstream cancel
+    expect(upstreamCancelled).toBe(true);
+  });
+
+  it('treats aborted streaming requests as timeouts', async () => {
+    vi.useFakeTimers();
+    try {
+      vi.spyOn(globalThis, 'fetch').mockImplementation((_url, init) => {
+        const { promise, reject } = Promise.withResolvers<Response>();
+        (init as RequestInit & { signal?: AbortSignal }).signal?.addEventListener('abort', () => {
+          reject(new DOMException('The operation was aborted.', 'AbortError'));
+        });
+        return promise;
+      });
+      const app = createProxyApp(makeConfig({ requestTimeoutMs: 1000 }));
+      const pending = streamRequest(app);
+      await vi.advanceTimersByTimeAsync(10_000);
+      const res = await pending;
+      expect(res.status).toBe(502);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});
+
+describe('createProxyApp — request limits, health, CORS, rate limit keys', () => {
+  beforeEach(() => {
+    vi.restoreAllMocks();
+    scraperMocks.getAllUsage.mockReturnValue(new Map());
+    scraperMocks.isScraperRunning.mockReturnValue(false);
+    resetModelsFetcherState();
+  });
+
+  it('rejects oversized requests via Content-Length header', async () => {
+    const app = createProxyApp(makeConfig());
+    const res = await app.request('/v1/chat/completions', {
+      method: 'POST',
+      body: '{}',
+      headers: {
+        'content-type': 'application/json',
+        'content-length': String(MAX_BODY_SIZE + 1),
+      },
+    });
+    expect(res.status).toBe(413);
+  });
+
+  it('rejects oversized request bodies', async () => {
+    const app = createProxyApp(makeConfig());
+    const res = await app.request('/v1/chat/completions', {
+      method: 'POST',
+      body: 'a'.repeat(MAX_BODY_SIZE + 1),
+      headers: { 'content-type': 'application/json' },
+    });
+    expect(res.status).toBe(413);
+  });
+
+  it('reports key and request state on /health', async () => {
+    vi.spyOn(globalThis, 'fetch').mockRejectedValue(new TypeError('fetch failed'));
+    const app = createProxyApp(
+      makeConfig({ circuitBreakerThreshold: 1, keys: [{ label: 'only', key: 'sk-only-key-0001' }] }),
+    );
+    await app.request('/v1/chat/completions', {
+      method: 'POST',
+      body: '{}',
+      headers: { 'content-type': 'application/json' },
+    });
+    const res = await app.request('/health');
+    const body = await res.json();
+    expect(body.status).toBe('ok');
+    expect(body.keyCount).toBe(1);
+    expect(body.enabledCount).toBe(0); // threshold 1 → key disabled by the failed request
+    expect(body.disabledCount).toBe(1);
+    expect(body.activeRequests).toBe(0);
+    expect(body.scraping).toEqual({ enabled: false });
+  });
+
+  it('reports scraping status on /health when scraping is enabled', async () => {
+    scraperMocks.getAllUsage.mockReturnValue(
+      new Map([
+        [
+          'wrk_aaa',
+          {
+            usage: { rolling: 10, weekly: 20, monthly: 30 },
+            lastScrapedAt: new Date('2026-01-01T00:00:00.000Z'),
+            lastError: 'scrape failed',
+          },
+        ],
+        [
+          'wrk_bbb',
+          {
+            usage: { rolling: 5, weekly: null, monthly: null },
+            lastScrapedAt: new Date('2026-01-02T00:00:00.000Z'),
+          },
+        ],
+      ]),
+    );
+    scraperMocks.isScraperRunning.mockReturnValue(true);
+    const app = createProxyApp(
+      makeConfig({
+        scraping: {
+          enabled: true,
+          intervalMs: 90_000,
+          usageThreshold: 50,
+          accounts: [
+            { workspaceId: 'wrk_aaa', authCookie: 'c1' },
+            { workspaceId: 'wrk_bbb', authCookie: 'c2' },
+          ],
+        },
+      }),
+    );
+    const res = await app.request('/health');
+    const body = await res.json();
+    expect(body.scraping).toMatchObject({
+      enabled: true,
+      running: true,
+      intervalMs: 90_000,
+      usageThreshold: 50,
+    });
+    expect(body.scraping.accounts).toHaveLength(2);
+    expect(body.scraping.accounts[0]).toEqual({
+      workspaceId: 'wrk_aaa',
+      usage: { rolling: 10, weekly: 20, monthly: 30 },
+      lastScrapedAt: '2026-01-01T00:00:00.000Z',
+      lastError: 'scrape failed',
+    });
+    expect(body.scraping.accounts[1].lastError).toBeNull();
+  });
+
+  it('reflects allowed origins via CORS', async () => {
+    const app = createProxyApp(makeConfig({ allowedOrigins: ['https://*.example.com'] }));
+    const res = await app.request('/health', { headers: { origin: 'https://app.example.com' } });
+    expect(res.headers.get('access-control-allow-origin')).toBe('https://app.example.com');
+  });
+
+  it('does not send CORS headers for disallowed origins', async () => {
+    const app = createProxyApp(makeConfig({ allowedOrigins: ['https://*.example.com'] }));
+    const res = await app.request('/health', { headers: { origin: 'https://evil.com' } });
+    expect(res.headers.get('access-control-allow-origin')).toBeNull();
+  });
+
+  it('skips CORS for non-browser requests', async () => {
+    const app = createProxyApp(makeConfig({ allowedOrigins: ['https://*.example.com'] }));
+    const res = await app.request('/health');
+    expect(res.headers.get('access-control-allow-origin')).toBeNull();
+  });
+
+  it('uses x-forwarded-for and x-real-ip for rate limit keys', async () => {
+    const app = createProxyApp(makeConfig());
+    const res1 = await app.request('/health', { headers: { 'x-forwarded-for': '203.0.113.9, 10.0.0.1' } });
+    expect(res1.status).toBe(200);
+    const res2 = await app.request('/health', { headers: { 'x-real-ip': '203.0.113.10' } });
+    expect(res2.status).toBe(200);
+  });
+});
+
+describe('createProxyApp — usage-gated key selection', () => {
+  beforeEach(() => {
+    vi.restoreAllMocks();
+    scraperMocks.getAllUsage.mockReturnValue(new Map());
+    scraperMocks.isScraperRunning.mockReturnValue(false);
+    resetModelsFetcherState();
+  });
+
+  const scrapingAccounts = [
+    { workspaceId: 'wrk_a', authCookie: 'c1' },
+    { workspaceId: 'wrk_b', authCookie: 'c2' },
+  ];
+
+  function usageScrapingConfig(usageThreshold: number): ProxyConfig {
+    return makeConfig({
+      scraping: { enabled: true, intervalMs: 90_000, usageThreshold, accounts: scrapingAccounts },
+    });
+  }
+
+  it('skips usage-over-threshold keys when scraping data is available', async () => {
+    scraperMocks.getAllUsage.mockReturnValue(
+      new Map([
+        ['wrk_a', { usage: { rolling: 95, weekly: 95, monthly: 95 }, lastScrapedAt: new Date() }],
+        ['wrk_b', { usage: { rolling: 10, weekly: 10, monthly: 10 }, lastScrapedAt: new Date() }],
+      ]),
+    );
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response('{}', { status: 200 }));
+    const app = createProxyApp(usageScrapingConfig(50));
+    const res = await app.request('/v1/chat/completions', {
+      method: 'POST',
+      body: '{}',
+      headers: { 'content-type': 'application/json' },
+    });
+    expect(res.status).toBe(200);
+    expect(res.headers.get('X-Proxy-Key-Label')).toBe('beta');
+  });
+
+  it('uses the configured usage threshold for gating', async () => {
+    scraperMocks.getAllUsage.mockReturnValue(
+      new Map([
+        ['wrk_a', { usage: { rolling: 10, weekly: 10, monthly: 10 }, lastScrapedAt: new Date() }],
+        ['wrk_b', { usage: { rolling: 8, weekly: 8, monthly: 8 }, lastScrapedAt: new Date() }],
+      ]),
+    );
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response('{}', { status: 200 }));
+    const app = createProxyApp(usageScrapingConfig(5)); // both keys over threshold 5
+    const res = await app.request('/v1/chat/completions', {
+      method: 'POST',
+      body: '{}',
+      headers: { 'content-type': 'application/json' },
+    });
+    expect(res.status).toBe(200);
+    // fallback picks the lowest-max-usage key
+    expect(res.headers.get('X-Proxy-Key-Label')).toBe('beta');
+  });
+
+  it('falls back to plain selection when no usage data exists', async () => {
+    scraperMocks.getAllUsage.mockReturnValue(new Map()); // empty usage store
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response('{}', { status: 200 }));
+    const app = createProxyApp(usageScrapingConfig(50));
+    const res = await app.request('/v1/chat/completions', {
+      method: 'POST',
+      body: '{}',
+      headers: { 'content-type': 'application/json' },
+    });
+    expect(res.headers.get('X-Proxy-Key-Label')).toBe('alpha');
+  });
+
+  it('returns undefined usage options when accounts do not match usage data', async () => {
+    scraperMocks.getAllUsage.mockReturnValue(
+      new Map([
+        ['wrk_other', { usage: { rolling: 95, weekly: 95, monthly: 95 }, lastScrapedAt: new Date() }],
+      ]),
+    );
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response('{}', { status: 200 }));
+    const app = createProxyApp(usageScrapingConfig(50));
+    const res = await app.request('/v1/chat/completions', {
+      method: 'POST',
+      body: '{}',
+      headers: { 'content-type': 'application/json' },
+    });
+    expect(res.headers.get('X-Proxy-Key-Label')).toBe('alpha');
+  });
+
+  it('skips keys without a matching scraping account', async () => {
+    scraperMocks.getAllUsage.mockReturnValue(
+      new Map([
+        ['wrk_a', { usage: { rolling: 95, weekly: 95, monthly: 95 }, lastScrapedAt: new Date() }],
+      ]),
+    );
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response('{}', { status: 200 }));
+    const app = createProxyApp(
+      makeConfig({
+        scraping: {
+          enabled: true,
+          intervalMs: 90_000,
+          usageThreshold: 50,
+          accounts: [{ workspaceId: 'wrk_a', authCookie: 'c1' }], // only one account for two keys
+        },
+      }),
+    );
+    const res = await app.request('/v1/chat/completions', {
+      method: 'POST',
+      body: '{}',
+      headers: { 'content-type': 'application/json' },
+    });
+    // alpha (over threshold, has an account) excluded; beta has no usage entry → selected
+    expect(res.headers.get('X-Proxy-Key-Label')).toBe('beta');
+  });
+
+  it('defaults the usage threshold to 50 when not configured', async () => {
+    scraperMocks.getAllUsage.mockReturnValue(
+      new Map([
+        ['wrk_a', { usage: { rolling: 95, weekly: 95, monthly: 95 }, lastScrapedAt: new Date() }],
+        ['wrk_b', { usage: { rolling: 10, weekly: 10, monthly: 10 }, lastScrapedAt: new Date() }],
+      ]),
+    );
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response('{}', { status: 200 }));
+    const app = createProxyApp(
+      makeConfig({
+        // scraping enabled but no usageThreshold → default 50 applies
+        scraping: { enabled: true, intervalMs: 90_000, accounts: scrapingAccounts },
+      }),
+    );
+    const res = await app.request('/v1/chat/completions', {
+      method: 'POST',
+      body: '{}',
+      headers: { 'content-type': 'application/json' },
+    });
+    // alpha (95) is over the default 50 → beta selected
+    expect(res.headers.get('X-Proxy-Key-Label')).toBe('beta');
   });
 });
