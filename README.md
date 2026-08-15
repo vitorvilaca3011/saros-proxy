@@ -24,6 +24,7 @@ Manage multiple OpenCode-Go API keys behind a single endpoint. When one key gets
 - [Configuration Reference](#configuration-reference)
 - [Usage Examples](#usage-examples)
 - [OpenCode Integration](#opencode-integration)
+- [Multi-Harness Integration (pi & oh-my-pi)](#multi-harness-integration-pi--oh-my-pi)
 - [Troubleshooting](#troubleshooting)
 - [Development](#development)
 - [Security](#security)
@@ -399,8 +400,14 @@ saros-proxy status
 # Stop it
 saros-proxy stop
 
-# Sync models from src/constants.ts to opencode.json
+# Sync bundled models to all enabled harnesses
 saros-proxy sync-models
+
+# Set which harnesses get model sync (omp|ohmypi, pi, oc|opencode)
+saros-proxy configharness omp pi oc
+
+# List the current harness selection
+saros-proxy configharness
 
 # Probe model capabilities (liveness, reasoning, tool calling)
 saros-proxy probe [model-id]
@@ -418,17 +425,23 @@ saros-proxy autostart uninstall [--method vbs|registry|auto]
 saros-proxy autostart status [--method vbs|registry|auto]
 ```
 
-The `start` command automatically syncs model definitions to `~/.config/opencode/opencode.json`.
+The `start` command automatically syncs model definitions to all enabled harnesses (see [Multi-Harness Integration](#multi-harness-integration-pi--oh-my-pi)).
 
 ### Model Sync Commands
 
-Saros keeps your opencode.json in sync with the upstream API.
+Saros keeps your harness configs in sync with the upstream API. Which harnesses are synced is opt-in via the harness selection (see [Multi-Harness Integration](#multi-harness-integration-pi--oh-my-pi)).
 
 ```bash
-# Sync models from bundled models.json to opencode.json
+# List which harnesses are enabled for model sync
+saros-proxy configharness
+
+# Enable sync for oh-my-pi, pi, and OpenCode (replaces the selection)
+saros-proxy configharness omp pi oc
+
+# Sync bundled models to all enabled harnesses
 saros-proxy sync-models
 
-# Sync new models from upstream into opencode.json (adds missing models)
+# Sync the live model list from upstream into all enabled harnesses
 saros-proxy sync-upstream
 
 # Probe model capabilities
@@ -438,8 +451,9 @@ saros-proxy probe [model-id]
 saros-proxy probe
 ```
 
-`sync-models` writes the bundled model definitions to your opencode.json provider config.
-`sync-upstream` fetches the live model list from upstream and adds any missing models with metadata from models.dev.
+`sync-models` writes the bundled model definitions to each enabled harness's provider config.
+`sync-upstream` fetches the live model list from upstream and writes it to each enabled harness, with metadata from models.dev.
+Both only touch `providers["saros-proxy"].models` in the target configs and skip harnesses whose config file does not exist.
 `probe` tests each model's liveness, reasoning, and tool-calling capabilities via the proxy.
 
 **Daemon config path:** By default the daemon looks for `config.yaml` at:
@@ -515,6 +529,41 @@ Select the proxy provider in OpenCode's model picker, or set it as default:
   "model": "saros-proxy/glm-5"
 }
 ```
+
+---
+
+## Multi-Harness Integration (pi & oh-my-pi)
+
+Besides OpenCode, Saros can keep its provider + model config in sync for the `pi` and `oh-my-pi` (`omp`) harnesses. Both belong to the pi-coding-agent family but use different config files:
+
+| Harness | Config file | Format |
+|---|---|---|
+| OpenCode | `~/.config/opencode/opencode.json[.jsonc]` | JSON/JSONC |
+| pi | `~/.pi/agent/models.json` | JSON |
+| oh-my-pi (`omp`) | `~/.omp/agent/models.yml` | YAML |
+
+Sync is opt-in per harness, configured with the `configharness` command. The selection is stored in `~/.config/saros/harnesses.json`:
+
+```bash
+# Enable sync for omp + pi + opencode (replaces the previous selection)
+saros-proxy configharness omp pi oc
+
+# See the current selection
+saros-proxy configharness
+
+# Accepted names: omp | ohmypi, pi, oc | opencode
+```
+
+Behavior:
+
+- If `harnesses.json` does not exist, only OpenCode is synced (the default).
+- An explicit empty selection (`{"harnesses":[]}`) disables sync entirely.
+- Sync never creates a harness config: harnesses whose config file is missing are skipped.
+- Only `providers["saros-proxy"].models` is replaced; all other providers, fields, and settings are preserved, and a `<file>.backup` is created before the first write.
+
+The model list written to each harness comes from the live upstream catalog enriched with models.dev metadata (falling back to bundled models when offline), so pi/omp stay current alongside OpenCode.
+
+> **Why a static model list?** Both harnesses use a static `models` list on purpose. `pi` has no `/v1/models` discovery for custom providers, and `oh-my-pi`'s discovery cannot recover reasoning/context/output metadata for OpenCode-Go model IDs — dynamic discovery would silently break thinking-level (`:max`/`:high`) role configs in `~/.omp/agent/config.yml`.
 
 ---
 
@@ -605,11 +654,15 @@ src/
   constants.ts          — All defaults and configuration values
   logger.ts             — Structured logging with Pino + key masking
   models-fetcher.ts     — Upstream model list fetching + caching
-  models-sync.ts        — Auto-sync models from upstream to opencode.json
+  models-sync.ts        — Auto-sync models from upstream to opencode config
   cli/
     setup.ts            — Interactive setup wizard
     daemon.ts           — Background process management
     opencode-config.ts  — opencode.json read/write/sync
+    harness-models.ts   — Canonical model map + pi/omp shape transform
+    harness-sync.ts     — Harness selection settings + multi-harness sync
+    omp-config.ts       — oh-my-pi models.yml read/write/sync
+    pi-config.ts        — pi models.json read/write/sync
     autostart.ts        — Windows/Linux autostart install/uninstall
     ui.ts               — CLI UI abstraction (@clack/prompts wrapper)
     help.ts             — Help text
