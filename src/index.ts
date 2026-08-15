@@ -20,10 +20,16 @@ import { logger, maskKey } from './logger.js';
 import { startScraper, stopScraper } from './scraper.js';
 import { FORCE_SHUTDOWN_TIMEOUT_MS } from './constants.js';
 import { daemonStart, daemonStop, daemonStatus, daemonRestart } from './cli/daemon.js';
-import { syncModelsToOpencodeConfig, getDefaultOpencodeConfigPath } from './cli/opencode-config.js';
+import { getDefaultOpencodeConfigPath } from './cli/opencode-config.js';
 import { autostartInstall, autostartUninstall, autostartStatus, type AutostartMethod } from './cli/autostart.js';
 import { checkForUpdate } from './cli/update-check.js';
-import { syncOpencodeModelsWithUpstream, getModelsFromOpencodeConfig } from './models-sync.js';
+import { getModelsFromOpencodeConfig } from './models-sync.js';
+import {
+  readHarnessSettings,
+  writeHarnessSettings,
+  parseHarnessArgs,
+  syncModelsInAllHarnesses,
+} from './cli/harness-sync.js';
 import { probeModel } from './model-probe.js';
 import { getCachedProbe, setCachedProbe } from './probe-cache.js';
 import type { ModelProbe } from './probe-cache.js';
@@ -98,14 +104,19 @@ if (subcommand === 'start') {
   daemonRestart(port, configPath);
   // daemonRestart owns its own exit path via setTimeout -> daemonStart
 } else if (subcommand === 'sync-models') {
-  const result = syncModelsToOpencodeConfig();
-  if (result.success) {
-    console.log(chalk.green(`✓ Models synced to ${result.path}`));
-    process.exit(0);
-  } else {
-    console.error(chalk.red(`✗ Failed: ${result.error}`));
+  const results = await syncModelsInAllHarnesses(undefined, { offline: true });
+  if (results.length === 0) {
+    console.error(chalk.red('✗ No harnesses enabled. Run `saros-proxy configharness` first.'));
     process.exit(1);
   }
+  for (const r of results) {
+    if (r.result.success) {
+      console.log(chalk.green(`✓ ${r.harness} synced to ${r.result.path}`));
+    } else {
+      console.error(chalk.red(`✗ ${r.harness}: ${r.result.error}`));
+    }
+  }
+  process.exit(results.every((r) => r.result.success) ? 0 : 1);
 } else if (subcommand === 'setup') {
   const { setup } = await import('./cli/setup.js');
   const { getDefaultConfigPath } = await import('./config.js');
@@ -172,14 +183,34 @@ if (subcommand === 'start') {
     console.error(chalk.red('Failed to load config:'), err instanceof Error ? err.message : String(err));
     process.exit(1);
   }
-  const result = await syncOpencodeModelsWithUpstream(syncConfig);
-  if (result.success) {
-    console.log(chalk.green(`✓ Models synced to ${result.path}`));
-    process.exit(0);
-  } else {
-    console.error(chalk.red(`✗ Failed: ${result.error}`));
+  const results = await syncModelsInAllHarnesses(syncConfig);
+  if (results.length === 0) {
+    console.error(chalk.red('✗ No harnesses enabled. Run `saros-proxy configharness` first.'));
     process.exit(1);
   }
+  for (const r of results) {
+    if (r.result.success) {
+      console.log(chalk.green(`✓ ${r.harness} synced to ${r.result.path}`));
+    } else {
+      console.error(chalk.red(`✗ ${r.harness}: ${r.result.error}`));
+    }
+  }
+  process.exit(results.every((r) => r.result.success) ? 0 : 1);
+} else if (subcommand === 'configharness') {
+  const args = process.argv.slice(3);
+  if (args.length === 0) {
+    const cur = readHarnessSettings();
+    console.log(chalk.cyan('Enabled harnesses: ' + (cur.join(', ') || '(none)')));
+    process.exit(0);
+  }
+  const { ids, errors } = parseHarnessArgs(args);
+  if (errors.length > 0) {
+    console.error(chalk.red('Unknown harness: ' + errors.join(', ')));
+    process.exit(1);
+  }
+  writeHarnessSettings(ids);
+  console.log(chalk.green('Enabled harnesses: ' + ids.join(', ')));
+  process.exit(0);
 } else if (subcommand === 'probe') {
   let probeConfig: ProxyConfig;
   try {

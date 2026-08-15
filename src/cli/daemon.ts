@@ -20,11 +20,11 @@ import { existsSync, writeFileSync, readFileSync, rmSync, mkdirSync, copyFileSyn
 import { resolve as pathResolve, join as pathJoin } from 'node:path';
 import { homedir } from 'node:os';
 import { fileURLToPath } from 'node:url';
-import { syncModelsToOpencodeConfig, getModelsJsonPath } from './opencode-config.js';
+import { getModelsJsonPath } from './opencode-config.js';
 import { checkForUpdate } from './update-check.js';
 import { loadConfig } from '../config.js';
-import { syncOpencodeModelsWithUpstream } from '../models-sync.js';
 import { DAEMON_SYNC_TIMEOUT_MS } from '../constants.js';
+import { syncModelsInAllHarnesses } from './harness-sync.js';
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -227,15 +227,12 @@ export function daemonStart(port?: number, configPath?: string): void {
     if (isProcessAlive(pid)) {
       console.log(chalk.green(`✓ Proxy started (PID ${pid}) on port ${port ?? 3000}`));
 
-      // Sync models from models.json to opencode.json
+      // Sync models to all enabled harnesses — await with timeout before exit
       ensureModelsJson();
-      syncModelsToOpencodeConfig();
-
-      // Auto-sync models from upstream — await with timeout before exit
       try {
         const cfg = loadConfig();
         await Promise.race([
-          syncOpencodeModelsWithUpstream(cfg),
+          syncModelsInAllHarnesses(cfg),
           new Promise((resolve) => setTimeout(resolve, DAEMON_SYNC_TIMEOUT_MS)),
         ]);
       } catch {

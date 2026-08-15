@@ -14,8 +14,9 @@ Commands:
   restart [--port <port>] [--config <path>]  Restart the proxy daemon
   status                                     Check daemon status
   setup                                      Run interactive setup wizard
-  sync-models                                Sync models from models.json to opencode config
-  sync-upstream                              Sync new models from upstream into opencode config
+  sync-models                                Sync bundled models to all enabled harnesses
+  sync-upstream                              Sync new models from upstream into enabled harnesses
+  configharness [omp|ohmypi] [pi] [oc|opencode]  Set which harnesses to sync
   probe [model-id]                           Test model capabilities (liveness, reasoning, tools)
   autostart install [--method <method>]      Install autostart
   autostart uninstall [--method <method>]    Uninstall autostart

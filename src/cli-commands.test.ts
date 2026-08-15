@@ -12,7 +12,10 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 // ---------------------------------------------------------------------------
 
 const mockLoadConfig = vi.hoisted(() => vi.fn());
-const mockSyncUpstream = vi.hoisted(() => vi.fn());
+const mockSyncInAllHarnesses = vi.hoisted(() => vi.fn());
+const mockReadHarnessSettings = vi.hoisted(() => vi.fn());
+const mockWriteHarnessSettings = vi.hoisted(() => vi.fn());
+const mockParseHarnessArgs = vi.hoisted(() => vi.fn());
 const mockGetModelsFromConfig = vi.hoisted(() => vi.fn());
 const mockProbeModel = vi.hoisted(() => vi.fn());
 const mockGetCachedProbe = vi.hoisted(() => vi.fn());
@@ -55,8 +58,13 @@ vi.mock('./cli/update-check.js', () => ({
   checkForUpdate: mockCheckForUpdate,
 }));
 vi.mock('./models-sync.js', () => ({
-  syncOpencodeModelsWithUpstream: mockSyncUpstream,
   getModelsFromOpencodeConfig: mockGetModelsFromConfig,
+}));
+vi.mock('./cli/harness-sync.js', () => ({
+  syncModelsInAllHarnesses: mockSyncInAllHarnesses,
+  readHarnessSettings: mockReadHarnessSettings,
+  writeHarnessSettings: mockWriteHarnessSettings,
+  parseHarnessArgs: mockParseHarnessArgs,
 }));
 vi.mock('./model-probe.js', () => ({
   probeModel: mockProbeModel,
@@ -151,16 +159,18 @@ describe('CLI: sync-upstream subcommand', () => {
     await expect(import('./index.js')).rejects.toThrow('process.exit(1)');
   });
 
-  it('success path — calls syncOpencodeModelsWithUpstream and exits 0', async () => {
+  it('success path — calls syncModelsInAllHarnesses and exits 0', async () => {
     process.argv = ['node', 'saros-proxy', 'sync-upstream'];
     vi.resetModules();
     mockLoadConfig.mockReturnValue({} as any);
-    mockSyncUpstream.mockResolvedValue({ success: true, path: '/mock/opencode.json' });
+    mockSyncInAllHarnesses.mockResolvedValue([
+      { harness: 'opencode', result: { success: true, path: '/mock/opencode.json' } },
+    ]);
     const exitSpy = mockProcessExit();
     vi.spyOn(console, 'log').mockImplementation(() => {});
 
     await expect(import('./index.js')).rejects.toThrow('process.exit(0)');
-    expect(mockSyncUpstream).toHaveBeenCalled();
+    expect(mockSyncInAllHarnesses).toHaveBeenCalled();
   });
 });
 
