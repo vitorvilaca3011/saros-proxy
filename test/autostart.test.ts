@@ -7,7 +7,7 @@
  */
 
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
-import { existsSync, mkdirSync, rmSync, readFileSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdirSync, rmSync, readFileSync, writeFileSync, mkdtempSync } from 'node:fs';
 import type * as NodeFs from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
