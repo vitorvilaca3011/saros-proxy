@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.1] - 2026-08-15
+
+### Added
+
+- Multi-harness model sync: saros-proxy now syncs its provider + model config
+  into the `pi` and `oh-my-pi` (`omp`) harnesses in addition to OpenCode.
+  Opt-in per harness via `saros-proxy configharness [omp|ohmypi] [pi] [oc|opencode]`;
+  the selection lives in `~/.config/saros/harnesses.json` (missing file defaults
+  to `opencode`). `sync-models`/`sync-upstream` and daemon startup sync now
+  target enabled harnesses only.
+- Sync preserves every user field except `providers["saros-proxy"].models`,
+  skips harnesses whose config file does not exist, backs up once before
+  writing, and restores the file from backup if the write is invalid.
+- Model lists are generated from the live upstream catalog enriched with
+  models.dev metadata (falling back to bundled models when offline).
+
 ## [0.1.0] - 2026-06-06
 
 ### Added
