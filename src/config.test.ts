@@ -4,9 +4,11 @@
  * Vitest-based; run with: npx vitest run src/config.test.ts
  */
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
-import { writeFileSync, mkdtempSync, rmSync, existsSync } from 'node:fs';
+import { writeFileSync, mkdtempSync, rmSync, existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import * as os from 'node:os';
+import type * as NodeFs from 'node:fs';
+import type * as NodeOs from 'node:os';
 import { loadConfig, validateConfig, getDefaultConfigPath, type ProxyConfig, type ScrapingConfig } from './config.js';
 import { encryptKey } from './key-encryption.js';
 
@@ -18,6 +20,23 @@ vi.mock('./logger.js', () => ({
   logger: { info: vi.fn(), warn: vi.fn(), error: vi.fn() },
   maskKey: (key: string) => key.slice(0, 4) + '...' + key.slice(-4),
 }));
+
+// node:os / node:fs are wrapped with call-through spies so tests can control
+// homedir()/existsSync()/readFileSync() for specific error branches without
+// breaking the real filesystem usage in the rest of the suite.
+vi.mock('node:os', async (importOriginal) => {
+  const actual = await importOriginal<typeof NodeOs>();
+  return { ...actual, homedir: vi.fn(actual.homedir) };
+});
+
+vi.mock('node:fs', async (importOriginal) => {
+  const actual = await importOriginal<typeof NodeFs>();
+  return {
+    ...actual,
+    existsSync: vi.fn(actual.existsSync),
+    readFileSync: vi.fn(actual.readFileSync),
+  };
+});
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -181,6 +200,13 @@ describe('validateConfig', () => {
 
   it('defaults for empty string URL', () => {
     const result = validateConfig(validBase({ upstreamBaseUrl: '' }));
+    expect(result.upstreamBaseUrl).toBe('https://opencode.ai');
+  });
+
+  it('defaults for non-string upstream URL (validation rejects non-strings)', () => {
+    const result = validateConfig(
+      validBase({ upstreamBaseUrl: 12345 as unknown as string }),
+    );
     expect(result.upstreamBaseUrl).toBe('https://opencode.ai');
   });
 
@@ -475,6 +501,20 @@ describe('parseCliArgs (via loadConfig)', () => {
       removeTempDir(tempDir);
     }
   });
+
+  it('ignores positional arguments that do not start with --', () => {
+    const tempDir = createTempDir();
+    try {
+      const yamlPath = join(tempDir, 'test.yaml');
+      writeMinimalYaml(yamlPath);
+      process.argv.push('--config', yamlPath, 'positional-arg');
+      const result = loadConfig();
+      // Positional arg is skipped by parseCliArgs; YAML values still apply
+      expect(result.port).toBe(9090);
+    } finally {
+      removeTempDir(tempDir);
+    }
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -718,6 +758,69 @@ describe('loadConfig', () => {
     expect(result.port).toBe(3000);
     expect(result.host).toBe('127.0.0.1');
     expect(result.upstreamBaseUrl).toBe('https://opencode.ai');
+  });
+
+  // --- Default config path resolution (no explicit path / --config) ---
+
+  it('falls back to config.yaml in cwd when the default config path is missing', () => {
+    process.env.OPENCODE_GO_KEYS = `test:${VALID_KEY}`;
+    const realExists = vi.mocked(existsSync).getMockImplementation();
+    const realRead = vi.mocked(readFileSync).getMockImplementation();
+    // Only 'config.yaml' (cwd) exists; the OS default path does not.
+    vi.mocked(existsSync).mockImplementation((p) => p === 'config.yaml');
+    vi.mocked(readFileSync).mockReturnValue(
+      ['port: 7777', 'keys:', '  - label: cwd', `    key: ${VALID_KEY}`, ''].join('\n'),
+    );
+    try {
+      const result = loadConfig();
+      expect(result.port).toBe(7777);
+      expect(result.keys).toEqual([{ label: 'cwd', key: VALID_KEY }]);
+    } finally {
+      vi.mocked(existsSync).mockImplementation(realExists!);
+      vi.mocked(readFileSync).mockImplementation(realRead!);
+    }
+  });
+
+  it('uses the OS default config path when neither it nor cwd config.yaml exists', () => {
+    process.env.OPENCODE_GO_KEYS = `test:${VALID_KEY}`;
+    const realExists = vi.mocked(existsSync).getMockImplementation();
+    vi.mocked(existsSync).mockImplementation(() => false);
+    try {
+      const result = loadConfig();
+      // No YAML found anywhere → env/defaults only
+      expect(result.port).toBe(3000);
+      expect(result.host).toBe('127.0.0.1');
+      expect(result.keys).toEqual([{ label: 'test', key: VALID_KEY }]);
+    } finally {
+      vi.mocked(existsSync).mockImplementation(realExists!);
+    }
+  });
+
+  it('loads config from the OS default config path when it exists', () => {
+    process.env.OPENCODE_GO_KEYS = `test:${VALID_KEY}`;
+    const defaultPath = getDefaultConfigPath();
+    const realExists = vi.mocked(existsSync).getMockImplementation();
+    const realRead = vi.mocked(readFileSync).getMockImplementation();
+    vi.mocked(existsSync).mockImplementation((p) => p === defaultPath);
+    // YAML omits keys (env keys are used) and has a partial scraping section
+    // (no enabled/accounts → defaults apply).
+    vi.mocked(readFileSync).mockReturnValue(
+      ['port: 6666', 'scraping:', '  intervalMs: 123456', ''].join('\n'),
+    );
+    try {
+      const result = loadConfig();
+      expect(result.port).toBe(6666);
+      expect(result.keys).toEqual([{ label: 'test', key: VALID_KEY }]);
+      expect(result.scraping).toEqual({
+        enabled: false,
+        intervalMs: 123456,
+        usageThreshold: 50,
+        accounts: [],
+      });
+    } finally {
+      vi.mocked(existsSync).mockImplementation(realExists!);
+      vi.mocked(readFileSync).mockImplementation(realRead!);
+    }
   });
 
   // --- Integration: full priority chain ---
@@ -1018,6 +1121,24 @@ describe('validateConfig — scraping', () => {
     expect(result.scraping?.accounts[0].workspaceId).toBe('wrk_valid123');
   });
 
+  it('filters out null and non-object accounts', () => {
+    const scraping = {
+      enabled: true,
+      intervalMs: 60_000,
+      usageThreshold: 50,
+      accounts: [
+        null,
+        'not-an-object',
+        42,
+        { workspaceId: 'wrk_valid123', authCookie: 'cookie1' },
+      ],
+    } as unknown as ScrapingConfig;
+    const result = validateConfig(validBase({ scraping }));
+    expect(result.scraping?.accounts).toEqual([
+      { workspaceId: 'wrk_valid123', authCookie: 'cookie1' },
+    ]);
+  });
+
   it('allows encrypted authCookie values', () => {
     const encrypted = encryptKey('real-cookie-value', ENCRYPTION_KEY);
     const scraping = {
@@ -1216,6 +1337,26 @@ describe('getDefaultConfigPath', () => {
   it('returns path ending with saros/config.yaml', () => {
     const result = getDefaultConfigPath();
     expect(result).toMatch(/saros[\\/]config\.yaml$/);
+  });
+
+  it('throws when homedir() returns an empty string', () => {
+    vi.mocked(os.homedir).mockReturnValueOnce('');
+    expect(() => getDefaultConfigPath()).toThrow(/Cannot determine home directory/);
+  });
+
+  it('falls back to homedir/AppData/Local on Windows when LOCALAPPDATA is missing', () => {
+    const platformDesc = Object.getOwnPropertyDescriptor(process, 'platform');
+    Object.defineProperty(process, 'platform', { value: 'win32', configurable: true });
+    try {
+      delete process.env.LOCALAPPDATA;
+      vi.mocked(os.homedir).mockReturnValueOnce('C:\\Users\\tester');
+      const result = getDefaultConfigPath();
+      expect(result).toBe(
+        join('C:\\Users\\tester', 'AppData', 'Local', 'saros', 'config.yaml'),
+      );
+    } finally {
+      if (platformDesc) Object.defineProperty(process, 'platform', platformDesc);
+    }
   });
 
   if (process.platform === 'win32') {

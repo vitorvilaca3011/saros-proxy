@@ -1,6 +1,23 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { maskKey } from './logger.js';
 
+// ---------------------------------------------------------------------------
+// Mock pino so the tryTransport fallback path can be exercised: pino.transport
+// throws when the target package is missing, and createLogger() falls back to
+// JSON-only logging. The pino() factory honors the level option so existing
+// LOG_LEVEL/NODE_ENV assertions keep working.
+// ---------------------------------------------------------------------------
+
+vi.mock('pino', () => {
+  const transport = vi.fn(() => {
+    throw new Error('pino-pretty not installed');
+  });
+  const pino = vi.fn((opts?: { level?: string }) => ({
+    level: opts?.level ?? 'info',
+  }));
+  return { default: Object.assign(pino, { transport }) };
+});
+
 describe('maskKey', () => {
   it('returns **** for empty string', () => {
     expect(maskKey('')).toBe('****');
@@ -74,6 +91,22 @@ describe('logger creation', () => {
     const { logger } = await import('./logger.js');
     expect(logger).toBeDefined();
     expect(logger.level).toBe('info');
+  });
+
+  it('returns undefined transport when pino.transport throws (fallback to JSON)', async () => {
+    process.env.NODE_ENV = 'development';
+    const { logger } = await import('./logger.js');
+    expect(logger).toBeDefined();
+    expect(logger.level).toBe('info');
+
+    // pino.transport was attempted and threw → tryTransport returned undefined
+    const pinoMock = (await import('pino')).default as unknown as {
+      transport: ReturnType<typeof vi.fn>;
+    };
+    expect(pinoMock.transport).toHaveBeenCalledWith({
+      target: 'pino-pretty',
+      options: { colorize: true },
+    });
   });
 
   it('uses default log level when LOG_LEVEL not set', async () => {

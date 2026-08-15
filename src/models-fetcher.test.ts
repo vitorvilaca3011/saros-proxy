@@ -92,6 +92,17 @@ describe('fetchModelsFromUpstream', () => {
     expect(result).toBeNull();
   });
 
+  it('returns null when parsed JSON is a primitive, not an object', async () => {
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue({
+      ok: true,
+      text: () => Promise.resolve(JSON.stringify('plain string')),
+    } as unknown as Response);
+
+    const result = await fetchModelsFromUpstream(testConfig);
+
+    expect(result).toBeNull();
+  });
+
   it('returns null when data is null', async () => {
     vi.spyOn(globalThis, 'fetch').mockResolvedValue({
       ok: true,

@@ -266,8 +266,8 @@ export function autostartStatus(method?: AutostartMethod): void {
     const path = vbsPath();
     if (vbsExists()) {
       const content = readFileSync(path, 'utf-8').trim();
-      const match = content.match(/start(--port (\d+))?/);
-      const portInfo = match?.[2] ? ` on port ${match[2]}` : '';
+      const match = content.match(/start\s*--port\s+(\d+)/);
+      const portInfo = match?.[1] ? ` on port ${match[1]}` : '';
       console.log(`Auto-start is enabled (VBS)${portInfo}. File: ${path}`);
     } else {
       console.log('Auto-start is not installed (VBS).');

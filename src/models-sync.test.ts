@@ -201,6 +201,22 @@ describe('fetchUpstreamModelIds', () => {
 
     expect(ids).toEqual(['valid-model']);
   });
+
+  it('filters out non-object data entries', async () => {
+    vi.spyOn(modelsFetcher, 'getModelsList').mockResolvedValue(
+      new Response(JSON.stringify({
+        object: 'list',
+        data: [null, 'plain-string', 42, { id: 'real-model', object: 'model' }],
+      }), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      }),
+    );
+
+    const ids = await fetchUpstreamModelIds(testConfig);
+
+    expect(ids).toEqual(['real-model']);
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -293,6 +309,12 @@ describe('buildMinimalStub', () => {
   it('toTitleCase with empty string returns empty', () => {
     const stub = buildMinimalStub('');
     expect(stub.name).toBe('');
+    expect(stub.limit).toEqual({ context: 262144, output: 65536 });
+  });
+
+  it('toTitleCase with leading numeric id keeps the digit prefix', () => {
+    const stub = buildMinimalStub('5');
+    expect(stub.name).toBe('5');
     expect(stub.limit).toEqual({ context: 262144, output: 65536 });
   });
 
@@ -470,6 +492,17 @@ describe('getModelsFromOpencodeConfig', () => {
     });
     expect(getModelsFromOpencodeConfig(configPath)).toEqual([]);
   });
+
+  it('returns empty array if config has no provider section', () => {
+    const configPath = writeConfig(tmpDir, { version: '1.0', other: true });
+    expect(getModelsFromOpencodeConfig(configPath)).toEqual([]);
+  });
+
+  it('returns empty array if config file contains invalid JSON', () => {
+    const configPath = join(tmpDir, 'opencode.json');
+    writeFileSync(configPath, '{oops invalid json', 'utf-8');
+    expect(getModelsFromOpencodeConfig(configPath)).toEqual([]);
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -544,6 +577,21 @@ describe('addMissingModelsToOpencodeConfig', () => {
     );
     expect(result.success).toBe(false);
     expect(result.error).toBeDefined();
+  });
+
+  it('returns success:false if existing config contains invalid JSON', () => {
+    const configPath = join(tmpDir, 'opencode.json');
+    writeFileSync(configPath, '{oops invalid json', 'utf-8');
+    const result = addMissingModelsToOpencodeConfig(configPath, ['m1']);
+    expect(result.success).toBe(false);
+    expect(result.error).toContain('invalid JSON');
+  });
+
+  it('returns success:false if config has no provider section', () => {
+    const configPath = writeConfig(tmpDir, { version: '1.0', other: true });
+    const result = addMissingModelsToOpencodeConfig(configPath, ['m1']);
+    expect(result.success).toBe(false);
+    expect(result.error).toContain('no "provider" section');
   });
 
   it('returns success:false if saros-proxy provider missing', () => {
@@ -674,6 +722,34 @@ describe('addMissingModelsToOpencodeConfig', () => {
     expect(result.error).toContain('write failed');
 
     // After restore, the original content should be back
+    const restored = JSON.parse(readFileSync(configPath, 'utf-8')) as Record<string, unknown>;
+    const models = (restored.provider as Record<string, unknown>)['saros-proxy'] as Record<string, unknown>;
+    expect(models.models).toEqual({ 'keep-me': { id: 'keep-me' } });
+  });
+
+  it('restores from backup when the post-write verification read fails', () => {
+    const configPath = writeConfig(tmpDir, sarosProviderBlock({
+      'keep-me': { id: 'keep-me' },
+    }));
+
+    // Simulate a corrupted write: the file on disk ends up with invalid JSON,
+    // so the post-write verification re-read fails and the backup is restored.
+    // The inner call falls through to the default (real) writeFileSync.
+    vi.mocked(writeFileSync).mockImplementationOnce((...args: any[]) => {
+      const encoding = args[2];
+      return (writeFileSync as unknown as (...a: any[]) => unknown)(
+        configPath,
+        '{ invalid json',
+        encoding,
+      );
+    });
+
+    const result = addMissingModelsToOpencodeConfig(configPath, ['new-model']);
+
+    expect(result.success).toBe(false);
+    expect(result.error).toContain('Failed to write valid JSON');
+
+    // Original content restored from backup
     const restored = JSON.parse(readFileSync(configPath, 'utf-8')) as Record<string, unknown>;
     const models = (restored.provider as Record<string, unknown>)['saros-proxy'] as Record<string, unknown>;
     expect(models.models).toEqual({ 'keep-me': { id: 'keep-me' } });

@@ -105,7 +105,7 @@ export function createProxyState(
 
 /**
  * Internal: return a read-only snapshot of the key already selected.
- * (Keeps mutation paths through markKeyFailed / markKeySucceeded / reenableKey.)
+ * (Keeps mutation paths through markKeyFailed / markKeySucceeded.)
  */
 function toSnapshot(key: ApiKey): KeySnapshot {
   return { label: key.label, key: key.key };
@@ -436,43 +436,9 @@ export function markKeySucceeded(state: ProxyState, keyLabel: string): void {
   key.disabledAt = null;
 }
 
-/**
- * Manually re-enable a previously disabled key.
- */
-function reenableKey(state: ProxyState, keyLabel: string): void {
-  const key = state.keys.find((k) => k.label === keyLabel);
-  if (!key) return;
-  key.enabled = true;
-  key.consecutiveFailures = 0;
-  key.disabledAt = null; // C1: clear cooldown
-}
-
 // ---------------------------------------------------------------------------
 // Status Queries
 // ---------------------------------------------------------------------------
-
-/**
- * Check whether a key is currently disabled.
- * A key that has passed its cooldown window is considered no longer disabled
- * (lazy re-enable happens on next selection, but this query reflects that).
- */
-function isKeyDisabled(state: ProxyState, keyLabel: string): boolean {
-  const key = state.keys.find((k) => k.label === keyLabel);
-  if (!key) return true;
-
-  if (!key.enabled) {
-    // C1: past cooldown → effectively not disabled anymore
-    if (
-      key.disabledAt !== null &&
-      Date.now() - key.disabledAt >= state.circuitBreakerCooldownMs
-    ) {
-      return false;
-    }
-    return true;
-  }
-
-  return key.consecutiveFailures >= state.circuitBreakerThreshold;
-}
 
 // ---------------------------------------------------------------------------
 // Error Classification (C2)
