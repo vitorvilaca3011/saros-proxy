@@ -7,6 +7,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.3] - 2026-08-15
+
+### Fixed
+
+- `saros-proxy status` now reports the installed port for the VBS autostart
+  method. The status regex previously required `start--port` without a space,
+  but the installer writes `start --port N` — the port was never shown.
+- Config sync error messages no longer claim "restored from backup" when no
+  backup existed.
+
+### Changed
+
+- CI: coverage thresholds raised to 95% (statements/branches/functions/lines);
+  new security stage (gitleaks secret scan, `npm audit`, CodeQL analysis);
+  docs-only changes skip CI; all GitHub Actions pinned to commit SHAs with
+  dependabot keeping them current.
+- Publish: tag/version consistency guard, npm provenance, packed-tarball
+  smoke test before release.
+- Removed dead circuit-breaker helpers (`reenableKey`, `isKeyDisabled`) from
+  `proxy-logic.ts`.
+
+### Security
+
+- Dependency fixes for high-severity advisories (hono, nanoid, postcss) —
+  `npm audit` now reports 0 vulnerabilities.
+
 ## [0.7.1] - 2026-08-15
 
 ### Added
