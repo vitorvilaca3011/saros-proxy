@@ -238,11 +238,16 @@ export function updateOpencodeConfig(
       const backupPath = `${configPath}.backup`;
       if (existsSync(backupPath)) {
         copyFileSync(backupPath, configPath);
+        return {
+          success: false,
+          path: configPath,
+          error: 'Failed to write valid JSON. Original file restored from backup.',
+        };
       }
       return {
         success: false,
         path: configPath,
-        error: 'Failed to write valid JSON. Original file restored from backup.',
+        error: 'Failed to write valid JSON. No backup available to restore.',
       };
     }
 
@@ -308,11 +313,16 @@ export function syncModelsToOpencodeConfig(
     } catch {
       if (existsSync(backupPath)) {
         copyFileSync(backupPath, configPath);
+        return {
+          success: false,
+          path: configPath,
+          error: 'Failed to write valid JSON after sync. Restored from backup.',
+        };
       }
       return {
         success: false,
         path: configPath,
-        error: 'Failed to write valid JSON after sync. Restored from backup.',
+        error: 'Failed to write valid JSON after sync. No backup available to restore.',
       };
     }
 

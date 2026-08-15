@@ -259,7 +259,7 @@ describe('opencode-config error paths', () => {
     const result = syncModelsToOpencodeConfig({ configPath });
 
     expect(result.success).toBe(false);
-    expect(result.error).toContain('Restored from backup');
+    expect(result.error).toContain('No backup available to restore');
     // No backup existed, so nothing was restored — the synced content stays
     expect(JSON.parse(readFileSync(configPath, 'utf-8')).provider['saros-proxy'].models).toBeDefined();
   });
