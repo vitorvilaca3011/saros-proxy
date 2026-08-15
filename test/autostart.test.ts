@@ -80,7 +80,8 @@ vi.mock('../src/cli/ui.js', () => ({
 // ---------------------------------------------------------------------------
 
 function createStartupDir(): string {
-  const base = join(tmpdir(), `saros-autostart-test-${Date.now()}`);
+  // mkdtemp: unique, attacker-unpredictable dir (Date.now() names are guessable)
+  const base = mkdtempSync(join(tmpdir(), 'saros-autostart-test-'));
   const dir = join(base, 'Microsoft', 'Windows', 'Start Menu', 'Programs', 'Startup');
   mkdirSync(dir, { recursive: true });
   return dir;
@@ -162,7 +163,7 @@ describe('autostart — VBS method', () => {
     writeFileSync(
       join(startupDir, 'saros-proxy-daemon.vbs'),
       'shell.Run "node dist/index.js start--port 4000", 0, False\n',
-      'utf-8',
+      { encoding: 'utf-8', flag: 'wx' }, // wx: fail if the file already exists
     );
 
     const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
