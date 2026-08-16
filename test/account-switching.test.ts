@@ -11,7 +11,6 @@ import { serve } from '@hono/node-server';
 import type { AddressInfo } from 'node:net';
 
 import { createProxyApp } from '../src/proxy.js';
-import { validateConfig } from '../src/config.js';
 import type { ProxyConfig } from '../src/config.js';
 
 // ---------------------------------------------------------------------------

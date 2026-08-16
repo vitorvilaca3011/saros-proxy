@@ -6,7 +6,7 @@
  * any missing models with minimal stubs.
  */
 
-import { existsSync, readFileSync, writeFileSync, copyFileSync } from 'node:fs';
+import { constants, existsSync, readFileSync, writeFileSync, copyFileSync } from 'node:fs';
 import { getDefaultOpencodeConfigPath, stripJsoncComments } from './cli/opencode-config.js';
 import { getModelsList } from './models-fetcher.js';
 import {
@@ -334,8 +334,10 @@ export function addMissingModelsToOpencodeConfig(
 
     // Backup before modifying (never overwrite existing backup)
     const backupPath = configPath + '.backup';
-    if (!existsSync(backupPath)) {
-      copyFileSync(configPath, backupPath);
+    try {
+      copyFileSync(configPath, backupPath, constants.COPYFILE_EXCL);
+    } catch {
+      // Backup already exists — keep it
     }
 
     // Write updated config
@@ -348,8 +350,10 @@ export function addMissingModelsToOpencodeConfig(
       JSON.parse(verifyRaw);
     } catch {
       // Restore from backup
-      if (existsSync(backupPath)) {
+      try {
         copyFileSync(backupPath, configPath);
+      } catch {
+        // No backup to restore — report the failure as-is
       }
       return {
         success: false,

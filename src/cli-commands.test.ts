@@ -5,7 +5,7 @@
  * and re-evaluating the module with different process.argv values.
  * Uses vi.resetModules() to force fresh module evaluation per test.
  */
-import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach } from 'vitest';
 
 // ---------------------------------------------------------------------------
 // Mock all dependencies of index.ts
@@ -114,7 +114,7 @@ describe('CLI: help subcommand', () => {
   it('prints help and exits 0', async () => {
     process.argv = ['node', 'saros-proxy', 'help'];
     vi.resetModules();
-    const exitSpy = mockProcessExit();
+    mockProcessExit();
     const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
 
     // Top-level module code runs — should print help and exit(0)
@@ -128,7 +128,7 @@ describe('CLI: help subcommand', () => {
   it('--help also prints help and exits 0', async () => {
     process.argv = ['node', 'saros-proxy', '--help'];
     vi.resetModules();
-    const exitSpy = mockProcessExit();
+    mockProcessExit();
     vi.spyOn(console, 'log').mockImplementation(() => {});
 
     await expect(import('./index.js')).rejects.toThrow('process.exit(0)');
@@ -137,7 +137,7 @@ describe('CLI: help subcommand', () => {
   it('-h also prints help and exits 0', async () => {
     process.argv = ['node', 'saros-proxy', '-h'];
     vi.resetModules();
-    const exitSpy = mockProcessExit();
+    mockProcessExit();
     vi.spyOn(console, 'log').mockImplementation(() => {});
 
     await expect(import('./index.js')).rejects.toThrow('process.exit(0)');
@@ -153,7 +153,7 @@ describe('CLI: sync-upstream subcommand', () => {
     process.argv = ['node', 'saros-proxy', 'sync-upstream'];
     vi.resetModules();
     mockLoadConfig.mockImplementation(() => { throw new Error('Config parse error'); });
-    const exitSpy = mockProcessExit();
+    mockProcessExit();
     vi.spyOn(console, 'error').mockImplementation(() => {});
 
     await expect(import('./index.js')).rejects.toThrow('process.exit(1)');
@@ -166,7 +166,7 @@ describe('CLI: sync-upstream subcommand', () => {
     mockSyncInAllHarnesses.mockResolvedValue([
       { harness: 'opencode', result: { success: true, path: '/mock/opencode.json' } },
     ]);
-    const exitSpy = mockProcessExit();
+    mockProcessExit();
     vi.spyOn(console, 'log').mockImplementation(() => {});
 
     await expect(import('./index.js')).rejects.toThrow('process.exit(0)');
@@ -184,7 +184,7 @@ describe('CLI: probe subcommand', () => {
     vi.resetModules();
     mockLoadConfig.mockReturnValue({} as any);
     mockGetModelsFromConfig.mockReturnValue([]);
-    const exitSpy = mockProcessExit();
+    mockProcessExit();
     const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
 
     await expect(import('./index.js')).rejects.toThrow('process.exit(1)');
@@ -196,7 +196,7 @@ describe('CLI: probe subcommand', () => {
     vi.resetModules();
     mockLoadConfig.mockReturnValue({} as any);
     mockGetModelsFromConfig.mockReturnValue(['real-model']);
-    const exitSpy = mockProcessExit();
+    mockProcessExit();
     vi.spyOn(console, 'error').mockImplementation(() => {});
 
     await expect(import('./index.js')).rejects.toThrow('process.exit(1)');
@@ -212,7 +212,7 @@ describe('CLI: restart subcommand', () => {
     process.argv = ['node', 'saros-proxy', 'restart'];
     vi.resetModules();
     mockDaemonRestart.mockImplementation(() => { throw new Error('process.exit(0)'); });
-    const exitSpy = mockProcessExit();
+    mockProcessExit();
 
     await expect(import('./index.js')).rejects.toThrow('process.exit(0)');
     expect(mockDaemonRestart).toHaveBeenCalledWith(undefined, undefined);
@@ -222,7 +222,7 @@ describe('CLI: restart subcommand', () => {
     process.argv = ['node', 'saros-proxy', 'restart', '--port', '4000', '--config', 'my.yaml'];
     vi.resetModules();
     mockDaemonRestart.mockImplementation(() => { throw new Error('process.exit(0)'); });
-    const exitSpy = mockProcessExit();
+    mockProcessExit();
 
     await expect(import('./index.js')).rejects.toThrow('process.exit(0)');
     expect(mockDaemonRestart).toHaveBeenCalledWith(4000, 'my.yaml');

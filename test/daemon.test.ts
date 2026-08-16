@@ -7,7 +7,7 @@
  */
 
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
-import { existsSync, mkdirSync, writeFileSync, readFileSync, rmSync } from 'node:fs';
+import { existsSync, mkdirSync, writeFileSync, readFileSync, rmSync, mkdtempSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 
@@ -17,7 +17,8 @@ import { tmpdir } from 'node:os';
 
 /** Create a temp "home" dir so PID operations are isolated. */
 function createTempHome(): string {
-  const dir = join(tmpdir(), `saros-daemon-test-${Date.now()}`);
+  // mkdtemp: unique, attacker-unpredictable dir (Date.now() names are guessable)
+  const dir = mkdtempSync(join(tmpdir(), 'saros-daemon-test-'));
   mkdirSync(dir, { recursive: true });
   return dir;
 }
@@ -46,9 +47,6 @@ describe('daemon PID lifecycle', () => {
     // Import with fresh env
     const { default: os } = await import('node:os');
     vi.spyOn(os, 'homedir').mockReturnValue(tempHome);
-
-    // Dynamic import so vi.stubEnv takes effect
-    const daemon = await import('../src/cli/daemon.js');
 
     // We can't call daemonStart directly (it spawns + exits) so we replicate
     // the PID file logic that the real daemon uses.

@@ -255,7 +255,12 @@ function saveEnvVar(name: string, value: string): boolean {
     const line = `\nexport ${name}='${escaped}'\n`;
 
     // Avoid adding duplicates — anchored to line start
-    const content = existsSync(targetPath) ? readFileSync(targetPath, 'utf-8') : '';
+    let content = '';
+    try {
+      content = readFileSync(targetPath, 'utf-8');
+    } catch {
+      // File doesn't exist yet — start from empty
+    }
     if (new RegExp(`^export ${name}=`, 'm').test(content)) return false;
 
     writeFileSync(targetPath, content + line, 'utf-8');

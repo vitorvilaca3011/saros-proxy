@@ -407,21 +407,9 @@ describe('OpenCode Config Integration', () => {
       mkdirSync(join(tmpDir, 'readonly'), { recursive: true });
       writeFileSync(configPath, '{}', 'utf-8');
 
-      // Make file read-only by removing write permission
-      // On Windows this is different, so we mock instead
-      const originalWriteFileSync = writeFileSync;
-      let callCount = 0;
-      const mockWriteFileSync = (...args: Parameters<typeof writeFileSync>) => {
-        callCount++;
-        if (callCount >= 2) { // Second call is the actual write
-          throw new Error('EACCES: permission denied');
-        }
-        return originalWriteFileSync(...args);
-      };
-
-      // We can't easily mock node:fs in this test structure,
-      // so we test the catch block via a different approach:
-      // Create a scenario where the verify read fails
+      // Can't easily mock node:fs in this test structure,
+      // so the write-failure catch is exercised via the restore test below;
+      // this one verifies the normal path doesn't throw.
       const result = updateOpencodeConfig(3000, { configPath });
       expect(result.success).toBe(true); // Normal case passes
     });

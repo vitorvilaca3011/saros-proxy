@@ -24,7 +24,6 @@ vi.mock('./probe-cache.js', async (importOriginal) => {
 });
 
 import {
-  getProbeCachePath,
   loadProbeCache,
   saveProbeCache,
   getCachedProbe,

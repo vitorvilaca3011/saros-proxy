@@ -85,21 +85,6 @@ async function pollHealth(port: number, timeoutMs: number): Promise<boolean> {
   return false;
 }
 
-async function removeTempDir(dir: string): Promise<void> {
-  if (!existsSync(dir)) return;
-  const maxRetries = 5;
-  const retryDelay = 500;
-  for (let i = 0; i < maxRetries; i++) {
-    try {
-      rmSync(dir, { recursive: true, force: true, maxRetries: 3, retryDelay });
-      return;
-    } catch {
-      if (i === maxRetries - 1) return;
-      await new Promise((r) => setTimeout(r, retryDelay));
-    }
-  }
-}
-
 // ---------------------------------------------------------------------------
 // Tests — all gated by SKIP_DOCKER_SMOKE
 // ---------------------------------------------------------------------------

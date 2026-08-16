@@ -7,7 +7,7 @@
  * user field except `providers["saros-proxy"].models`.
  */
 
-import { existsSync, readFileSync, writeFileSync, copyFileSync } from 'node:fs';
+import { constants, existsSync, readFileSync, writeFileSync, copyFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { homedir } from 'node:os';
 import { toPiOmpModelArray } from './harness-models.js';
@@ -84,8 +84,10 @@ export function syncModelsToPiConfig(
 
     // Backup before modifying (never overwrite an existing backup)
     const backupPath = `${configPath}.backup`;
-    if (!existsSync(backupPath)) {
-      copyFileSync(configPath, backupPath);
+    try {
+      copyFileSync(configPath, backupPath, constants.COPYFILE_EXCL);
+    } catch {
+      // Backup already exists — keep it
     }
 
     // Write
@@ -96,8 +98,10 @@ export function syncModelsToPiConfig(
     try {
       JSON.parse(readFileSync(configPath, 'utf-8'));
     } catch {
-      if (existsSync(backupPath)) {
+      try {
         copyFileSync(backupPath, configPath);
+      } catch {
+        // No backup to restore — report the failure as-is
       }
       return {
         success: false,

@@ -5,7 +5,7 @@
  * or opencode.jsonc to add or update the proxy provider configuration.
  */
 
-import { existsSync, readFileSync, writeFileSync, copyFileSync, mkdirSync } from 'node:fs';
+import { constants, existsSync, readFileSync, writeFileSync, copyFileSync, mkdirSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { homedir } from 'node:os';
 import { OPENCODE_MODELS } from '../constants.js';
@@ -236,19 +236,20 @@ export function updateOpencodeConfig(
     } catch {
       // Restore from backup if available
       const backupPath = `${configPath}.backup`;
-      if (existsSync(backupPath)) {
+      try {
         copyFileSync(backupPath, configPath);
         return {
           success: false,
           path: configPath,
           error: 'Failed to write valid JSON. Original file restored from backup.',
         };
+      } catch {
+        return {
+          success: false,
+          path: configPath,
+          error: 'Failed to write valid JSON. No backup available to restore.',
+        };
       }
-      return {
-        success: false,
-        path: configPath,
-        error: 'Failed to write valid JSON. No backup available to restore.',
-      };
     }
 
     return { success: true, path: configPath, created };
@@ -294,8 +295,10 @@ export function syncModelsToOpencodeConfig(
 
     // Backup before modifying (never overwrite existing backup)
     const backupPath = `${configPath}.backup`;
-    if (!existsSync(backupPath)) {
-      copyFileSync(configPath, backupPath);
+    try {
+      copyFileSync(configPath, backupPath, constants.COPYFILE_EXCL);
+    } catch {
+      // Backup already exists — keep it
     }
 
     // Load models from models.json (source of truth)
@@ -311,19 +314,20 @@ export function syncModelsToOpencodeConfig(
       const verifyRaw = readFileSync(configPath, 'utf-8');
       JSON.parse(verifyRaw);
     } catch {
-      if (existsSync(backupPath)) {
+      try {
         copyFileSync(backupPath, configPath);
         return {
           success: false,
           path: configPath,
           error: 'Failed to write valid JSON after sync. Restored from backup.',
         };
+      } catch {
+        return {
+          success: false,
+          path: configPath,
+          error: 'Failed to write valid JSON after sync. No backup available to restore.',
+        };
       }
-      return {
-        success: false,
-        path: configPath,
-        error: 'Failed to write valid JSON after sync. No backup available to restore.',
-      };
     }
 
     return { success: true, path: configPath };

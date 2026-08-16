@@ -8,7 +8,6 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { readFileSync, mkdtempSync, writeFileSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
-import { OPENCODE_MODELS } from './constants.js';
 import type { ProxyConfig } from './config.js';
 import * as modelsFetcher from './models-fetcher.js';
 import {

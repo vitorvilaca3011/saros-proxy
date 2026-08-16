@@ -252,7 +252,7 @@ export function daemonStart(port?: number, configPath?: string): void {
 }
 
 export function daemonStop(): void {
-  const { pid, wasRunning, wasStale } = killRunningDaemon();
+  const { pid, wasStale } = killRunningDaemon();
   if (pid === null) {
     console.log(chalk.yellow('No running proxy daemon found.'));
     process.exit(0);

@@ -14,7 +14,7 @@
  */
 
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
-import { exec, execSync, spawn } from 'node:child_process';
+import { exec, execSync, spawn, execFile } from 'node:child_process';
 import { writeFileSync, existsSync, mkdtempSync, rmSync } from 'node:fs';
 import { promisify } from 'node:util';
 import { join, sep } from 'node:path';
@@ -32,6 +32,7 @@ const SKIP_NPM_SMOKE = process.env.RUN_NPM_SMOKE !== '1';
 const PACKAGE_VERSION = process.env.SAROS_PROXY_VERSION ?? '0.1.0';
 
 const execAsync = promisify(exec);
+const execFileAsync = promisify(execFile);
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -164,8 +165,9 @@ describe.skipIf(SKIP_NPM_SMOKE)('CLI Binary (via npx)', () => {
   it.skipIf(SKIP_NPM_SMOKE)(
     'responds to --version with a semver string',
     async () => {
-      const { stdout } = await execAsync(
-        `npx --yes saros-proxy@${PACKAGE_VERSION} --version`,
+      const { stdout } = await execFileAsync(
+        'npx',
+        ['--yes', `saros-proxy@${PACKAGE_VERSION}`, '--version'],
       );
       expect(stdout.trim()).toMatch(/\d+\.\d+\.\d+/);
     },
@@ -175,8 +177,9 @@ describe.skipIf(SKIP_NPM_SMOKE)('CLI Binary (via npx)', () => {
   it.skipIf(SKIP_NPM_SMOKE)(
     'responds to --help with usage information',
     async () => {
-      const { stdout, stderr } = await execAsync(
-        `npx --yes saros-proxy@${PACKAGE_VERSION} --help`,
+      const { stdout, stderr } = await execFileAsync(
+        'npx',
+        ['--yes', `saros-proxy@${PACKAGE_VERSION}`, '--help'],
       );
       const output = stdout + stderr;
       expect(output.toLowerCase()).toMatch(/port/);

@@ -10,7 +10,7 @@
  * models.yml — it is never edited here.
  */
 
-import { existsSync, readFileSync, writeFileSync, copyFileSync } from 'node:fs';
+import { constants, existsSync, readFileSync, writeFileSync, copyFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { homedir } from 'node:os';
 import { parse as parseYaml, stringify as stringifyYaml } from 'yaml';
@@ -93,8 +93,11 @@ export function syncModelsToOmpConfig(
 
     // Backup before modifying (never overwrite an existing backup)
     const backupPath = `${configPath}.backup`;
-    if (!existsSync(backupPath)) {
-      copyFileSync(configPath, backupPath);
+    try {
+      // COPYFILE_EXCL fails if the backup already exists — no check-then-act race
+      copyFileSync(configPath, backupPath, constants.COPYFILE_EXCL);
+    } catch {
+      // Backup already exists — keep it
     }
 
     // Write (YAML round-trip drops comments — consistent with JSONC rewrite)
@@ -105,8 +108,10 @@ export function syncModelsToOmpConfig(
     try {
       parseYaml(readFileSync(configPath, 'utf-8'));
     } catch {
-      if (existsSync(backupPath)) {
+      try {
         copyFileSync(backupPath, configPath);
+      } catch {
+        // No backup to restore — report the failure as-is
       }
       return {
         success: false,

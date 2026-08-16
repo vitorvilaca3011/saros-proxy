@@ -245,8 +245,10 @@ describe('opencode-config error paths', () => {
     fs.writeFileSync(configPath, existing, 'utf-8');
 
     // Prevent the backup from being created so the restore branch has
-    // nothing to copy back.
-    mockedFs.copyFileSync.mockImplementation(() => {});
+    // nothing to copy back (copyFileSync throws ENOENT on a missing source).
+    mockedFs.copyFileSync.mockImplementation(() => {
+      throw new Error('ENOENT: no such file or directory');
+    });
 
     // First read (initial load) returns the valid existing content.
     // Second read (the post-write verify) throws EIO.
