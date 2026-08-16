@@ -71,8 +71,12 @@ jobs:
         with:
           name: dist
           path: dist/
-      - name: Publish with provenance
-        run: npm publish --access public --ignore-scripts --provenance
+      - name: Publish
+        # --provenance disabled: with NODE_AUTH_TOKEN it fails with
+        # `404 PUT registry.npmjs.org/<pkg>` after signing the statement
+        # (signed to sigstore, but the token PUT is rejected). Re-enable
+        # once publishing moves to OIDC-exclusive auth.
+        run: npm publish --access public --ignore-scripts
         env:
           NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
 
