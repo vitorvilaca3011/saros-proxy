@@ -6,6 +6,8 @@
  */
 
 import { describe, it, expect, afterEach, vi } from 'vitest';
+import { readFileSync } from 'node:fs';
+import { resolve } from 'node:path';
 
 describe('checkForUpdate', () => {
   const originalWarn = console.warn;
@@ -67,10 +69,18 @@ describe('checkForUpdate', () => {
   });
 
   it('compares version parts of different lengths (e.g. 1.0 vs 1.0.1)', async () => {
-    // Current is 0.7.2; a shorter 0.7 is older, a longer 0.7.2.1 is newer
-    const older = await runWithRegistryVersion('0.7');
+    // Version-agnostic: derive fixtures from the real package.json version
+    const pkg = JSON.parse(readFileSync(resolve(process.cwd(), 'package.json'), 'utf-8')) as {
+      version: string;
+    };
+    // '0.7' — current minus the patch segment (shorter → older)
+    const shorter = pkg.version.split('.').slice(0, 2).join('.');
+    // '0.7.3.1' — current plus an extra segment (longer → newer)
+    const longerNewer = `${pkg.version}.1`;
+
+    const older = await runWithRegistryVersion(shorter);
     expect(older).toHaveLength(0);
-    const newer = await runWithRegistryVersion('0.7.2.1');
+    const newer = await runWithRegistryVersion(longerNewer);
     expect(newer).toHaveLength(1);
   });
 });
