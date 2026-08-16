@@ -14,12 +14,6 @@
   ],
   "scripts": {
     "setup": "tsx src/cli/setup.ts",
-    "prototype": "tsx prototype/prototype.ts",
-    "proto:usage": "tsx prototype/usage-switching.ts",
-    "proto:probe": "tsx prototype/api-probe.ts",
-    "proto:scrape": "tsx prototype/dashboard-scraper.ts",
-    "proto:setup": "tsx prototype/setup-wizard.ts",
-    "proto:autostart": "tsx prototype/auto-start.ts",
     "dev": "tsx src/index.ts",
     "build": "tsc",
     "lint": "tsc --noEmit",

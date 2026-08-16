@@ -17,7 +17,6 @@ stderr_proto.txt
 stdout_proto.txt
 
 # Prototype (throwaway exploration)
-prototype/
 
 # AI tool session artifacts
 .opencode/
