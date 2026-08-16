@@ -70,19 +70,74 @@ const HARNESS_ALIASES: Record<string, HarnessId> = {
   opencode: 'opencode',
 };
 
-/** Map CLI harness-name args to canonical ids; unknown names land in errors. */
-export function parseHarnessArgs(args: string[]): { ids: HarnessId[]; errors: string[] } {
-  const ids: HarnessId[] = [];
+export interface HarnessCommandArgs {
+  add: HarnessId[];
+  remove: HarnessId[];
+  clear: boolean;
+  errors: string[];
+}
+
+/**
+ * Parse `configharness` CLI args into an add/remove/clear operation.
+ *
+ * Harness names before `--remove` are added to the selection, names after it
+ * are removed; `--clear` alone empties the selection. Unknown names land in
+ * `errors` (the caller reports them and exits non-zero).
+ */
+export function parseHarnessCommandArgs(args: string[]): HarnessCommandArgs {
+  const add: HarnessId[] = [];
+  const remove: HarnessId[] = [];
   const errors: string[] = [];
+  let clear = false;
+  let removing = false;
   for (const arg of args) {
-    const mapped = HARNESS_ALIASES[arg.toLowerCase()];
-    if (mapped) {
-      if (!ids.includes(mapped)) ids.push(mapped);
-    } else {
-      errors.push(arg);
+    if (arg === '--clear') {
+      clear = true;
+      continue;
     }
+    if (arg === '--remove') {
+      removing = true;
+      continue;
+    }
+    const mapped = HARNESS_ALIASES[arg.toLowerCase()];
+    if (!mapped) {
+      errors.push(arg);
+      continue;
+    }
+    const target = removing ? remove : add;
+    if (!target.includes(mapped)) target.push(mapped);
   }
-  return { ids, errors };
+  return { add, remove, clear, errors };
+}
+
+/**
+ * Apply an add/remove/clear operation to the harness selection.
+ *
+ * Additive by design: names are merged into the current selection, so
+ * `configharness omp` followed by `configharness pi` enables both. A missing
+ * settings file starts from an empty selection on the first explicit command
+ * (the implicit opencode default only applies while nothing is configured).
+ *
+ * @returns the resulting selection after the write.
+ */
+export function updateHarnessSettings(op: Omit<HarnessCommandArgs, 'errors'>): HarnessId[] {
+  if (op.clear) {
+    writeHarnessSettings([]);
+    return [];
+  }
+  const fileExists = existsSync(getHarnessSettingsPath());
+  if (!fileExists && op.add.length === 0) {
+    // Nothing configured yet and nothing to add — keep the implicit
+    // opencode default instead of writing an explicit empty list.
+    return readHarnessSettings();
+  }
+  const base = fileExists ? readHarnessSettings() : [];
+  const next = base.filter((id) => !op.remove.includes(id));
+  for (const id of op.add) {
+    if (!next.includes(id)) next.push(id);
+  }
+  writeHarnessSettings(next);
+  return next;
 }
 
 /**

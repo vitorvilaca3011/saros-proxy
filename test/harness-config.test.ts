@@ -70,7 +70,8 @@ import {
 } from '../src/models-sync.js';
 import type { ProxyConfig } from '../src/config.js';
 import {
-  parseHarnessArgs,
+  parseHarnessCommandArgs,
+  updateHarnessSettings,
   readHarnessSettings,
   writeHarnessSettings,
   syncModelsInAllHarnesses,
@@ -770,17 +771,101 @@ describe('harness selection settings', () => {
     expect(readHarnessSettings()).toEqual([]);
   });
 
-  it('parseHarnessArgs maps aliases and reports unknown names', () => {
-    expect(parseHarnessArgs(['omp', 'pi', 'oc'])).toEqual({
-      ids: ['omp', 'pi', 'opencode'],
+  it('parseHarnessCommandArgs maps aliases, flags, and reports unknown names', () => {
+    expect(parseHarnessCommandArgs(['omp', 'pi', 'oc'])).toEqual({
+      add: ['omp', 'pi', 'opencode'],
+      remove: [],
+      clear: false,
       errors: [],
     });
-    expect(parseHarnessArgs(['ohmypi', 'opencode'])).toEqual({
-      ids: ['omp', 'opencode'],
+    expect(parseHarnessCommandArgs(['ohmypi', 'opencode'])).toEqual({
+      add: ['omp', 'opencode'],
+      remove: [],
+      clear: false,
       errors: [],
     });
-    expect(parseHarnessArgs(['omp', 'omp'])).toEqual({ ids: ['omp'], errors: [] }); // dedup
-    expect(parseHarnessArgs(['bogus'])).toEqual({ ids: [], errors: ['bogus'] });
+    expect(parseHarnessCommandArgs(['omp', 'omp'])).toEqual({
+      add: ['omp'],
+      remove: [],
+      clear: false,
+      errors: [],
+    }); // dedup
+    expect(parseHarnessCommandArgs(['--remove', 'pi'])).toEqual({
+      add: [],
+      remove: ['pi'],
+      clear: false,
+      errors: [],
+    });
+    expect(parseHarnessCommandArgs(['--remove', 'pi', 'omp'])).toEqual({
+      add: [],
+      remove: ['pi', 'omp'],
+      clear: false,
+      errors: [],
+    });
+    expect(parseHarnessCommandArgs(['omp', '--remove', 'pi'])).toEqual({
+      add: ['omp'],
+      remove: ['pi'],
+      clear: false,
+      errors: [],
+    });
+    expect(parseHarnessCommandArgs(['--remove', 'omp', 'omp'])).toEqual({
+      add: [],
+      remove: ['omp'],
+      clear: false,
+      errors: [],
+    }); // dedup on remove
+    expect(parseHarnessCommandArgs(['--clear'])).toEqual({
+      add: [],
+      remove: [],
+      clear: true,
+      errors: [],
+    });
+    expect(parseHarnessCommandArgs(['--remove', 'bogus'])).toEqual({
+      add: [],
+      remove: [],
+      clear: false,
+      errors: ['bogus'],
+    });
+  });
+
+  it('updateHarnessSettings adds to the existing selection', () => {
+    writeHarnessSettings(['omp']);
+    expect(updateHarnessSettings({ add: ['pi'], remove: [], clear: false })).toEqual([
+      'omp',
+      'pi',
+    ]);
+    expect(readHarnessSettings()).toEqual(['omp', 'pi']);
+    // Re-adding is a no-op.
+    expect(updateHarnessSettings({ add: ['pi'], remove: [], clear: false })).toEqual([
+      'omp',
+      'pi',
+    ]);
+  });
+
+  it('updateHarnessSettings removes from the existing selection', () => {
+    writeHarnessSettings(['omp', 'pi', 'opencode']);
+    expect(updateHarnessSettings({ add: [], remove: ['pi'], clear: false })).toEqual([
+      'omp',
+      'opencode',
+    ]);
+    expect(readHarnessSettings()).toEqual(['omp', 'opencode']);
+  });
+
+  it('updateHarnessSettings clears the selection', () => {
+    writeHarnessSettings(['omp']);
+    expect(updateHarnessSettings({ add: [], remove: [], clear: true })).toEqual([]);
+    expect(readHarnessSettings()).toEqual([]);
+  });
+
+  it('updateHarnessSettings starts from an empty selection when the file is missing', () => {
+    // First explicit command is authoritative: no implicit opencode default.
+    expect(updateHarnessSettings({ add: ['omp'], remove: [], clear: false })).toEqual(['omp']);
+    expect(readHarnessSettings()).toEqual(['omp']);
+  });
+
+  it('updateHarnessSettings leaves the implicit default untouched for remove-only on a fresh install', () => {
+    expect(updateHarnessSettings({ add: [], remove: ['pi'], clear: false })).toEqual(['opencode']);
+    expect(existsSync(join(tmpDir, '.config', 'saros', 'harnesses.json'))).toBe(false);
   });
 });
 

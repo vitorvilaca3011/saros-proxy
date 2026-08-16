@@ -391,6 +391,9 @@ npx tsx src/index.ts --config /etc/saros/config.yaml
 The proxy ships with a built-in daemon. Once installed globally (`npm install -g saros-proxy`):
 
 ```bash
+# Show the overview (running state, harnesses, API keys, config path)
+saros-proxy
+
 # Start the daemon (background)
 saros-proxy start --port 3000
 
@@ -403,8 +406,12 @@ saros-proxy stop
 # Sync bundled models to all enabled harnesses
 saros-proxy sync-models
 
-# Set which harnesses get model sync (omp|ohmypi, pi, oc|opencode)
+# Add harnesses to the model-sync selection (omp|ohmypi, pi, oc|opencode)
 saros-proxy configharness omp pi oc
+
+# Remove a harness, or disable sync entirely
+saros-proxy configharness --remove pi
+saros-proxy configharness --clear
 
 # List the current harness selection
 saros-proxy configharness
@@ -435,8 +442,12 @@ Saros keeps your harness configs in sync with the upstream API. Which harnesses 
 # List which harnesses are enabled for model sync
 saros-proxy configharness
 
-# Enable sync for oh-my-pi, pi, and OpenCode (replaces the selection)
+# Add oh-my-pi, pi, and OpenCode to the sync selection (additive)
 saros-proxy configharness omp pi oc
+
+# Remove a harness, or disable sync entirely
+saros-proxy configharness --remove pi
+saros-proxy configharness --clear
 
 # Sync bundled models to all enabled harnesses
 saros-proxy sync-models
@@ -465,7 +476,11 @@ Override with `--config`:
 saros-proxy start --port 3000 --config /path/to/config.yaml
 ```
 
-The PID file is stored at `~/.config/saros/daemon.pid`. The child process runs with `NODE_ENV=production` (JSON logging).
+The PID file is stored at `~/.config/saros/daemon.pid`. The child process runs with `NODE_ENV=production` (JSON logging), and its stderr is appended to `~/.config/saros/daemon.log`.
+
+`saros-proxy status` checks the PID file first, then falls back to an os-agnostic `GET /health` port probe — so it reports the truth even when the proxy was started outside the daemon (manually, via autostart, or in another session) and no PID file exists. It also prints the enabled harnesses (`configharness` selection). `saros-proxy start` refuses to start a second instance when the configured port is already serving.
+
+Bare `saros-proxy` (no subcommand) prints the same overview without starting anything: running state, harnesses, masked API keys, and config path. To run the proxy in the foreground (e.g. for development or in a container), use `saros-proxy serve [--port <port>] [--config <path>]` — the daemon child and the Docker entrypoint run `serve` under the hood.
 
 ---
 
@@ -545,14 +560,20 @@ Besides OpenCode, Saros can keep its provider + model config in sync for the `pi
 Sync is opt-in per harness, configured with the `configharness` command. The selection is stored in `~/.config/saros/harnesses.json`:
 
 ```bash
-# Enable sync for omp + pi + opencode (replaces the previous selection)
+# Add omp + pi + opencode to the sync selection (additive)
 saros-proxy configharness omp pi oc
+
+# Remove a harness, or disable sync entirely
+saros-proxy configharness --remove pi
+saros-proxy configharness --clear
 
 # See the current selection
 saros-proxy configharness
 
 # Accepted names: omp | ohmypi, pi, oc | opencode
 ```
+
+`configharness` is additive: each command adds the named harnesses to the current selection (running `configharness omp` then `configharness pi` enables both). Use `--remove <h>...` to disable specific harnesses or `--clear` to disable sync for every harness.
 
 Behavior:
 

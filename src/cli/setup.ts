@@ -340,7 +340,7 @@ export async function testProxy(port: number, timeoutMs = 20_000, cwd = PACKAGE_
     // Use single-command form with shell:true to avoid DEP0190 deprecation
     // (Node.js deprecates passing both shell:true and separate args)
     const configFlag = configPath ? ` --config "${configPath}"` : '';
-    const cmd = `npx tsx "${entryPoint}" --port ${port}${configFlag}`;
+    const cmd = `npx tsx "${entryPoint}" serve --port ${port}${configFlag}`;
     const child: ChildProcess = spawn(cmd, [], {
       cwd,
       stdio: ['ignore', 'pipe', 'pipe'],

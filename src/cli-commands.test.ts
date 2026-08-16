@@ -15,8 +15,10 @@ const mockLoadConfig = vi.hoisted(() => vi.fn());
 const mockSyncInAllHarnesses = vi.hoisted(() => vi.fn());
 const mockReadHarnessSettings = vi.hoisted(() => vi.fn());
 const mockWriteHarnessSettings = vi.hoisted(() => vi.fn());
-const mockParseHarnessArgs = vi.hoisted(() => vi.fn());
+const mockParseHarnessCommandArgs = vi.hoisted(() => vi.fn());
+const mockUpdateHarnessSettings = vi.hoisted(() => vi.fn());
 const mockGetModelsFromConfig = vi.hoisted(() => vi.fn());
+const mockConfigDefaultPath = vi.hoisted(() => vi.fn(() => '/mock/config.yaml'));
 const mockProbeModel = vi.hoisted(() => vi.fn());
 const mockGetCachedProbe = vi.hoisted(() => vi.fn());
 const mockSetCachedProbe = vi.hoisted(() => vi.fn());
@@ -24,6 +26,7 @@ const mockDaemonStart = vi.hoisted(() => vi.fn());
 const mockDaemonStop = vi.hoisted(() => vi.fn());
 const mockDaemonStatus = vi.hoisted(() => vi.fn());
 const mockDaemonRestart = vi.hoisted(() => vi.fn());
+const mockGetDaemonState = vi.hoisted(() => vi.fn());
 const mockSyncModels = vi.hoisted(() => vi.fn());
 const mockGetDefaultConfigPath = vi.hoisted(() => vi.fn(() => '/mock/opencode.json'));
 const mockAutostartInstall = vi.hoisted(() => vi.fn());
@@ -34,7 +37,10 @@ const mockCreateProxyApp = vi.hoisted(() => vi.fn());
 const mockStartScraper = vi.hoisted(() => vi.fn());
 const mockStopScraper = vi.hoisted(() => vi.fn());
 
-vi.mock('./config.js', () => ({ loadConfig: mockLoadConfig }));
+vi.mock('./config.js', () => ({
+  loadConfig: mockLoadConfig,
+  getDefaultConfigPath: mockConfigDefaultPath,
+}));
 vi.mock('./logger.js', () => ({
   logger: { info: vi.fn(), warn: vi.fn(), error: vi.fn() },
   maskKey: vi.fn(),
@@ -44,6 +50,7 @@ vi.mock('./cli/daemon.js', () => ({
   daemonStop: mockDaemonStop,
   daemonStatus: mockDaemonStatus,
   daemonRestart: mockDaemonRestart,
+  getDaemonState: mockGetDaemonState,
 }));
 vi.mock('./cli/opencode-config.js', () => ({
   syncModelsToOpencodeConfig: mockSyncModels,
@@ -64,7 +71,8 @@ vi.mock('./cli/harness-sync.js', () => ({
   syncModelsInAllHarnesses: mockSyncInAllHarnesses,
   readHarnessSettings: mockReadHarnessSettings,
   writeHarnessSettings: mockWriteHarnessSettings,
-  parseHarnessArgs: mockParseHarnessArgs,
+  parseHarnessCommandArgs: mockParseHarnessCommandArgs,
+  updateHarnessSettings: mockUpdateHarnessSettings,
 }));
 vi.mock('./model-probe.js', () => ({
   probeModel: mockProbeModel,
@@ -226,5 +234,182 @@ describe('CLI: restart subcommand', () => {
 
     await expect(import('./index.js')).rejects.toThrow('process.exit(0)');
     expect(mockDaemonRestart).toHaveBeenCalledWith(4000, 'my.yaml');
+  });
+});
+
+describe('CLI: configharness subcommand', () => {
+  beforeEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it('with no args — lists the current selection and exits 0', async () => {
+    process.argv = ['node', 'saros-proxy', 'configharness'];
+    vi.resetModules();
+    mockReadHarnessSettings.mockReturnValue(['omp', 'pi']);
+    mockProcessExit();
+    const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+
+    await expect(import('./index.js')).rejects.toThrow('process.exit(0)');
+    expect(logSpy).toHaveBeenCalledWith(expect.stringContaining('Enabled harnesses: omp, pi'));
+  });
+
+  it('adds harnesses and prints the new selection — exits 0', async () => {
+    process.argv = ['node', 'saros-proxy', 'configharness', 'omp', 'pi'];
+    vi.resetModules();
+    mockParseHarnessCommandArgs.mockReturnValue({
+      add: ['omp', 'pi'],
+      remove: [],
+      clear: false,
+      errors: [],
+    });
+    mockUpdateHarnessSettings.mockReturnValue(['omp', 'pi']);
+    mockProcessExit();
+    const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+
+    await expect(import('./index.js')).rejects.toThrow('process.exit(0)');
+    expect(mockParseHarnessCommandArgs).toHaveBeenCalledWith(['omp', 'pi']);
+    expect(mockUpdateHarnessSettings).toHaveBeenCalledWith({
+      add: ['omp', 'pi'],
+      remove: [],
+      clear: false,
+    });
+    expect(logSpy).toHaveBeenCalledWith(expect.stringContaining('Enabled harnesses: omp, pi'));
+  });
+
+  it('removes a harness via --remove — exits 0', async () => {
+    process.argv = ['node', 'saros-proxy', 'configharness', '--remove', 'pi'];
+    vi.resetModules();
+    mockParseHarnessCommandArgs.mockReturnValue({
+      add: [],
+      remove: ['pi'],
+      clear: false,
+      errors: [],
+    });
+    mockUpdateHarnessSettings.mockReturnValue(['omp']);
+    mockProcessExit();
+    const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+
+    await expect(import('./index.js')).rejects.toThrow('process.exit(0)');
+    expect(logSpy).toHaveBeenCalledWith(expect.stringContaining('Enabled harnesses: omp'));
+  });
+
+  it('clears the selection via --clear — exits 0', async () => {
+    process.argv = ['node', 'saros-proxy', 'configharness', '--clear'];
+    vi.resetModules();
+    mockParseHarnessCommandArgs.mockReturnValue({
+      add: [],
+      remove: [],
+      clear: true,
+      errors: [],
+    });
+    mockUpdateHarnessSettings.mockReturnValue([]);
+    mockProcessExit();
+    const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+
+    await expect(import('./index.js')).rejects.toThrow('process.exit(0)');
+    expect(mockUpdateHarnessSettings).toHaveBeenCalledWith({ add: [], remove: [], clear: true });
+    expect(logSpy).toHaveBeenCalledWith(expect.stringContaining('(none)'));
+  });
+
+  it('exits 1 on an unknown harness name', async () => {
+    process.argv = ['node', 'saros-proxy', 'configharness', 'bogus'];
+    vi.resetModules();
+    mockParseHarnessCommandArgs.mockReturnValue({
+      add: [],
+      remove: [],
+      clear: false,
+      errors: ['bogus'],
+    });
+    mockProcessExit();
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    mockUpdateHarnessSettings.mockClear();
+
+    await expect(import('./index.js')).rejects.toThrow('process.exit(1)');
+    expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining('Unknown harness'));
+    expect(mockUpdateHarnessSettings).not.toHaveBeenCalled();
+  });
+
+  it('exits 1 when --clear is combined with harness names', async () => {
+    process.argv = ['node', 'saros-proxy', 'configharness', '--clear', 'omp'];
+    vi.resetModules();
+    mockParseHarnessCommandArgs.mockReturnValue({
+      add: ['omp'],
+      remove: [],
+      clear: true,
+      errors: [],
+    });
+    mockProcessExit();
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+
+    await expect(import('./index.js')).rejects.toThrow('process.exit(1)');
+    expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining('--clear'));
+  });
+
+  it('exits 1 when --remove has no names after it', async () => {
+    process.argv = ['node', 'saros-proxy', 'configharness', '--remove'];
+    vi.resetModules();
+    mockParseHarnessCommandArgs.mockReturnValue({
+      add: [],
+      remove: [],
+      clear: false,
+      errors: [],
+    });
+    mockProcessExit();
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+
+    await expect(import('./index.js')).rejects.toThrow('process.exit(1)');
+    expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining('--remove'));
+  });
+});
+
+describe('CLI: bare invocation (overview)', () => {
+  beforeEach(() => {
+    vi.restoreAllMocks();
+  });
+
+  it('prints the overview and exits 0 without starting a server', async () => {
+    process.argv = ['node', 'saros-proxy'];
+    vi.resetModules();
+    mockGetDaemonState.mockResolvedValue({
+      running: true,
+      pid: '1234',
+      port: 3000,
+      stalePid: false,
+      health: { status: 'ok', enabledCount: 2, keyCount: 2 },
+    });
+    mockLoadConfig.mockReturnValue({
+      keys: [{ label: 'github', key: 'sk-abcdefghijklmnopqrstuvwxyz123456' }],
+    } as any);
+    mockReadHarnessSettings.mockReturnValue(['omp', 'pi']);
+    mockProcessExit();
+    const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+
+    await expect(import('./index.js')).rejects.toThrow('process.exit(0)');
+    const output = logSpy.mock.calls.map((c) => c[0] as string).join('\n');
+    expect(output).toContain('saros-proxy');
+    expect(output).toContain('✓ running');
+    expect(output).toContain('Harnesses: omp, pi');
+    expect(output).toContain('API keys:');
+    expect(mockGetDaemonState).toHaveBeenCalled();
+  });
+
+  it('shows not running when the probe finds nothing', async () => {
+    process.argv = ['node', 'saros-proxy'];
+    vi.resetModules();
+    mockGetDaemonState.mockResolvedValue({
+      running: false,
+      pid: null,
+      port: 3000,
+      stalePid: false,
+    });
+    mockLoadConfig.mockReturnValue({ keys: [] } as any);
+    mockReadHarnessSettings.mockReturnValue(['opencode']);
+    mockProcessExit();
+    const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+
+    await expect(import('./index.js')).rejects.toThrow('process.exit(0)');
+    const output = logSpy.mock.calls.map((c) => c[0] as string).join('\n');
+    expect(output).toContain('✗ not running');
+    expect(output).toContain('Harnesses: opencode');
   });
 });

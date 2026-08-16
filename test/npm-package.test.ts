@@ -224,7 +224,7 @@ describe.skipIf(SKIP_NPM_SMOKE)('Proxy Startup via npm binary', () => {
 
       // Spawn the npm-published binary via npx
       const child = spawn(
-        `npx --yes saros-proxy@${PACKAGE_VERSION} --port ${port} --config "${configPath}"`,
+        `npx --yes saros-proxy@${PACKAGE_VERSION} serve --port ${port} --config "${configPath}"`,
         [],
         {
           cwd: tempDir,

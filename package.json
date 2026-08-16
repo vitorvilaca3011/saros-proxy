@@ -1,6 +1,6 @@
 {
   "name": "saros-proxy",
-  "version": "0.7.3",
+  "version": "0.7.4",
   "description": "Saros — predictive multi-account proxy for the OpenCode-Go API. Cycles between accounts before they exhaust.",
   "type": "module",
   "bin": {
@@ -14,7 +14,7 @@
   ],
   "scripts": {
     "setup": "tsx src/cli/setup.ts",
-    "dev": "tsx src/index.ts",
+    "dev": "tsx src/index.ts serve",
     "build": "tsc",
     "lint": "tsc --noEmit",
     "prepublishOnly": "npm run build",

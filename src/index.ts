@@ -4,10 +4,10 @@
  * index.ts — Entry point for Saros.
  *
  * Usage:
- *   tsx src/index.ts
- *   tsx src/index.ts --config my-config.yaml
- *   tsx src/index.ts --port 4000 --host 0.0.0.0
- *   tsx src/index.ts setup                     # Run the interactive setup wizard
+ *   saros-proxy                       # Overview: status, harnesses, keys
+ *   saros-proxy serve [--port <p>]    # Run the proxy in the foreground
+ *   saros-proxy start [--port <p>]    # Run the proxy as a background daemon
+ *   saros-proxy setup                 # Run the interactive setup wizard
  */
 
 import { serve } from '@hono/node-server';
@@ -26,8 +26,8 @@ import { checkForUpdate } from './cli/update-check.js';
 import { getModelsFromOpencodeConfig } from './models-sync.js';
 import {
   readHarnessSettings,
-  writeHarnessSettings,
-  parseHarnessArgs,
+  parseHarnessCommandArgs,
+  updateHarnessSettings,
   syncModelsInAllHarnesses,
 } from './cli/harness-sync.js';
 import { probeModel } from './model-probe.js';
@@ -203,13 +203,21 @@ if (subcommand === 'start') {
     console.log(chalk.cyan('Enabled harnesses: ' + (cur.join(', ') || '(none)')));
     process.exit(0);
   }
-  const { ids, errors } = parseHarnessArgs(args);
+  const { add, remove, clear, errors } = parseHarnessCommandArgs(args);
   if (errors.length > 0) {
     console.error(chalk.red('Unknown harness: ' + errors.join(', ')));
     process.exit(1);
   }
-  writeHarnessSettings(ids);
-  console.log(chalk.green('Enabled harnesses: ' + ids.join(', ')));
+  if (clear && (add.length > 0 || remove.length > 0)) {
+    console.error(chalk.red('Cannot combine --clear with harness names.'));
+    process.exit(1);
+  }
+  if (args.includes('--remove') && remove.length === 0) {
+    console.error(chalk.red('Missing harness name after --remove.'));
+    process.exit(1);
+  }
+  const ids = updateHarnessSettings({ add, remove, clear });
+  console.log(chalk.green('Enabled harnesses: ' + (ids.join(', ') || '(none)')));
   process.exit(0);
 } else if (subcommand === 'probe') {
   let probeConfig: ProxyConfig;
@@ -281,9 +289,10 @@ if (subcommand === 'start') {
 
   console.log(chalk.dim(`\nSummary: ${toProbe.length + cached.length}/${modelsToProbe.length} models probed, ${cached.length} skipped (cached)`));
   process.exit(0);
-} else {
+} else if (subcommand === 'serve') {
   // -----------------------------------------------------------------------
-  // No subcommand — start proxy in foreground (original behavior)
+  // `serve` — run proxy in foreground (also what the daemon child spawns).
+  // --port/--config are picked up by loadConfig()'s CLI-arg parsing.
   // -----------------------------------------------------------------------
 
   let config: ProxyConfig;
@@ -381,4 +390,13 @@ if (subcommand === 'start') {
 
   process.on('SIGINT', () => gracefulShutdown('SIGINT'));
   process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
+} else {
+  // -----------------------------------------------------------------------
+  // No subcommand — print an overview. Bare invocation never starts a
+  // server: use `saros-proxy start` (daemon) or `saros-proxy serve`.
+  // -----------------------------------------------------------------------
+
+  const { printOverview } = await import('./cli/overview.js');
+  await printOverview();
+  process.exit(0);
 }

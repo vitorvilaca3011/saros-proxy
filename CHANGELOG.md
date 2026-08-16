@@ -7,6 +7,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.7.4] - 2026-08-16
+
+### Fixed
+
+- `saros-proxy status` no longer reports "not running" when the proxy is
+  genuinely serving but has no PID file (started manually, via autostart, or
+  in another session). It now falls back to an os-agnostic `/health` port
+  probe, and prints the enabled harnesses (`configharness` selection) so you
+  can see which harnesses the proxy is installed on.
+- `saros-proxy start` now refuses with a clear "port already in use — a proxy
+  instance appears to be running" message instead of the misleading
+  "Proxy exited shortly after starting. Check your config." when the port is
+  occupied. Child stderr is captured to `~/.config/saros/daemon.log`, and the
+  real startup failure (EADDRINUSE, invalid API keys, etc.) is surfaced when
+  a fresh instance dies.
+
+### Changed
+
+- Bare `saros-proxy` (no subcommand) no longer starts the proxy — it prints
+  an overview instead: running state (PID/port), enabled harnesses, masked
+  API keys, and config path. Starting the proxy now requires an explicit
+  `saros-proxy start` (daemon) or the new `saros-proxy serve` (foreground,
+  also what the daemon child and Docker entrypoint run). Running bare
+  previously crashed with an unhandled `EADDRINUSE` when the port was taken.
+- `configharness` is now additive: `saros-proxy configharness omp` followed by
+  `configharness pi` enables both harnesses instead of silently replacing the
+  selection with the last one. New `--remove <h>...` and `--clear` flags
+  disable harnesses. The first explicit command on a fresh install still
+  starts from exactly the set you name; the implicit `opencode` default only
+  applies while no settings file exists.
+
 ## [0.7.3] - 2026-08-15
 
 ### Fixed

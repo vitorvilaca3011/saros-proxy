@@ -72,7 +72,7 @@ function startProxyFromDist(
 ): ChildProcess {
   const entryPoint = join(cwd, 'dist', 'index.js');
   return spawn(
-    `node "${entryPoint}" --port ${port} --config "${configPath}"`,
+    `node "${entryPoint}" serve --port ${port} --config "${configPath}"`,
     [],
     {
       cwd,
