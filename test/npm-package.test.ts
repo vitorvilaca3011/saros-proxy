@@ -14,7 +14,7 @@
  */
 
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
-import { exec, execSync, spawn, execFile } from 'node:child_process';
+import { execSync, spawn, execFile } from 'node:child_process';
 import { writeFileSync, existsSync, mkdtempSync, rmSync } from 'node:fs';
 import { promisify } from 'node:util';
 import { join, sep } from 'node:path';
@@ -31,7 +31,6 @@ import type { AddressInfo } from 'node:net';
 const SKIP_NPM_SMOKE = process.env.RUN_NPM_SMOKE !== '1';
 const PACKAGE_VERSION = process.env.SAROS_PROXY_VERSION ?? '0.1.0';
 
-const execAsync = promisify(exec);
 const execFileAsync = promisify(execFile);
 
 // ---------------------------------------------------------------------------
