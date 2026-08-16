@@ -16,7 +16,8 @@ deep-research-report.md
 stderr_proto.txt
 stdout_proto.txt
 
-# Prototype (throwaway exploration)
+# Prototype (throwaway exploration) — never track experiment code
+prototype/
 
 # AI tool session artifacts
 .opencode/
