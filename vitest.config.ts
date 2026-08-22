@@ -25,8 +25,15 @@ export default defineConfig({
         'src/cli/daemon.ts',
       ],
     },
-    // Exclude compiled output to avoid running tests twice
-    exclude: ['**/node_modules/**', '**/dist/**'],
+    // Exclude compiled output to avoid running tests twice, plus the heavy
+    // process-spawning suites (run explicitly via npm scripts / CI jobs).
+    exclude: [
+      '**/node_modules/**',
+      '**/dist/**',
+      'test/install.e2e.test.ts',
+      'test/model-e2e.test.ts',
+      'test/live-model.e2e.test.ts',
+    ],
     // Use vmThreads pool: the default 'forks' pool causes the test process to
     // hang on Windows (tinypool fork workers don't shut down cleanly, keeping
     // stdio pipes open). vmThreads runs tests in a VM context backed by

@@ -1,7 +1,7 @@
 {
   "name": "saros-proxy",
   "version": "0.8.0",
-  "description": "Saros — predictive multi-account proxy for the OpenCode-Go API. Cycles between accounts before they exhaust.",
+  "description": "Saros \u2014 predictive multi-account proxy for the OpenCode-Go API. Cycles between accounts before they exhaust.",
   "type": "module",
   "bin": {
     "saros-proxy": "dist/index.js",
@@ -21,11 +21,15 @@
     "test": "vitest",
     "coverage": "vitest run --coverage",
     "test:npm": "vitest run test/npm-package.test.ts",
+    "test:live-model": "npm run build && vitest run --config vitest.e2e.config.ts test/live-model.e2e.test.ts",
     "test:source": "vitest run test/source-install.test.ts",
+    "test:install": "npm run build && vitest run --config vitest.e2e.config.ts test/install.e2e.test.ts",
+    "test:model-e2e": "npm run build && vitest run --config vitest.e2e.config.ts test/model-e2e.test.ts",
     "test:docker": "vitest run test/docker-install.test.ts",
     "docker:build": "docker compose build proxy",
     "docker:run": "docker compose up proxy",
-    "docker:test": "docker compose run --rm test"
+    "docker:test": "docker compose run --rm test",
+    "test:e2e": "npm run build && vitest run --config vitest.e2e.config.ts"
   },
   "keywords": [
     "opencode",
