@@ -110,6 +110,10 @@ export function recordModelRequest(model: string): void {
 
 /** Flush any pending write immediately (called on graceful shutdown). */
 export function flushModelStats(): void {
+  // Never overwrite accumulated history with an empty map: only flush when
+  // this process actually recorded requests (i.e. the map was loaded and
+  // has entries). A restart with zero traffic must not erase past counts.
+  if (!loaded || counters.size === 0) return;
   if (saveTimer !== undefined) {
     clearTimeout(saveTimer);
     saveTimer = undefined;

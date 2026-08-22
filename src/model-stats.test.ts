@@ -10,6 +10,7 @@ import {
   getModelStatsPath,
   recordModelRequest,
   resetModelStats,
+  flushModelStats,
 } from './model-stats.js';
 
 const savedConfigHome = process.env.XDG_CONFIG_HOME;
@@ -65,6 +66,29 @@ describe('model-stats', () => {
       // Counters survive an in-memory reset when a file exists
       resetModelStats();
       expect(getModelStats()).toEqual([{ model: 'glm-5', count: 2 }]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('flush never overwrites history when the process recorded nothing', async () => {
+    vi.useFakeTimers();
+    try {
+      // Seed history on disk
+      recordModelRequest('glm-5');
+      recordModelRequest('glm-5');
+      await vi.advanceTimersByTimeAsync(10_000);
+      const path = getModelStatsPath();
+      expect(JSON.parse(readFileSync(path, 'utf-8')).counts['glm-5']).toBe(2);
+
+      // A fresh process restarts (in-memory state reset), records nothing,
+      // and shuts down gracefully — history must survive.
+      resetModelStats();
+      flushModelStats();
+      const file = JSON.parse(readFileSync(path, 'utf-8')) as {
+        counts: Record<string, number>;
+      };
+      expect(file.counts['glm-5']).toBe(2);
     } finally {
       vi.useRealTimers();
     }
