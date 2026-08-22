@@ -631,3 +631,126 @@ describe('Failover edge cases', () => {
     expect(next!.label).toBe('gamma');
   });
 });
+
+// ---------------------------------------------------------------------------
+// Usage-Weighted Rotation
+// ---------------------------------------------------------------------------
+
+import { updateKeyUsage } from './proxy-logic.js';
+
+describe('updateKeyUsage + weighted selection', () => {
+  it('distributes requests proportionally to remaining quota (30/70 → 7/3)', () => {
+    const state = makeState();
+    // alpha: 30% used, beta: 70% used, gamma: no usage data
+    updateKeyUsage(state, new Map([['alpha', 30], ['beta', 70]]));
+
+    const counts: Record<string, number> = { alpha: 0, beta: 0, gamma: 0 };
+    for (let i = 0; i < 10; i++) {
+      const key = selectKeyForRequest(state, `req-${i}`)!;
+      completeRequest(state, `req-${i}`, true);
+      counts[key.label]++;
+    }
+    // gamma has no usage data → weighting disabled entirely (fallback RR)
+    expect(counts).toEqual({ alpha: 4, beta: 3, gamma: 3 });
+  });
+
+  it('distributes exactly 7/3 when only two keys exist', () => {
+    const state = createProxyState(
+      [{ label: 'x', key: 'sk-x' }, { label: 'y', key: 'sk-y' }],
+    );
+    updateKeyUsage(state, new Map([['x', 30], ['y', 70]]));
+
+    const counts: Record<string, number> = { x: 0, y: 0 };
+    for (let i = 0; i < 10; i++) {
+      const key = selectKeyForRequest(state, `req-${i}`)!;
+      completeRequest(state, `req-${i}`, true);
+      counts[key.label]++;
+    }
+    expect(counts).toEqual({ x: 7, y: 3 });
+  });
+
+  it('falls back to even round-robin without usage data', () => {
+    const state = createProxyState(
+      [{ label: 'x', key: 'sk-x' }, { label: 'y', key: 'sk-y' }],
+    );
+    const counts: Record<string, number> = { x: 0, y: 0 };
+    for (let i = 0; i < 10; i++) {
+      const key = selectKeyForRequest(state, `req-${i}`)!;
+      completeRequest(state, `req-${i}`, true);
+      counts[key.label]++;
+    }
+    expect(counts).toEqual({ x: 5, y: 5 });
+  });
+
+  it('falls back to even round-robin when every key is exhausted', () => {
+    const state = createProxyState(
+      [{ label: 'x', key: 'sk-x' }, { label: 'y', key: 'sk-y' }],
+    );
+    updateKeyUsage(state, new Map([['x', 100], ['y', 100]]));
+    const counts: Record<string, number> = { x: 0, y: 0 };
+    for (let i = 0; i < 10; i++) {
+      const key = selectKeyForRequest(state, `req-${i}`)!;
+      completeRequest(state, `req-${i}`, true);
+      counts[key.label]++;
+    }
+    expect(counts).toEqual({ x: 5, y: 5 });
+  });
+
+  it('adapts when usage changes between selections', () => {
+    const state = createProxyState(
+      [{ label: 'x', key: 'sk-x' }, { label: 'y', key: 'sk-y' }],
+    );
+    updateKeyUsage(state, new Map([['x', 10], ['y', 90]]));
+    const first = selectKeyForRequest(state, 'a')!;
+    completeRequest(state, 'a', true);
+    expect(first.label).toBe('x');
+
+    // y frees up, x fills up — next pick flips
+    updateKeyUsage(state, new Map([['x', 95], ['y', 10]]));
+    const second = selectKeyForRequest(state, 'b')!;
+    completeRequest(state, 'b', true);
+    expect(second.label).toBe('y');
+  });
+
+  it('never selects an exhausted key over one with remaining quota', () => {
+    const state = createProxyState(
+      [{ label: 'x', key: 'sk-x' }, { label: 'y', key: 'sk-y' }],
+    );
+    updateKeyUsage(state, new Map([['x', 100], ['y', 20]]));
+    for (let i = 0; i < 6; i++) {
+      const key = selectKeyForRequest(state, `req-${i}`)!;
+      completeRequest(state, `req-${i}`, true);
+      expect(key.label).toBe('y');
+    }
+  });
+});
+
+describe('NetworkFault handling', () => {
+  it('does not disable keys or increment failures', () => {
+    const state = makeState(1, 60_000);
+    markKeyFailed(state, 'alpha', 'NetworkFault');
+    markKeyFailed(state, 'alpha', 'NetworkFault');
+    markKeyFailed(state, 'alpha', 'NetworkFault');
+
+    const alpha = state.keys.find((k) => k.label === 'alpha')!;
+    expect(alpha.enabled).toBe(true);
+    expect(alpha.consecutiveFailures).toBe(0);
+    expect(selectKeyForRequest(state, 'req-net')!.label).toBe('alpha');
+  });
+
+  it('keeps rotating after repeated timeout storms on every key', () => {
+    const state = makeState(1, 60_000);
+    for (let i = 0; i < 20; i++) {
+      const key = selectKeyForRequest(state, `req-${i}`)!;
+      markKeyFailed(state, key.label, 'NetworkFault');
+      failoverRequest(state, `req-${i}`);
+      completeRequest(state, `req-${i}`, false);
+    }
+    for (const k of state.keys) {
+      expect(k.enabled).toBe(true);
+      expect(k.consecutiveFailures).toBe(0);
+    }
+    // Selection still works — no blackout
+    expect(selectKeyForRequest(state, 'after-storm')).not.toBeNull();
+  });
+});

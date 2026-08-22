@@ -4,7 +4,7 @@
 
 import { readFileSync, existsSync } from 'node:fs';
 import { homedir } from 'node:os';
-import { join } from 'node:path';
+import { join, dirname } from 'node:path';
 import { parse as parseYaml } from 'yaml';
 import { logger, maskKey } from './logger.js';
 import { decryptKey, isEncryptedKey } from './key-encryption.js';
@@ -42,8 +42,15 @@ interface YamlConfig {
 /**
  * Return the OS-native user config directory path for saros.
  *
- * Windows: %LOCALAPPDATA%\saros\config.yaml
- * macOS/Linux: ~/.config/saros/config.yaml (XDG)
+ * Windows: %LOCALAPPDATA%\saros\
+ * macOS/Linux: ~/.config/saros/ (XDG)
+ */
+export function getSarosDir(): string {
+  return dirname(getDefaultConfigPath());
+}
+
+/**
+ * Return the OS-native user config file path for saros.
  */
 export function getDefaultConfigPath(): string {
   const home = homedir();

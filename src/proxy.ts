@@ -31,6 +31,8 @@ import {
   RATE_LIMIT_MAX,
 } from './constants.js';
 import { getModelsList } from './models-fetcher.js';
+import { maybeRefreshUsage } from './usage-client.js';
+import { recordModelRequest } from './model-stats.js';
 
 // Augment Hono's ContextVariableMap for @hono/node-server remote address
 declare module 'hono' {
@@ -316,13 +318,15 @@ async function handleUpstreamErrorResponse(
 
 function handleNetworkError(err: unknown, ctx: RetryContext, key: KeySnapshot): AttemptResult {
   const lastError = err instanceof Error ? err : new Error(String(err));
+  // Timeouts / connection errors are shared-upstream failures, not per-key
+  // faults: penalising them disabled every key during upstream hangs and
+  // locked the proxy into "all keys unavailable" until cooldown expired.
   if (lastError instanceof TimeoutError) {
     logTimeout(ctx.requestId, key, ctx.config.requestTimeoutMs, ctx.kind);
-    markKeyFailed(ctx.state, key.label, 'ServerFault');
-    return { kind: 'retry', lastError };
+  } else {
+    logNetworkError(ctx.requestId, key, err, ctx.kind);
   }
-  logNetworkError(ctx.requestId, key, err, ctx.kind);
-  markKeyFailed(ctx.state, key.label, 'ServerFault');
+  markKeyFailed(ctx.state, key.label, 'NetworkFault');
   return { kind: 'retry', lastError };
 }
 
@@ -686,6 +690,18 @@ export function createProxyApp(config: ProxyConfig): Hono {
     // Reject requests whose actual body exceeds the limit
     if (bodyText.length > MAX_BODY_SIZE) {
       return c.json({ error: 'Request body too large', requestId }, 413);
+    }
+
+    maybeRefreshUsage(state, config);
+
+    // Track most-used models for `saros-proxy usage` (best-effort parse)
+    if (bodyText) {
+      try {
+        const model = (JSON.parse(bodyText) as { model?: unknown }).model;
+        if (typeof model === 'string' && model.length > 0) recordModelRequest(model);
+      } catch {
+        // Non-JSON body — nothing to record
+      }
     }
 
     // Check for streaming mode

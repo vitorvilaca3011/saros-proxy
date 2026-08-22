@@ -21,6 +21,14 @@ export const MAX_STREAMING_BUFFER = 10_000;
 export const MODELS_FETCH_TIMEOUT_MS = 5_000;
 export const MODELS_WARM_BUFFER_MS = 60_000;
 
+// Per-key usage tracking (upstream usage API + weighted rotation)
+export const USAGE_REFRESH_TTL_MS = 60_000; // min interval between upstream refreshes
+export const USAGE_FETCH_TIMEOUT_MS = 10_000;
+export const USAGE_PATH = '/zen/go/v1/usage';
+
+// Model request counters (persisted for `saros-proxy usage`)
+export const MODEL_STATS_SAVE_DEBOUNCE_MS = 5_000;
+
 // models.dev canonical metadata
 export const MODELS_DEV_URL = 'https://models.dev/api.json';
 export const MODELS_DEV_CACHE_TTL_MS = 5 * 60 * 1000; // 5 minutes

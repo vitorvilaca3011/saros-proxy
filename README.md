@@ -89,25 +89,28 @@ Manage multiple OpenCode-Go API keys behind a single endpoint. When one key gets
 
 ### How Request Distribution Works
 
-Here's how Saros picks which API key to use — it runs on two levels:
+Here's how Saros picks which API key to use:
 
-#### Layer 1: Round-Robin (always on)
+#### Usage-Weighted Rotation
 
-Every new request cycles to the next key in order:
+Saros polls the upstream usage API for each key (5h / weekly / monthly windows)
+and weights rotation by **remaining** quota. If key X is 30% used and key Y is
+70% used, 10 requests are distributed 7 → X and 3 → Y — proportional balancing,
+not hard cutoffs, so neither key absorbs the full load when the other runs low.
 
-```
-Request 1 → Key A
-Request 2 → Key B
-Request 3 → Key C
-Request 4 → Key A (wraps around)
-```
+- Refreshed in the background every 60s (stale data keeps working).
+- Without usage data, falls back to even round-robin.
 
-Even distribution by default. Got 2 accounts? Odd requests go to account 1, even to account 2. Simple.
+#### Circuit Breaker
+
+Keys that return auth/quota errors (`401`, quota `4xx/5xx`) enter a cooldown
+and are lazily re-enabled after it expires. Timeouts and connection errors do
+**not** disable keys — they are shared-upstream failures, so Saros keeps
+cycling instead of locking up with "all keys unavailable".
+
 #### Concurrent Request Safety
 
 Saros tracks which keys are currently in use. A key handling a streaming request won't get assigned another one until it finishes. No double-booking.
-
----
 
 ## Installation
 
@@ -404,6 +407,9 @@ saros-proxy probe [model-id]
 # Probe all models
 saros-proxy probe
 
+# Show per-key quota usage and most-used models
+saros-proxy usage
+
 # Install autostart (Windows: VBS script or Registry)
 saros-proxy autostart install [--port <port>] [--method vbs|registry|auto]
 
@@ -439,6 +445,9 @@ saros-proxy probe [model-id]
 
 # Probe all configured models
 saros-proxy probe
+
+# Show per-key quota usage and most-used models
+saros-proxy usage
 ```
 `sync-upstream` fetches the live model list from upstream and writes it to each enabled harness, with metadata from models.dev.
 It only touches `providers["saros-proxy"].models` in the target configs and skips harnesses whose config file does not exist.

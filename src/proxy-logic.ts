@@ -23,6 +23,10 @@ interface ApiKey {
   consecutiveFailures: number;
   lastUsed: number | null;
   disabledAt: number | null; // C1: timestamp when key was disabled for cooldown
+  /** Worst-window used percent (0-100) reported by the upstream usage API. */
+  usagePercent: number | null;
+  /** Smooth weighted round-robin state (nginx-style). */
+  currentWeight: number;
 }
 
 /** Read-only projection returned to callers — cannot mutate internal state. */
@@ -48,11 +52,16 @@ export interface ProxyState {
 
 /**
  * Error classification for HTTP responses.
- * - KeyFault: the API key should be penalised (invalid, revoked, rate-limited, server fault)
+ * - KeyFault: the API key should be penalised (invalid, revoked, quota exhausted)
  * - RequestFault: the request itself is bad — no key penalisation
  * - ServerFault: transient server issue — key penalised (normal circuit-breaker)
+ * - NetworkFault: timeout / connection error — no key penalisation. The
+ *   upstream base URL is shared by every key, so network-level failures are
+ *   not a per-key fault; disabling keys for them caused total-blackout
+ *   lockups ("all keys unavailable") when the upstream hung. Failover still
+ *   tries the next key for this request.
  */
-export type ErrorType = 'KeyFault' | 'RequestFault' | 'ServerFault';
+export type ErrorType = 'KeyFault' | 'RequestFault' | 'ServerFault' | 'NetworkFault';
 
 // ---------------------------------------------------------------------------
 // State Factory
@@ -73,6 +82,8 @@ export function createProxyState(
       consecutiveFailures: 0,
       lastUsed: null,
       disabledAt: null,
+      usagePercent: null,
+      currentWeight: 0,
     })),
     currentIndex: 0,
     circuitBreakerThreshold: options?.circuitBreakerThreshold ?? 3,
@@ -141,7 +152,14 @@ function buildBookedLabels(state: ProxyState): Set<string> {
  * Internal: find the next available key, skipping:
  *  - disabled / under-cooldown keys
  *  - labels in `excludeLabels`
- * Advances the round-robin index and returns a read-only snapshot.
+ *
+ * Selection strategy (smooth weighted round-robin, nginx-style):
+ *  - When usage data is known for the candidates, keys with more remaining
+ *    quota are proportionally preferred. E.g. key X at 30% used and key Y at
+ *    70% used receive ~70%/30% of requests — exact proportions over a cycle,
+ *    not random sampling.
+ *  - Without usage data (or when every candidate is exhausted), falls back to
+ *    plain round-robin ordering.
  */
 function findNextKey(
   state: ProxyState,
@@ -150,20 +168,56 @@ function findNextKey(
   const n = state.keys.length;
   if (n === 0) return null;
 
+  const candidates: ApiKey[] = [];
   for (let i = 0; i < n; i++) {
-    const idx = (state.currentIndex + i) % n;
-    const key = state.keys[idx];
-
+    const key = state.keys[(state.currentIndex + i) % n];
     if (excludeLabels.has(key.label)) continue;
     if (!isKeyAvailable(state, key)) continue;
-
-    // Advance past the selected key
-    state.currentIndex = (idx + 1) % n;
-    key.lastUsed = Date.now();
-    return toSnapshot(key);
+    candidates.push(key);
   }
+  if (candidates.length === 0) return null;
 
-  return null;
+  const picked = pickWeighted(state, candidates);
+  state.currentIndex = (state.keys.indexOf(picked) + 1) % n;
+  picked.lastUsed = Date.now();
+  return toSnapshot(picked);
+}
+
+/**
+ * Internal: smooth weighted round-robin over the candidates.
+ * Falls back to the first candidate (round-robin order) when usage data is
+ * missing for any candidate or when no candidate has remaining capacity.
+ */
+function pickWeighted(state: ProxyState, candidates: ApiKey[]): ApiKey {
+  const weighted = candidates.every((k) => k.usagePercent !== null);
+  if (!weighted) return candidates[0];
+
+  const weights = candidates.map((k) => Math.max(0, 100 - (k.usagePercent ?? 0)));
+  const totalWeight = weights.reduce((sum, w) => sum + w, 0);
+  if (totalWeight === 0) return candidates[0];
+
+  let best = candidates[0];
+  let bestWeight = -Infinity;
+  for (let i = 0; i < candidates.length; i++) {
+    candidates[i].currentWeight += weights[i];
+    if (candidates[i].currentWeight > bestWeight) {
+      bestWeight = candidates[i].currentWeight;
+      best = candidates[i];
+    }
+  }
+  best.currentWeight -= totalWeight;
+  return best;
+}
+
+/**
+ * Update per-key usage data (worst-window used percent, 0-100).
+ * Keys absent from the map keep their previous value.
+ */
+export function updateKeyUsage(state: ProxyState, usage: Map<string, number>): void {
+  for (const key of state.keys) {
+    const percent = usage.get(key.label);
+    if (typeof percent === 'number') key.usagePercent = percent;
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -274,14 +328,15 @@ export function completeRequest(
 /**
  * Mark a key as failed according to the error type (C2).
  * - KeyFault / ServerFault: penalise the key (KeyFault disables immediately)
- * - RequestFault: no penalisation (bad request, not bad key)
+ * - RequestFault / NetworkFault: no penalisation (bad request, or network
+ *   trouble that is not the key's fault)
  */
 export function markKeyFailed(
   state: ProxyState,
   keyLabel: string,
   errorType: ErrorType,
 ): void {
-  if (errorType === 'RequestFault') return;
+  if (errorType === 'RequestFault' || errorType === 'NetworkFault') return;
 
   const key = state.keys.find((k) => k.label === keyLabel);
   if (!key) return;

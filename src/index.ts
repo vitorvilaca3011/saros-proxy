@@ -19,6 +19,7 @@ import { createProxyApp } from './proxy.js';
 import { logger, maskKey } from './logger.js';
 import { FORCE_SHUTDOWN_TIMEOUT_MS } from './constants.js';
 import { daemonStart, daemonStop, daemonStatus, daemonRestart } from './cli/daemon.js';
+import { runUsageCommand } from './cli/usage.js';
 import { getDefaultOpencodeConfigPath } from './cli/opencode-config.js';
 import { autostartInstall, autostartUninstall, autostartStatus, type AutostartMethod } from './cli/autostart.js';
 import { checkForUpdate } from './cli/update-check.js';
@@ -274,9 +275,10 @@ if (subcommand === 'start') {
 
   console.log(chalk.dim(`\nSummary: ${toProbe.length + cached.length}/${modelsToProbe.length} models probed, ${cached.length} skipped (cached)`));
   process.exit(0);
+} else if (subcommand === 'usage') {
+  process.exit(await runUsageCommand());
 } else if (subcommand === 'serve') {
   // -----------------------------------------------------------------------
-  // `serve` — run proxy in foreground (also what the daemon child spawns).
   // --port/--config are picked up by loadConfig()'s CLI-arg parsing.
   // -----------------------------------------------------------------------
 
