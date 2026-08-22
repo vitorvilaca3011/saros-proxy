@@ -11,6 +11,15 @@ import { tmpdir } from 'node:os';
 import { join, sep } from 'node:path';
 import * as fs from 'node:fs';
 
+// Hermetic homedir: getModelsJsonPath() must resolve inside the per-test temp
+// dir, otherwise a real ~/.config/saros/models.json consumes queued
+// readFileSync mocks and breaks the error-path scenarios below.
+const mockHomeRef = vi.hoisted(() => ({ home: '' }));
+vi.mock('node:os', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('node:os')>();
+  return { ...actual, homedir: () => mockHomeRef.current };
+});
+
 vi.mock('node:fs', async (importOriginal) => {
   const real = await importOriginal<typeof fs>();
   return {
@@ -32,6 +41,7 @@ describe('opencode-config error paths', () => {
 
   beforeEach(() => {
     tmpDir = mkdtempSync(`${tmpdir()}${sep}opencode-config-err-`);
+    mockHomeRef.current = tmpDir;
   });
 
   afterEach(async () => {

@@ -8,7 +8,14 @@
  */
 
 import { describe, it, expect, beforeAll, afterAll, beforeEach } from 'vitest';
+
+// Isolate model-stats writes: these tests forward real HTTP requests and
+// must not pollute the user's ~/.config/saros/model-stats.json.
+process.env.XDG_CONFIG_HOME = mkdtempSync(join(tmpdir(), 'saros-e2e-'));
 import { createServer, type Server, type IncomingMessage } from 'node:http';
+import { mkdtempSync } from 'node:fs';
+import { join } from 'node:path';
+import { tmpdir } from 'node:os';
 import { serve } from '@hono/node-server';
 import type { AddressInfo } from 'node:net';
 
