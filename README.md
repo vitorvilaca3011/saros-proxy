@@ -103,21 +103,6 @@ Request 4 → Key A (wraps around)
 ```
 
 Even distribution by default. Got 2 accounts? Odd requests go to account 1, even to account 2. Simple.
-
-#### Layer 2: Usage-Based Gating (optional)
-
-If you enable dashboard scraping, Saros checks each account's quota before picking a key:
-
-- Usage **≥ threshold** (default 70%) → that key gets skipped
-- **All** keys over threshold → falls back to the lowest-usage key
-- No usage data available → pure round-robin, no change
-
-| Scenario | Behavior |
-|---|---|
-| Scraping off | Pure round-robin across all keys |
-| Scraping on + data available | Round-robin, skipping over-quota accounts |
-| Scraping on + no data | Falls back to pure round-robin |
-
 #### Concurrent Request Safety
 
 Saros tracks which keys are currently in use. A key handling a streaming request won't get assigned another one until it finishes. No double-booking.
@@ -403,9 +388,6 @@ saros-proxy status
 # Stop it
 saros-proxy stop
 
-# Sync bundled models to all enabled harnesses
-saros-proxy sync-models
-
 # Add harnesses to the model-sync selection (omp|ohmypi, pi, oc|opencode)
 saros-proxy configharness omp pi oc
 
@@ -449,9 +431,6 @@ saros-proxy configharness omp pi oc
 saros-proxy configharness --remove pi
 saros-proxy configharness --clear
 
-# Sync bundled models to all enabled harnesses
-saros-proxy sync-models
-
 # Sync the live model list from upstream into all enabled harnesses
 saros-proxy sync-upstream
 
@@ -461,10 +440,8 @@ saros-proxy probe [model-id]
 # Probe all configured models
 saros-proxy probe
 ```
-
-`sync-models` writes the bundled model definitions to each enabled harness's provider config.
 `sync-upstream` fetches the live model list from upstream and writes it to each enabled harness, with metadata from models.dev.
-Both only touch `providers["saros-proxy"].models` in the target configs and skip harnesses whose config file does not exist.
+It only touches `providers["saros-proxy"].models` in the target configs and skips harnesses whose config file does not exist.
 `probe` tests each model's liveness, reasoning, and tool-calling capabilities via the proxy.
 
 **Daemon config path:** By default the daemon looks for `config.yaml` at:

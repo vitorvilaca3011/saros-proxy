@@ -14,12 +14,8 @@ import {
   DEFAULT_UPSTREAM_URL,
   DEFAULT_CIRCUIT_BREAKER_COOLDOWN_MS,
   DEFAULT_REQUEST_TIMEOUT_MS,
-  MIN_SCRAPE_INTERVAL_MS,
-  MAX_SCRAPE_INTERVAL_MS,
-  DEFAULT_SCRAPE_INTERVAL_MS,
-  DEFAULT_USAGE_THRESHOLD,
 } from './constants.js';
-import { isValidPort, isValidHttpsUrl, isValidApiKey, isValidWorkspaceId } from './validation.js';
+import { isValidPort, isValidHttpsUrl, isValidApiKey } from './validation.js';
 
 export interface ProxyConfig {
   port: number;
@@ -30,19 +26,6 @@ export interface ProxyConfig {
   upstreamBaseUrl: string;
   requestTimeoutMs: number;
   allowedOrigins: string[];
-  scraping?: ScrapingConfig;
-}
-
-export interface ScrapingAccount {
-  workspaceId: string;
-  authCookie: string;
-}
-
-export interface ScrapingConfig {
-  enabled: boolean;
-  intervalMs: number;
-  usageThreshold: number;
-  accounts: ScrapingAccount[];
 }
 
 interface YamlConfig {
@@ -54,12 +37,6 @@ interface YamlConfig {
   requestTimeoutMs?: number;
   allowedOrigins?: string[];
   keys?: Array<{ label: string; key: string }>;
-  scraping?: {
-    enabled?: boolean;
-    intervalMs?: number;
-    usageThreshold?: number;
-    accounts?: ScrapingAccount[];
-  };
 }
 
 /**
@@ -173,7 +150,7 @@ export function validateConfig(config: Partial<ProxyConfig>): ProxyConfig {
   if (
     !Number.isInteger(circuitBreakerCooldownMs) ||
     circuitBreakerCooldownMs < 1_000 ||
-    circuitBreakerCooldownMs > MAX_SCRAPE_INTERVAL_MS
+    circuitBreakerCooldownMs > 3_600_000
   ) {
     logger.warn(
       'Invalid circuitBreakerCooldownMs %d, defaulting to %d',
@@ -204,54 +181,6 @@ export function validateConfig(config: Partial<ProxyConfig>): ProxyConfig {
     'http://127.0.0.1:*',
   ];
 
-  // --- Scraping config (optional) ---
-  let scraping: ScrapingConfig | undefined;
-  if (config.scraping) {
-    const s = config.scraping;
-
-    // enabled: default false
-    const enabled = s.enabled ?? false;
-
-    // intervalMs: default 90000, range 10000-3600000
-    let intervalMs = s.intervalMs ?? DEFAULT_SCRAPE_INTERVAL_MS;
-    if (!Number.isInteger(intervalMs) || intervalMs < MIN_SCRAPE_INTERVAL_MS || intervalMs > MAX_SCRAPE_INTERVAL_MS) {
-      logger.warn('Invalid scraping.intervalMs %d, defaulting to %d', intervalMs, DEFAULT_SCRAPE_INTERVAL_MS);
-      intervalMs = DEFAULT_SCRAPE_INTERVAL_MS;
-    }
-
-    // usageThreshold: default 50, range 1-100
-    let usageThreshold = s.usageThreshold ?? DEFAULT_USAGE_THRESHOLD;
-    if (!Number.isInteger(usageThreshold) || usageThreshold < 1 || usageThreshold > 100) {
-      logger.warn('Invalid scraping.usageThreshold %d, defaulting to %d', usageThreshold, DEFAULT_USAGE_THRESHOLD);
-      usageThreshold = DEFAULT_USAGE_THRESHOLD;
-    }
-
-    // accounts: filter invalid entries
-    const rawAccounts = Array.isArray(s.accounts) ? s.accounts : [];
-    const validAccounts = rawAccounts.filter((acc) => {
-      // null/not-object guard
-      if (!acc || typeof acc !== 'object') return false;
-      // workspaceId must match wrk_[A-Za-z0-9]+
-      if (!isValidWorkspaceId(acc.workspaceId)) {
-        logger.warn('Invalid scraping account workspaceId "%s", filtering out', acc.workspaceId);
-        return false;
-      }
-      // authCookie must not be empty
-      if (!acc.authCookie || acc.authCookie.trim() === '') {
-        logger.warn('Invalid scraping account authCookie for "%s", filtering out', acc.workspaceId);
-        return false;
-      }
-      return true;
-    });
-
-    scraping = {
-      enabled,
-      intervalMs,
-      usageThreshold,
-      accounts: validAccounts,
-    };
-  }
-
   return {
     port,
     host,
@@ -261,7 +190,6 @@ export function validateConfig(config: Partial<ProxyConfig>): ProxyConfig {
     upstreamBaseUrl,
     requestTimeoutMs,
     allowedOrigins,
-    scraping,
   };
 }
 
@@ -306,7 +234,6 @@ function getBaseConfig(): ProxyConfig {
     upstreamBaseUrl: DEFAULT_UPSTREAM_URL,
     requestTimeoutMs: DEFAULT_REQUEST_TIMEOUT_MS,
     allowedOrigins: ['http://localhost:*', 'http://127.0.0.1:*'],
-    scraping: undefined,
   };
 }
 
@@ -375,23 +302,10 @@ function applyYamlConfig(config: ProxyConfig, yaml: YamlConfig): void {
   if (yaml.requestTimeoutMs !== undefined) config.requestTimeoutMs = yaml.requestTimeoutMs;
   if (yaml.allowedOrigins !== undefined) config.allowedOrigins = yaml.allowedOrigins;
   if (yaml.keys && yaml.keys.length > 0) config.keys = yaml.keys;
-  if (yaml.scraping !== undefined) {
-    config.scraping = {
-      enabled: yaml.scraping.enabled ?? false,
-      intervalMs: yaml.scraping.intervalMs ?? DEFAULT_SCRAPE_INTERVAL_MS,
-      usageThreshold: yaml.scraping.usageThreshold ?? DEFAULT_USAGE_THRESHOLD,
-      accounts: yaml.scraping.accounts ?? [],
-    };
-  }
 }
 
 function decryptConfigSecrets(config: ProxyConfig, encryptionKey: string): void {
   config.keys = config.keys.map((k) => decryptApiKeyIfNeeded(k, encryptionKey));
-  if (config.scraping?.accounts) {
-    config.scraping.accounts = config.scraping.accounts.map((acc) =>
-      decryptAuthCookieIfNeeded(acc, encryptionKey),
-    );
-  }
 }
 
 function decryptApiKeyIfNeeded(
@@ -411,33 +325,11 @@ function decryptApiKeyIfNeeded(
   }
 }
 
-function decryptAuthCookieIfNeeded(acc: ScrapingAccount, encryptionKey: string): ScrapingAccount {
-  if (!isEncryptedKey(acc.authCookie)) return acc;
-  try {
-    return { ...acc, authCookie: decryptKey(acc.authCookie, encryptionKey) };
-  } catch (err) {
-    logger.error(
-      'Failed to decrypt authCookie for workspace "%s": %s',
-      acc.workspaceId,
-      err instanceof Error ? err.message : String(err),
-    );
-    throw new Error(`Failed to decrypt authCookie for workspace "${acc.workspaceId}" — check OPENCODE_GO_ENCRYPTION_KEY`);
-  }
-}
-
 function assertNoEncryptedSecrets(config: ProxyConfig): void {
   const encryptedKeys = config.keys.filter((k) => isEncryptedKey(k.key));
   if (encryptedKeys.length > 0) {
     throw new Error(
       `Found ${encryptedKeys.length} encrypted API key(s) but OPENCODE_GO_ENCRYPTION_KEY environment variable is not set`,
-    );
-  }
-
-  const encryptedCookies =
-    config.scraping?.accounts?.filter((acc) => isEncryptedKey(acc.authCookie)) ?? [];
-  if (encryptedCookies.length > 0) {
-    throw new Error(
-      `Found ${encryptedCookies.length} encrypted authCookie(s) but OPENCODE_GO_ENCRYPTION_KEY environment variable is not set`,
     );
   }
 }

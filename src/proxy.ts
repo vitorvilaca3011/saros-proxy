@@ -21,12 +21,9 @@ import {
   classifyHttpError,
   type ProxyState,
   type KeySnapshot,
-  type KeySelectionOptions,
-  type UsageInfo,
 } from './proxy-logic.js';
 import type { ProxyConfig } from './config.js';
 import { logger, maskKey } from './logger.js';
-import { getAllUsage, isScraperRunning } from './scraper.js';
 import {
   MAX_BODY_SIZE,
   MAX_RETRIES,
@@ -174,30 +171,6 @@ export function isStreamingRequest(bodyText: string): boolean {
   }
 }
 
-/**
- * Build usage-based key selection options from scraped data.
- * Returns undefined when no usage data is available or scraping is disabled.
- */
-function buildUsageKeyOptions(config: ProxyConfig): KeySelectionOptions | undefined {
-  const allUsage = getAllUsage();
-  if (allUsage.size === 0) return undefined;
-
-  const usageMap = new Map<string, UsageInfo>();
-  config.keys.forEach((key, i) => {
-    const account = config.scraping?.accounts?.[i];
-    if (account) {
-      const accountUsage = allUsage.get(account.workspaceId);
-      if (accountUsage) {
-        usageMap.set(key.label, accountUsage.usage);
-      }
-    }
-  });
-
-  if (usageMap.size === 0) return undefined;
-  // Caller ensures config.scraping is defined when scraping is enabled
-  return { usageMap, usageThreshold: config.scraping?.usageThreshold ?? 50 };
-}
-
 // ---------------------------------------------------------------------------
 // Upstream forwarding with failover
 // ---------------------------------------------------------------------------
@@ -221,7 +194,6 @@ interface RetryContext {
   bodyText: string;
   kind: RequestKind;
   upstreamUrl: string;
-  keyOptions: KeySelectionOptions | undefined;
   onSuccess: SuccessHandler;
 }
 
@@ -256,7 +228,6 @@ async function executeWithRetry(opts: {
     bodyText: opts.bodyText,
     kind: opts.kind,
     upstreamUrl: buildUpstreamUrl(opts.config.upstreamBaseUrl, opts.path),
-    keyOptions: opts.config.scraping?.enabled ? buildUsageKeyOptions(opts.config) : undefined,
     onSuccess: opts.onSuccess,
   };
 
@@ -298,8 +269,8 @@ async function executeSingleAttempt(attempt: number, ctx: RetryContext): Promise
 
 function pickKey(ctx: RetryContext, attempt: number): KeySnapshot | null {
   return attempt === 0
-    ? selectKeyForRequest(ctx.state, ctx.requestId, ctx.keyOptions)
-    : failoverRequest(ctx.state, ctx.requestId, ctx.keyOptions);
+        ? selectKeyForRequest(ctx.state, ctx.requestId)
+    : failoverRequest(ctx.state, ctx.requestId);
 }
 
 function buildFetchOptions(
@@ -677,24 +648,6 @@ export function createProxyApp(config: ProxyConfig): Hono {
     const disabledCount = keys.length - enabledCount;
     const activeCount = state.activeRequests.size;
 
-    // Build scraping status
-    const scrapingStatus = config.scraping?.enabled
-      ? {
-          enabled: true,
-          running: isScraperRunning(),
-          intervalMs: config.scraping.intervalMs,
-          usageThreshold: config.scraping.usageThreshold,
-          accounts: Array.from(getAllUsage().entries()).map(
-            ([workspaceId, data]) => ({
-              workspaceId,
-              usage: data.usage,
-              lastScrapedAt: data.lastScrapedAt.toISOString(),
-              lastError: data.lastError ?? null,
-            }),
-          ),
-        }
-      : { enabled: false };
-
     return c.json({
       status: 'ok',
       uptime: process.uptime(),
@@ -704,7 +657,6 @@ export function createProxyApp(config: ProxyConfig): Hono {
       activeRequests: activeCount,
       circuitBreakerThreshold: state.circuitBreakerThreshold,
       circuitBreakerCooldownMs: state.circuitBreakerCooldownMs,
-      scraping: scrapingStatus,
     });
   });
 

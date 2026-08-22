@@ -1,9 +1,6 @@
 # Saros Proxy — LLM Instructions
 
 Follow these two phases. Phase 1 gathers everything. Phase 2 executes.
-
-**Important:** Do NOT enable usage-based account switching (scraping). If the setup wizard asks about it, always answer **"n"**. Use the non-interactive setup with `--no-scraping` flag instead — agents can't extract Firefox cookies.
-
 ---
 
 ## Phase 1: Gather User Preferences
@@ -155,7 +152,6 @@ saros-proxy setup --non-interactive \
   --port {port} \
   --keys-file keys.txt \
   --encryption-key-file /tmp/encryption-key.txt \
-  --no-scraping \
   --no-smoke-test
 
 # 4. Set the env var permanently

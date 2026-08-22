@@ -34,8 +34,6 @@ const mockAutostartUninstall = vi.hoisted(() => vi.fn());
 const mockAutostartStatus = vi.hoisted(() => vi.fn());
 const mockCheckForUpdate = vi.hoisted(() => vi.fn());
 const mockCreateProxyApp = vi.hoisted(() => vi.fn());
-const mockStartScraper = vi.hoisted(() => vi.fn());
-const mockStopScraper = vi.hoisted(() => vi.fn());
 
 vi.mock('./config.js', () => ({
   loadConfig: mockLoadConfig,
@@ -83,10 +81,6 @@ vi.mock('./probe-cache.js', () => ({
 }));
 vi.mock('./proxy.js', () => ({
   createProxyApp: mockCreateProxyApp,
-}));
-vi.mock('./scraper.js', () => ({
-  startScraper: mockStartScraper,
-  stopScraper: mockStopScraper,
 }));
 
 // ---------------------------------------------------------------------------

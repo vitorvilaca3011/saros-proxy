@@ -163,15 +163,6 @@ describe('LLM Instructions Smoke Test', () => {
       ).toBe(true);
     });
 
-    it('contains scraping warning text with required phrases', () => {
-      expect(LLM_INSTRUCTIONS).toContain(
-        'Do NOT enable usage-based account switching',
-      );
-      expect(LLM_INSTRUCTIONS).toContain('always answer');
-      expect(LLM_INSTRUCTIONS).toContain('"n"');
-      expect(LLM_INSTRUCTIONS).toContain('setup wizard asks');
-    });
-
     it('each question has required fields (question, header, options)', () => {
       expect(parsedQuestions).not.toBeNull();
       for (const q of parsedQuestions!) {

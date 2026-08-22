@@ -10,17 +10,6 @@ import { loadModelsFromJson } from './cli/opencode-config.js';
 import type { ProxyConfig } from './config.js';
 import { MAX_BODY_SIZE } from './constants.js';
 
-// Mock the scraper usage store so usage-gated key selection and the health
-// endpoint can be exercised without a real scraper. Module-level mock (the
-// AGENTS.md rule): vi.mock/vi.hoisted live at the top level of the test file.
-const scraperMocks = vi.hoisted(() => ({
-  getAllUsage: vi.fn(),
-  isScraperRunning: vi.fn(),
-  clearUsageStore: vi.fn(),
-}));
-
-vi.mock('./scraper.js', () => scraperMocks);
-
 describe('buildUpstreamUrl', () => {
   it('combines base URL and path', () => {
     expect(buildUpstreamUrl('https://api.example.com', '/v1/chat')).toBe('https://api.example.com/v1/chat');
@@ -250,8 +239,6 @@ interface AppLike {
 describe('createProxyApp — standard proxy pipeline', () => {
   beforeEach(() => {
     vi.restoreAllMocks();
-    scraperMocks.getAllUsage.mockReturnValue(new Map());
-    scraperMocks.isScraperRunning.mockReturnValue(false);
     resetModelsFetcherState();
   });
 
@@ -464,8 +451,6 @@ describe('createProxyApp — standard proxy pipeline', () => {
 describe('createProxyApp — streaming pipeline', () => {
   beforeEach(() => {
     vi.restoreAllMocks();
-    scraperMocks.getAllUsage.mockReturnValue(new Map());
-    scraperMocks.isScraperRunning.mockReturnValue(false);
     resetModelsFetcherState();
   });
 
@@ -639,8 +624,6 @@ describe('createProxyApp — streaming pipeline', () => {
 describe('createProxyApp — request limits, health, CORS, rate limit keys', () => {
   beforeEach(() => {
     vi.restoreAllMocks();
-    scraperMocks.getAllUsage.mockReturnValue(new Map());
-    scraperMocks.isScraperRunning.mockReturnValue(false);
     resetModelsFetcherState();
   });
 
@@ -684,59 +667,6 @@ describe('createProxyApp — request limits, health, CORS, rate limit keys', () 
     expect(body.enabledCount).toBe(0); // threshold 1 → key disabled by the failed request
     expect(body.disabledCount).toBe(1);
     expect(body.activeRequests).toBe(0);
-    expect(body.scraping).toEqual({ enabled: false });
-  });
-
-  it('reports scraping status on /health when scraping is enabled', async () => {
-    scraperMocks.getAllUsage.mockReturnValue(
-      new Map([
-        [
-          'wrk_aaa',
-          {
-            usage: { rolling: 10, weekly: 20, monthly: 30 },
-            lastScrapedAt: new Date('2026-01-01T00:00:00.000Z'),
-            lastError: 'scrape failed',
-          },
-        ],
-        [
-          'wrk_bbb',
-          {
-            usage: { rolling: 5, weekly: null, monthly: null },
-            lastScrapedAt: new Date('2026-01-02T00:00:00.000Z'),
-          },
-        ],
-      ]),
-    );
-    scraperMocks.isScraperRunning.mockReturnValue(true);
-    const app = createProxyApp(
-      makeConfig({
-        scraping: {
-          enabled: true,
-          intervalMs: 90_000,
-          usageThreshold: 50,
-          accounts: [
-            { workspaceId: 'wrk_aaa', authCookie: 'c1' },
-            { workspaceId: 'wrk_bbb', authCookie: 'c2' },
-          ],
-        },
-      }),
-    );
-    const res = await app.request('/health');
-    const body = await res.json();
-    expect(body.scraping).toMatchObject({
-      enabled: true,
-      running: true,
-      intervalMs: 90_000,
-      usageThreshold: 50,
-    });
-    expect(body.scraping.accounts).toHaveLength(2);
-    expect(body.scraping.accounts[0]).toEqual({
-      workspaceId: 'wrk_aaa',
-      usage: { rolling: 10, weekly: 20, monthly: 30 },
-      lastScrapedAt: '2026-01-01T00:00:00.000Z',
-      lastError: 'scrape failed',
-    });
-    expect(body.scraping.accounts[1].lastError).toBeNull();
   });
 
   it('reflects allowed origins via CORS', async () => {
@@ -763,139 +693,5 @@ describe('createProxyApp — request limits, health, CORS, rate limit keys', () 
     expect(res1.status).toBe(200);
     const res2 = await app.request('/health', { headers: { 'x-real-ip': '203.0.113.10' } });
     expect(res2.status).toBe(200);
-  });
-});
-
-describe('createProxyApp — usage-gated key selection', () => {
-  beforeEach(() => {
-    vi.restoreAllMocks();
-    scraperMocks.getAllUsage.mockReturnValue(new Map());
-    scraperMocks.isScraperRunning.mockReturnValue(false);
-    resetModelsFetcherState();
-  });
-
-  const scrapingAccounts = [
-    { workspaceId: 'wrk_a', authCookie: 'c1' },
-    { workspaceId: 'wrk_b', authCookie: 'c2' },
-  ];
-
-  function usageScrapingConfig(usageThreshold: number): ProxyConfig {
-    return makeConfig({
-      scraping: { enabled: true, intervalMs: 90_000, usageThreshold, accounts: scrapingAccounts },
-    });
-  }
-
-  it('skips usage-over-threshold keys when scraping data is available', async () => {
-    scraperMocks.getAllUsage.mockReturnValue(
-      new Map([
-        ['wrk_a', { usage: { rolling: 95, weekly: 95, monthly: 95 }, lastScrapedAt: new Date() }],
-        ['wrk_b', { usage: { rolling: 10, weekly: 10, monthly: 10 }, lastScrapedAt: new Date() }],
-      ]),
-    );
-    vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response('{}', { status: 200 }));
-    const app = createProxyApp(usageScrapingConfig(50));
-    const res = await app.request('/v1/chat/completions', {
-      method: 'POST',
-      body: '{}',
-      headers: { 'content-type': 'application/json' },
-    });
-    expect(res.status).toBe(200);
-    expect(res.headers.get('X-Proxy-Key-Label')).toBe('beta');
-  });
-
-  it('uses the configured usage threshold for gating', async () => {
-    scraperMocks.getAllUsage.mockReturnValue(
-      new Map([
-        ['wrk_a', { usage: { rolling: 10, weekly: 10, monthly: 10 }, lastScrapedAt: new Date() }],
-        ['wrk_b', { usage: { rolling: 8, weekly: 8, monthly: 8 }, lastScrapedAt: new Date() }],
-      ]),
-    );
-    vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response('{}', { status: 200 }));
-    const app = createProxyApp(usageScrapingConfig(5)); // both keys over threshold 5
-    const res = await app.request('/v1/chat/completions', {
-      method: 'POST',
-      body: '{}',
-      headers: { 'content-type': 'application/json' },
-    });
-    expect(res.status).toBe(200);
-    // fallback picks the lowest-max-usage key
-    expect(res.headers.get('X-Proxy-Key-Label')).toBe('beta');
-  });
-
-  it('falls back to plain selection when no usage data exists', async () => {
-    scraperMocks.getAllUsage.mockReturnValue(new Map()); // empty usage store
-    vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response('{}', { status: 200 }));
-    const app = createProxyApp(usageScrapingConfig(50));
-    const res = await app.request('/v1/chat/completions', {
-      method: 'POST',
-      body: '{}',
-      headers: { 'content-type': 'application/json' },
-    });
-    expect(res.headers.get('X-Proxy-Key-Label')).toBe('alpha');
-  });
-
-  it('returns undefined usage options when accounts do not match usage data', async () => {
-    scraperMocks.getAllUsage.mockReturnValue(
-      new Map([
-        ['wrk_other', { usage: { rolling: 95, weekly: 95, monthly: 95 }, lastScrapedAt: new Date() }],
-      ]),
-    );
-    vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response('{}', { status: 200 }));
-    const app = createProxyApp(usageScrapingConfig(50));
-    const res = await app.request('/v1/chat/completions', {
-      method: 'POST',
-      body: '{}',
-      headers: { 'content-type': 'application/json' },
-    });
-    expect(res.headers.get('X-Proxy-Key-Label')).toBe('alpha');
-  });
-
-  it('skips keys without a matching scraping account', async () => {
-    scraperMocks.getAllUsage.mockReturnValue(
-      new Map([
-        ['wrk_a', { usage: { rolling: 95, weekly: 95, monthly: 95 }, lastScrapedAt: new Date() }],
-      ]),
-    );
-    vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response('{}', { status: 200 }));
-    const app = createProxyApp(
-      makeConfig({
-        scraping: {
-          enabled: true,
-          intervalMs: 90_000,
-          usageThreshold: 50,
-          accounts: [{ workspaceId: 'wrk_a', authCookie: 'c1' }], // only one account for two keys
-        },
-      }),
-    );
-    const res = await app.request('/v1/chat/completions', {
-      method: 'POST',
-      body: '{}',
-      headers: { 'content-type': 'application/json' },
-    });
-    // alpha (over threshold, has an account) excluded; beta has no usage entry → selected
-    expect(res.headers.get('X-Proxy-Key-Label')).toBe('beta');
-  });
-
-  it('defaults the usage threshold to 50 when not configured', async () => {
-    scraperMocks.getAllUsage.mockReturnValue(
-      new Map([
-        ['wrk_a', { usage: { rolling: 95, weekly: 95, monthly: 95 }, lastScrapedAt: new Date() }],
-        ['wrk_b', { usage: { rolling: 10, weekly: 10, monthly: 10 }, lastScrapedAt: new Date() }],
-      ]),
-    );
-    vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response('{}', { status: 200 }));
-    const app = createProxyApp(
-      makeConfig({
-        // scraping enabled but no usageThreshold → default 50 applies
-        scraping: { enabled: true, intervalMs: 90_000, accounts: scrapingAccounts },
-      }),
-    );
-    const res = await app.request('/v1/chat/completions', {
-      method: 'POST',
-      body: '{}',
-      headers: { 'content-type': 'application/json' },
-    });
-    // alpha (95) is over the default 50 → beta selected
-    expect(res.headers.get('X-Proxy-Key-Label')).toBe('beta');
   });
 });

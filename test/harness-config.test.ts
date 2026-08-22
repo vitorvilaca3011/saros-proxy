@@ -1005,12 +1005,12 @@ describe('syncModelsInAllHarnesses', () => {
     const dir = join(tmpDir, '.config', 'saros');
     mkdirSync(dir, { recursive: true });
     writeFileSync(join(dir, 'harnesses.json'), JSON.stringify({ harnesses: [] }), 'utf-8');
-    const results = await syncModelsInAllHarnesses(undefined, { offline: true });
+    const results = await syncModelsInAllHarnesses();
     expect(results).toEqual([]);
   });
 
   it('defaults to opencode when the settings file is missing', async () => {
-    const results = await syncModelsInAllHarnesses(undefined, { offline: true });
+    const results = await syncModelsInAllHarnesses();
     expect(results.map((r) => r.harness)).toEqual(['opencode']);
     // offline opencode path: config file absent under the temp HOME
     expect(results[0].result.success).toBe(false);
@@ -1036,7 +1036,7 @@ describe('syncModelsInAllHarnesses', () => {
     // Enable only pi.
     writeHarnessSettings(['pi']);
 
-    const results = await syncModelsInAllHarnesses(undefined, { offline: true });
+    const results = await syncModelsInAllHarnesses();
     expect(results.map((r) => r.harness)).toEqual(['pi']);
     expect(results[0].result.success).toBe(true);
 
@@ -1076,7 +1076,7 @@ describe('syncModelsInAllHarnesses', () => {
 
     writeHarnessSettings(['omp']);
 
-    const results = await syncModelsInAllHarnesses(undefined, { offline: true });
+    const results = await syncModelsInAllHarnesses();
     expect(results.map((r) => r.harness)).toEqual(['omp']);
     expect(results[0].result.success).toBe(true);
 

@@ -50,24 +50,22 @@ const mockState = vi.hoisted(() => ({
   //   2. text     → upstream
   //   3. text     → num accounts
   //   4. confirm  → encrypt keys (y/n)
-  //   5. confirm  → usage switching (y/n)
-  //   6. text     → acc 1 label
-  //   7. password → acc 1 api key
-  //   8. text     → acc 2 label
-  //   9. password → acc 2 api key
-  //  10. text     → opencode.json path (or Enter to skip)
-  //  11. confirm  → configure opencode.json? (y/n)
+  //   5. text     → acc 1 label
+  //   6. password → acc 1 api key
+  //   7. text     → acc 2 label
+  //   8. password → acc 2 api key
+  //   9. text     → opencode.json path (or Enter to skip)
+  //  10. confirm  → configure opencode.json? (y/n)
   baseAnswers: [
     '3001',                                           // 0. port (text)
     'https://opencode.ai',                            // 1. upstream (text)
     '2',                                              // 2. num accounts (text)
     'n',                                              // 3. encrypt? → NO (confirm)
-    'n',                                              // 4. usage switching? → NO (confirm)
-    'main',                                           // 5. acc 1 label (text)
-    'sk-valid-key-111111111111111',                   // 6. acc 1 api key (password)
-    'backup',                                         // 7. acc 2 label (text)
-    'sk-valid-key-222222222222222',                   // 8. acc 2 api key (password)
-    '',                                               // 9. opencode path → skip (text, empty)
+    'main',                                           // 4. acc 1 label (text)
+    'sk-valid-key-111111111111111',                   // 5. acc 1 api key (password)
+    'backup',                                         // 6. acc 2 label (text)
+    'sk-valid-key-222222222222222',                   // 7. acc 2 api key (password)
+    '',                                               // 8. opencode path → skip (text, empty)
   ],
   answers: [] as string[],
   idx: 0,
@@ -662,11 +660,6 @@ describe('Non-interactive Setup', () => {
     it('parses --no-encryption', () => {
       const opts = parseSetupArgs(['--non-interactive', '--no-encryption']);
       expect(opts.noEncryption).toBe(true);
-    });
-
-    it('parses --no-scraping', () => {
-      const opts = parseSetupArgs(['--non-interactive', '--no-scraping']);
-      expect(opts.noScraping).toBe(true);
     });
 
     it('parses --quiet', () => {

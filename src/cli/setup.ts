@@ -18,8 +18,6 @@ import { resolve as pathResolve, join as pathJoin, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import chalk from 'chalk';
 import { encryptKey } from '../key-encryption.js';
-import { extractFirefoxAuthCookie, extractFirefoxWorkspaceIds } from '../firefox-cookies.js';
-import { scrapeDashboard } from '../scraper.js';
 import {
   getDefaultOpencodeConfigPath,
   updateOpencodeConfig,
@@ -31,8 +29,6 @@ import {
   DEFAULT_UPSTREAM_URL,
   DEFAULT_CIRCUIT_BREAKER_COOLDOWN_MS,
   DEFAULT_REQUEST_TIMEOUT_MS,
-  DEFAULT_SCRAPE_INTERVAL_MS,
-  DEFAULT_USAGE_THRESHOLD,
 } from '../constants.js';
 import { isValidPort, isValidApiKey, isValidHttpsUrl, isValidPositiveInt } from '../validation.js';
 import { getDefaultConfigPath } from '../config.js';
@@ -65,8 +61,6 @@ export interface SetupOptions {
   encryptionKeyFile?: string;
   /** Skip encryption entirely */
   noEncryption?: boolean;
-  /** Skip scraping setup */
-  noScraping?: boolean;
   /** Skip proxy smoke test */
   noSmokeTest?: boolean;
   /** Skip opencode.json configuration */
@@ -115,9 +109,6 @@ export function parseSetupArgs(argv: string[] = process.argv.slice(2)): SetupOpt
         break;
       case '--no-encryption':
         opts.noEncryption = true;
-        break;
-      case '--no-scraping':
-        opts.noScraping = true;
         break;
       case '--no-smoke-test':
         opts.noSmokeTest = true;
@@ -271,22 +262,10 @@ function saveEnvVar(name: string, value: string): boolean {
 }
 
 // ---------------------------------------------------------------------------
-// Scraping accounts setup
-// ---------------------------------------------------------------------------
-
-function ordinal(n: number): string {
-  const s = ['th', 'st', 'nd', 'rd'];
-  const v = n % 100;
-  return n + (s[(v - 20) % 10] || s[v] || s[0] || 'th');
-}
-
 export interface SetupConfig {
   port: number;
   upstreamBaseUrl: string;
   keys: Array<{ label: string; key: string }>;
-  scrapingAccounts?: Array<{ workspaceId: string; authCookie: string }>;
-  scrapingThreshold?: number;
-  scrapingIntervalMs?: number;
 }
 
 export function generateYaml(cfg: SetupConfig, encryptionEnabled = false): string {
@@ -300,15 +279,6 @@ export function generateYaml(cfg: SetupConfig, encryptionEnabled = false): strin
     allowedOrigins: ['http://localhost:*', 'http://127.0.0.1:*'],
     keys: cfg.keys,
   };
-
-  if (cfg.scrapingAccounts && cfg.scrapingAccounts.length > 0) {
-    config.scraping = {
-      enabled: true,
-      intervalMs: cfg.scrapingIntervalMs ?? DEFAULT_SCRAPE_INTERVAL_MS,
-      usageThreshold: cfg.scrapingThreshold ?? DEFAULT_USAGE_THRESHOLD,
-      accounts: cfg.scrapingAccounts,
-    };
-  }
 
   let yaml = stringifyYaml(config);
   if (encryptionEnabled) {
@@ -485,26 +455,6 @@ interface EncryptionConfig {
   envSaved: boolean;
 }
 
-interface ScrapingConfig {
-  accounts: Array<{ workspaceId: string; authCookie: string }>;
-  threshold: number;
-  intervalMs: number;
-}
-
-interface CollectedAccounts {
-  keys: Array<{ label: string; key: string }>;
-  scrapingAccounts: Array<{ workspaceId: string; authCookie: string }> | undefined;
-}
-
-function formatUsageLine(usage: { rolling?: number | null; weekly?: number | null; monthly?: number | null } | undefined): string {
-  if (!usage) return '';
-  return [
-    usage.rolling == null ? '' : `Rolling: ${usage.rolling}%`,
-    usage.weekly == null ? '' : `Weekly: ${usage.weekly}%`,
-    usage.monthly == null ? '' : `Monthly: ${usage.monthly}%`,
-  ].filter(Boolean).join('  ');
-}
-
 async function promptServerConfig(): Promise<ServerConfig> {
   const portStr = ui.assertNotCancelled(await ui.text({
     message: 'Proxy port',
@@ -573,47 +523,11 @@ async function promptEncryption(): Promise<EncryptionConfig> {
   return { encryptionKey, envSaved };
 }
 
-async function promptScrapingConfig(): Promise<ScrapingConfig | null> {
-  const wantScraping = ui.assertNotCancelled(await ui.confirm({
-    message: 'Enable usage-based account switching?',
-    initialValue: true,
-  }));
-  if (!wantScraping) return null;
-
-  ui.step('Usage-Based Switching Config');
-
-  const thresholdStr = ui.assertNotCancelled(await ui.text({
-    message: 'Usage threshold (switch when usage exceeds this %)',
-    placeholder: '70',
-    validate: (v) => {
-      if (v && (!/^\d+$/.test(v) || Number.parseInt(v) < 1 || Number.parseInt(v) > 100))
-        return 'Enter a number between 1 and 100.';
-    },
-  }));
-  const threshold = Number.parseInt(thresholdStr || '70', 10);
-
-  const intervalStr = ui.assertNotCancelled(await ui.text({
-    message: 'Scrape interval in seconds',
-    placeholder: '90',
-    validate: (v) => {
-      if (v && (!/^\d+$/.test(v) || Number.parseInt(v) < 10))
-        return 'Enter a number of seconds (minimum 10).';
-    },
-  }));
-  const intervalMs = Number.parseInt(intervalStr || '90', 10) * 1000;
-
-  return { accounts: [], threshold, intervalMs };
-}
-
 async function collectAccountCredentials(opts: {
   numAccounts: number;
   encryptionKey: string | undefined;
-  wantScraping: boolean;
-}): Promise<CollectedAccounts> {
+}): Promise<Array<{ label: string; key: string }>> {
   const keys: Array<{ label: string; key: string }> = [];
-  const scrapingAccounts: Array<{ workspaceId: string; authCookie: string }> = [];
-  const seenCookies = new Set<string>();
-  const seenWorkspaceIds = new Set<string>();
 
   for (let i = 0; i < opts.numAccounts; i++) {
     ui.step(`Account ${i + 1} of ${opts.numAccounts}`);
@@ -623,17 +537,9 @@ async function collectAccountCredentials(opts: {
     const finalKey = opts.encryptionKey ? encryptKey(key, opts.encryptionKey) : key;
     keys.push({ label, key: finalKey });
     ui.success(`"${label}" API key configured`);
-
-    if (opts.wantScraping) {
-      const scraping = await collectScrapingCredentials(i, opts.numAccounts, opts.encryptionKey, seenCookies, seenWorkspaceIds);
-      if (scraping) scrapingAccounts.push(scraping);
-    }
   }
 
-  return {
-    keys,
-    scrapingAccounts: opts.wantScraping && scrapingAccounts.length > 0 ? scrapingAccounts : undefined,
-  };
+  return keys;
 }
 
 async function promptAccountLabel(index: number, total: number): Promise<string> {
@@ -655,163 +561,6 @@ async function promptAccountApiKey(): Promise<string> {
       if (!v || !isValidApiKey(v)) return 'API key must start with "sk-" and be at least 20 characters long.';
     },
   }));
-}
-
-async function collectScrapingCredentials(
-  index: number,
-  total: number,
-  encryptionKey: string | undefined,
-  seenCookies: Set<string>,
-  seenWorkspaceIds: Set<string>,
-): Promise<{ workspaceId: string; authCookie: string } | null> {
-  ui.info(`Log into ${index === 0 ? 'first' : ordinal(index + 1)} account in Firefox, then press Enter`);
-
-  ui.assertNotCancelled(await ui.text({
-    message: 'Press Enter when ready (log into Firefox first)',
-    placeholder: 'Press Enter to continue',
-    validate: () => undefined,
-  }));
-
-  const authCookie = await extractOrPromptAuthCookie(seenCookies);
-  const workspaceId = await selectOrPromptWorkspace(seenWorkspaceIds);
-  const validatedId = await validateAndRetry(workspaceId, authCookie);
-  if (!validatedId) return null;
-
-  seenCookies.add(authCookie);
-  seenWorkspaceIds.add(validatedId);
-  return {
-    workspaceId: validatedId,
-    authCookie: encryptionKey ? encryptKey(authCookie, encryptionKey) : authCookie,
-  };
-}
-
-async function extractOrPromptAuthCookie(seenCookies: Set<string>): Promise<string> {
-  const extractSpinner = ui.spinner();
-  extractSpinner.start('Extracting auth cookie from Firefox...');
-  const cookieResult = extractFirefoxAuthCookie();
-  if (cookieResult.cookie) {
-    extractSpinner.stop('Extracted');
-  } else {
-    extractSpinner.error('No cookie found');
-  }
-
-  let authCookie: string | null = cookieResult.cookie ?? null;
-
-  if (authCookie) {
-    ui.success('Auth cookie extracted from Firefox');
-  } else {
-    ui.warn(`Firefox extraction: ${cookieResult.error || 'No cookie found'}`);
-    authCookie = ui.assertNotCancelled(await ui.text({
-      message: 'Auth cookie value (from Firefox DevTools)',
-      validate: (v) => {
-        if (!v || v.length < 10) return 'Cookie value must be at least 10 characters.';
-      },
-    }));
-  }
-
-  if (seenCookies.has(authCookie)) {
-    ui.warn('This cookie matches a previous account. Did you log out?');
-    const retry = ui.assertNotCancelled(await ui.confirm({
-      message: 'Try again with a different account?',
-      initialValue: true,
-    }));
-    if (retry) {
-      authCookie = ui.assertNotCancelled(await ui.text({
-        message: 'Auth cookie value (from Firefox DevTools)',
-        validate: (v) => {
-          if (!v || v.length < 10) return 'Cookie value must be at least 10 characters.';
-        },
-      }));
-    }
-  }
-
-  return authCookie;
-}
-
-async function selectOrPromptWorkspace(seenWorkspaceIds: Set<string>): Promise<string> {
-  const workspaceIds = extractFirefoxWorkspaceIds();
-
-  let workspaceId: string;
-  if (workspaceIds.length === 0) {
-    workspaceId = ui.assertNotCancelled(await ui.text({
-      message: 'Workspace ID (wrk_...)',
-      validate: (v) => {
-        if (!v || !/^wrk_[A-Za-z0-9]+$/.test(v))
-          return 'Must match format: wrk_... (e.g. wrk_abc123).';
-      },
-    }));
-  } else if (workspaceIds.length === 1) {
-    workspaceId = workspaceIds[0]!;
-    ui.success(`Found workspace: ${workspaceId}`);
-  } else {
-    ui.listWorkspaces(workspaceIds);
-    const choiceStr = ui.assertNotCancelled(await ui.text({
-      message: 'Enter the number for this account',
-      placeholder: '1',
-      validate: (v) => {
-        if (v && (!/^\d+$/.test(v) || Number.parseInt(v) < 1 || Number.parseInt(v) > workspaceIds.length))
-          return `Enter a number between 1 and ${workspaceIds.length}.`;
-      },
-    }));
-    workspaceId = workspaceIds[Number.parseInt(choiceStr || '1', 10) - 1]!;
-  }
-
-  if (seenWorkspaceIds.has(workspaceId)) {
-    ui.warn('This workspace ID belongs to another account.');
-    const retry = ui.assertNotCancelled(await ui.confirm({
-      message: 'Enter a different workspace ID?',
-      initialValue: true,
-    }));
-    if (retry) {
-      workspaceId = ui.assertNotCancelled(await ui.text({
-        message: 'Workspace ID (wrk_...)',
-        validate: (v) => {
-          if (!v || !/^wrk_[A-Za-z0-9]+$/.test(v))
-            return 'Must match format: wrk_... (e.g. wrk_abc123).';
-        },
-      }));
-    }
-  }
-
-  return workspaceId;
-}
-
-async function validateAndRetry(workspaceId: string, authCookie: string): Promise<string | null> {
-  const vSpinner = ui.spinner();
-  vSpinner.start('Validating cookie against opencode.ai...');
-  const scrapeResult = await scrapeDashboard(workspaceId, authCookie);
-  if (scrapeResult.success) {
-    vSpinner.stop('Validated');
-    ui.success(`Cookie validated — ${formatUsageLine(scrapeResult.usage)}`);
-    return workspaceId;
-  }
-  vSpinner.error('Validation failed');
-
-  ui.error(`Validation failed: ${scrapeResult.error || 'Unknown error'}`);
-  const retry = ui.assertNotCancelled(await ui.confirm({
-    message: 'Try again?',
-    initialValue: true,
-  }));
-  if (!retry) return null;
-
-  const newId = ui.assertNotCancelled(await ui.text({
-    message: 'Workspace ID (wrk_...)',
-    validate: (v) => {
-      if (!v || !/^wrk_[A-Za-z0-9]+$/.test(v))
-        return 'Must match format: wrk_... (e.g. wrk_abc123).';
-    },
-  }));
-  const retrySpinner = ui.spinner();
-  retrySpinner.start(`Retrying validation with workspace ${newId}...`);
-  const retryResult = await scrapeDashboard(newId, authCookie);
-  if (retryResult.success) {
-    retrySpinner.stop('Validated');
-    ui.success(`Cookie validated — ${formatUsageLine(retryResult.usage)}`);
-    return newId;
-  }
-  retrySpinner.error('Validation failed');
-  ui.error(`Still failed: ${retryResult.error || 'Unknown'}`);
-  return null;
 }
 
 async function writeConfigFile(cfg: SetupConfig, configDir: string, encryptionEnabled: boolean): Promise<string> {
@@ -1000,25 +749,16 @@ export async function setup(configDir?: string, skipSmokeTest?: boolean): Promis
 
   const numAccounts = await promptAccountCount();
   const { encryptionKey, envSaved } = await promptEncryption();
-  const scraping = await promptScrapingConfig();
 
-  const { keys, scrapingAccounts } = await collectAccountCredentials({
+  const keys = await collectAccountCredentials({
     numAccounts,
     encryptionKey,
-    wantScraping: scraping !== null,
   });
-
-  if (encryptionKey && scrapingAccounts && scrapingAccounts.length > 0) {
-    ui.success(`${scrapingAccounts.length} cookie(s) encrypted`);
-  }
 
   const cfg: SetupConfig = {
     port,
     upstreamBaseUrl,
     keys,
-    scrapingAccounts,
-    scrapingThreshold: scraping?.threshold,
-    scrapingIntervalMs: scraping?.intervalMs,
   };
 
   const configPath = await writeConfigFile(cfg, effectiveConfigDir, encryptionKey !== undefined);
