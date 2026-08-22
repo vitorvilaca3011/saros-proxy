@@ -67,11 +67,18 @@ export function syncModelsToPiConfig(
           apiKey: 'not-used',
           compat: {
             supportsDeveloperRole: false,
-            supportsReasoningEffort: false,
             maxTokensField: 'max_tokens',
           },
         }
       : {};
+
+    // saros owns `compat.supportsReasoningEffort`: the proxy forwards
+    // reasoning_effort verbatim, and a stale `false` (pre-efforts sync
+    // default) makes the harness omit the wire parameter entirely.
+    const rawCompat =
+      existing.compat && typeof existing.compat === 'object' && !Array.isArray(existing.compat)
+        ? (existing.compat as Record<string, unknown>)
+        : {};
 
     providers[SAROS_PROVIDER_KEY] = {
       ...freshStub,
@@ -79,6 +86,11 @@ export function syncModelsToPiConfig(
       baseUrl,
       api: typeof existing.api === 'string' ? existing.api : 'openai-completions',
       models: toPiOmpModelArray(modelsMap),
+      compat: {
+        ...((freshStub as { compat?: Record<string, unknown> }).compat ?? {}),
+        ...rawCompat,
+        supportsReasoningEffort: true,
+      },
     };
     config.providers = providers;
 

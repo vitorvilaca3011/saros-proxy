@@ -5,7 +5,7 @@
  * to ensure consistent rules and reduce duplication.
  */
 
-import { API_KEY_PREFIX, MIN_KEY_LENGTH, WORKSPACE_ID_REGEX } from './constants.js';
+import { API_KEY_PREFIX, MIN_KEY_LENGTH } from './constants.js';
 
 /**
  * Check if the given value is a valid TCP port number (1–65535).
@@ -55,11 +55,4 @@ export function isValidPositiveInt(val: string, min = 1, max = 100): boolean {
   if (!/^\d+$/.test(trimmed)) return false;
   const n = Number.parseInt(trimmed, 10);
   return n >= min && n <= max;
-}
-
-/**
- * Check if the given string is a valid workspace ID (matches `wrk_[A-Za-z0-9]+`).
- */
-export function isValidWorkspaceId(id: unknown): id is string {
-  return typeof id === 'string' && WORKSPACE_ID_REGEX.test(id);
 }

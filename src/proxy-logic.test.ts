@@ -14,7 +14,6 @@ import {
   classifyHttpError,
   type ProxyState,
   type ErrorType,
-  type UsageInfo,
 } from './proxy-logic.js';
 
 // ---------------------------------------------------------------------------
@@ -592,243 +591,6 @@ describe('Edge cases', () => {
     const snapA = failoverRequest(state, 'req-A'); // gamma tried
     expect(snapA).toBeNull(); // all three keys tried by A
   });
-});
-
-describe('Usage-based key selection', () => {
-  function usage(rolling: number | null, weekly: number | null, monthly: number | null): UsageInfo {
-    return { rolling, weekly, monthly };
-  }
-
-  it('skips keys whose usage exceeds the threshold', () => {
-    const state = makeState();
-    const usageMap = new Map<string, UsageInfo>([
-      ['alpha', usage(95, 50, 50)], // over threshold on rolling
-      ['beta', usage(50, 50, 50)],  // under
-      ['gamma', usage(50, 50, 50)], // under
-    ]);
-
-    // alpha is excluded, so selection starts at beta (next in round-robin)
-    const snap = selectKeyForRequest(state, 'req-u1', {
-      usageMap,
-      usageThreshold: 80,
-    });
-    expect(snap).not.toBeNull();
-    expect(snap!.label).not.toBe('alpha');
-  });
-
-  it('skips keys when ANY window is over threshold (rolling OR weekly OR monthly)', () => {
-    const state = makeState();
-    const usageMap = new Map<string, UsageInfo>([
-      ['alpha', usage(50, 90, 50)], // weekly over
-      ['beta', usage(50, 50, 50)],
-      ['gamma', usage(50, 50, 50)],
-    ]);
-
-    const snap = selectKeyForRequest(state, 'req-u2', {
-      usageMap,
-      usageThreshold: 80,
-    });
-    expect(snap).not.toBeNull();
-    expect(snap!.label).not.toBe('alpha');
-  });
-
-  it('treats null usage as not over threshold (no data = do not block)', () => {
-    const state = makeState();
-    const usageMap = new Map<string, UsageInfo>([
-      ['alpha', usage(null, null, null)], // no data
-      ['beta', usage(85, 85, 85)],         // over
-      ['gamma', usage(85, 85, 85)],        // over
-    ]);
-
-    const snap = selectKeyForRequest(state, 'req-u3', {
-      usageMap,
-      usageThreshold: 80,
-    });
-    expect(snap).not.toBeNull();
-    expect(snap!.label).toBe('alpha');
-  });
-
-  it('falls back to the key with the lowest max usage when all are over threshold', () => {
-    const state = makeState();
-    const usageMap = new Map<string, UsageInfo>([
-      ['alpha', usage(95, 95, 95)], // max = 95
-      ['beta', usage(85, 85, 85)],  // max = 85 (lowest)
-      ['gamma', usage(90, 90, 90)], // max = 90
-    ]);
-
-    const snap = selectKeyForRequest(state, 'req-u4', {
-      usageMap,
-      usageThreshold: 80,
-    });
-    expect(snap).not.toBeNull();
-    expect(snap!.label).toBe('beta');
-  });
-
-  it('immediately returns a key with no usage data when all others are over threshold', () => {
-    const state = makeState();
-    const usageMap = new Map<string, UsageInfo>([
-      ['alpha', usage(90, 90, 90)],
-      ['beta', usage(null, null, null)], // no data — preferred
-      ['gamma', usage(90, 90, 90)],
-    ]);
-
-    const snap = selectKeyForRequest(state, 'req-u5', {
-      usageMap,
-      usageThreshold: 80,
-    });
-    expect(snap).not.toBeNull();
-    expect(snap!.label).toBe('beta');
-  });
-
-  it('uses max(rolling, weekly, monthly) for fallback comparison', () => {
-    const state = makeState();
-    const usageMap = new Map<string, UsageInfo>([
-      ['alpha', usage(50, 50, 92)], // max = 92
-      ['beta', usage(88, 50, 50)],  // max = 88 (lowest)
-      ['gamma', usage(50, 85, 50)], // max = 85 — actually lowest
-    ]);
-
-    const snap = selectKeyForRequest(state, 'req-u6', {
-      usageMap,
-      usageThreshold: 80,
-    });
-    expect(snap).not.toBeNull();
-    // gamma has the lowest max (85), but we also have to check the order
-    // alpha max=92, beta max=88, gamma max=85 — so gamma wins
-    expect(snap!.label).toBe('gamma');
-  });
-
-  it('ignores circuit-breaker-disabled keys in fallback selection', () => {
-    const state = makeState(1, 60_000);
-    // Disable beta (highest usage, but it has the most data)
-    markKeyFailed(state, 'beta', 'ServerFault');
-
-    const usageMap = new Map<string, UsageInfo>([
-      ['alpha', usage(90, 90, 90)], // over threshold, but not disabled
-      ['beta', usage(85, 85, 85)],  // lowest, but disabled by circuit breaker
-      ['gamma', usage(95, 95, 95)], // over
-    ]);
-
-    const snap = selectKeyForRequest(state, 'req-u7', {
-      usageMap,
-      usageThreshold: 80,
-    });
-    expect(snap).not.toBeNull();
-    // beta is excluded by circuit breaker, so alpha (90) wins over gamma (95)
-    expect(snap!.label).toBe('alpha');
-  });
-
-  it('returns null when all keys are both over threshold AND circuit-breaker-disabled', () => {
-    const state = makeState(1, 60_000);
-    markKeyFailed(state, 'alpha', 'ServerFault');
-    markKeyFailed(state, 'beta', 'ServerFault');
-    markKeyFailed(state, 'gamma', 'ServerFault');
-
-    const usageMap = new Map<string, UsageInfo>([
-      ['alpha', usage(90, 90, 90)],
-      ['beta', usage(85, 85, 85)],
-      ['gamma', usage(95, 95, 95)],
-    ]);
-
-    const snap = selectKeyForRequest(state, 'req-u8', {
-      usageMap,
-      usageThreshold: 80,
-    });
-    expect(snap).toBeNull();
-  });
-
-  it('behaves like plain round-robin when usageMap is empty', () => {
-    const state = makeState();
-    const usageMap = new Map<string, UsageInfo>();
-
-    const a = selectKeyForRequest(state, 'rr-u1', { usageMap, usageThreshold: 80 });
-    const b = selectKeyForRequest(state, 'rr-u2', { usageMap, usageThreshold: 80 });
-    const c = selectKeyForRequest(state, 'rr-u3', { usageMap, usageThreshold: 80 });
-
-    expect([a!.label, b!.label, c!.label].sort()).toEqual(['alpha', 'beta', 'gamma']);
-  });
-
-  it('also applies usage gating to failoverRequest', () => {
-    const state = makeState();
-    const usageMap = new Map<string, UsageInfo>([
-      ['alpha', usage(50, 50, 50)],
-      ['beta', usage(95, 95, 95)],  // over threshold
-      ['gamma', usage(50, 50, 50)],
-    ]);
-
-    selectKeyForRequest(state, 'req-fail1'); // picks alpha
-    const next = failoverRequest(state, 'req-fail1', { usageMap, usageThreshold: 80 });
-    expect(next).not.toBeNull();
-    // alpha is tried, beta is over threshold → gamma is picked
-    expect(next!.label).toBe('gamma');
-  });
-
-  it('fallback immediately returns a key absent from the usage map, even if already tried', () => {
-    // Two keys only: alpha (has usage data) and beta (NO usage-map entry at all)
-    const state = createProxyState(
-      [
-        { label: 'alpha', key: 'sk-a1' },
-        { label: 'beta', key: 'sk-b2' },
-      ],
-      { circuitBreakerThreshold: 3, circuitBreakerCooldownMs: 60_000 },
-    );
-    const usageMap = new Map<string, UsageInfo>([
-      ['alpha', usage(90, 90, 90)], // over threshold → excluded from findNextKey
-    ]);
-
-    // Tier 1: alpha is usage-excluded, so beta is picked via findNextKey
-    const first = selectKeyForRequest(state, 'req-fb', { usageMap, usageThreshold: 80 });
-    expect(first!.label).toBe('beta');
-
-    // Failover: beta is now tried AND booked → findNextKey returns null
-    // (alpha excluded by usage, beta by triedKeys).
-    // findFallbackKey iterates alpha (has usage → best so far), then beta
-    // (NO entry → the !usage branch fires and beta is returned immediately).
-    const next = failoverRequest(state, 'req-fb', { usageMap, usageThreshold: 80 });
-    expect(next).not.toBeNull();
-    expect(next!.label).toBe('beta');
-  });
-
-  it('treats a key with null windows as having usage data (not the no-entry branch)', () => {
-    const state = makeState();
-    // beta IS present in the map with all-null windows → not the !usage branch;
-    // it wins via lowest max usage (0) instead.
-    const usageMap = new Map<string, UsageInfo>([
-      ['alpha', usage(90, 90, 90)],
-      ['beta', usage(null, null, null)],
-      ['gamma', usage(80, 80, 80)],
-    ]);
-
-    const snap = selectKeyForRequest(state, 'req-fb2', { usageMap, usageThreshold: 50 });
-    // alpha/gamma excluded (over), beta under → beta picked by findNextKey
-    expect(snap!.label).toBe('beta');
-  });
-
-  it('fallback treats null usage windows as 0 when comparing max usage', () => {
-    // Two keys: alpha (over threshold, non-null windows), beta (null windows).
-    const state = createProxyState(
-      [
-        { label: 'alpha', key: 'sk-a1' },
-        { label: 'beta', key: 'sk-b2' },
-      ],
-      { circuitBreakerThreshold: 3, circuitBreakerCooldownMs: 60_000 },
-    );
-    const usageMap = new Map<string, UsageInfo>([
-      ['alpha', usage(90, 90, 90)],      // over threshold
-      ['beta', usage(null, null, null)], // in the map, but every window is null
-    ]);
-
-    // findNextKey picks beta (null windows → not usage-excluded, alpha is).
-    const first = selectKeyForRequest(state, 'req-fb3', { usageMap, usageThreshold: 80 });
-    expect(first!.label).toBe('beta');
-
-    // Failover without a circuit-breaker failure: beta is tried+booked, alpha
-    // is usage-excluded → findNextKey returns null → findFallbackKey runs.
-    // beta's null windows become 0 via `?? 0` inside Math.max() → lowest max.
-    const next = failoverRequest(state, 'req-fb3', { usageMap, usageThreshold: 80 });
-    expect(next).not.toBeNull();
-    expect(next!.label).toBe('beta');
-  });
 
   it('does not lazily re-enable a disabled key whose disabledAt was cleared', () => {
     const state = makeState(1, 60_000);
@@ -867,5 +629,128 @@ describe('Failover edge cases', () => {
     const next = failoverRequest(state, 'req-nokey2');
     // gamma is still healthy → picked
     expect(next!.label).toBe('gamma');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Usage-Weighted Rotation
+// ---------------------------------------------------------------------------
+
+import { updateKeyUsage } from './proxy-logic.js';
+
+describe('updateKeyUsage + weighted selection', () => {
+  it('distributes requests proportionally to remaining quota (30/70 → 7/3)', () => {
+    const state = makeState();
+    // alpha: 30% used, beta: 70% used, gamma: no usage data
+    updateKeyUsage(state, new Map([['alpha', 30], ['beta', 70]]));
+
+    const counts: Record<string, number> = { alpha: 0, beta: 0, gamma: 0 };
+    for (let i = 0; i < 10; i++) {
+      const key = selectKeyForRequest(state, `req-${i}`)!;
+      completeRequest(state, `req-${i}`, true);
+      counts[key.label]++;
+    }
+    // gamma has no usage data → neutral median weight, still weighted overall
+    expect(counts).toEqual({ alpha: 4, beta: 2, gamma: 4 });
+  });
+
+  it('distributes exactly 7/3 when only two keys exist', () => {
+    const state = createProxyState(
+      [{ label: 'x', key: 'sk-x' }, { label: 'y', key: 'sk-y' }],
+    );
+    updateKeyUsage(state, new Map([['x', 30], ['y', 70]]));
+
+    const counts: Record<string, number> = { x: 0, y: 0 };
+    for (let i = 0; i < 10; i++) {
+      const key = selectKeyForRequest(state, `req-${i}`)!;
+      completeRequest(state, `req-${i}`, true);
+      counts[key.label]++;
+    }
+    expect(counts).toEqual({ x: 7, y: 3 });
+  });
+
+  it('falls back to even round-robin without usage data', () => {
+    const state = createProxyState(
+      [{ label: 'x', key: 'sk-x' }, { label: 'y', key: 'sk-y' }],
+    );
+    const counts: Record<string, number> = { x: 0, y: 0 };
+    for (let i = 0; i < 10; i++) {
+      const key = selectKeyForRequest(state, `req-${i}`)!;
+      completeRequest(state, `req-${i}`, true);
+      counts[key.label]++;
+    }
+    expect(counts).toEqual({ x: 5, y: 5 });
+  });
+
+  it('falls back to even round-robin when every key is exhausted', () => {
+    const state = createProxyState(
+      [{ label: 'x', key: 'sk-x' }, { label: 'y', key: 'sk-y' }],
+    );
+    updateKeyUsage(state, new Map([['x', 100], ['y', 100]]));
+    const counts: Record<string, number> = { x: 0, y: 0 };
+    for (let i = 0; i < 10; i++) {
+      const key = selectKeyForRequest(state, `req-${i}`)!;
+      completeRequest(state, `req-${i}`, true);
+      counts[key.label]++;
+    }
+    expect(counts).toEqual({ x: 5, y: 5 });
+  });
+
+  it('adapts when usage changes between selections', () => {
+    const state = createProxyState(
+      [{ label: 'x', key: 'sk-x' }, { label: 'y', key: 'sk-y' }],
+    );
+    updateKeyUsage(state, new Map([['x', 10], ['y', 90]]));
+    const first = selectKeyForRequest(state, 'a')!;
+    completeRequest(state, 'a', true);
+    expect(first.label).toBe('x');
+
+    // y frees up, x fills up — next pick flips
+    updateKeyUsage(state, new Map([['x', 95], ['y', 10]]));
+    const second = selectKeyForRequest(state, 'b')!;
+    completeRequest(state, 'b', true);
+    expect(second.label).toBe('y');
+  });
+
+  it('never selects an exhausted key over one with remaining quota', () => {
+    const state = createProxyState(
+      [{ label: 'x', key: 'sk-x' }, { label: 'y', key: 'sk-y' }],
+    );
+    updateKeyUsage(state, new Map([['x', 100], ['y', 20]]));
+    for (let i = 0; i < 6; i++) {
+      const key = selectKeyForRequest(state, `req-${i}`)!;
+      completeRequest(state, `req-${i}`, true);
+      expect(key.label).toBe('y');
+    }
+  });
+});
+
+describe('NetworkFault handling', () => {
+  it('does not disable keys or increment failures', () => {
+    const state = makeState(1, 60_000);
+    markKeyFailed(state, 'alpha', 'NetworkFault');
+    markKeyFailed(state, 'alpha', 'NetworkFault');
+    markKeyFailed(state, 'alpha', 'NetworkFault');
+
+    const alpha = state.keys.find((k) => k.label === 'alpha')!;
+    expect(alpha.enabled).toBe(true);
+    expect(alpha.consecutiveFailures).toBe(0);
+    expect(selectKeyForRequest(state, 'req-net')!.label).toBe('alpha');
+  });
+
+  it('keeps rotating after repeated timeout storms on every key', () => {
+    const state = makeState(1, 60_000);
+    for (let i = 0; i < 20; i++) {
+      const key = selectKeyForRequest(state, `req-${i}`)!;
+      markKeyFailed(state, key.label, 'NetworkFault');
+      failoverRequest(state, `req-${i}`);
+      completeRequest(state, `req-${i}`, false);
+    }
+    for (const k of state.keys) {
+      expect(k.enabled).toBe(true);
+      expect(k.consecutiveFailures).toBe(0);
+    }
+    // Selection still works — no blackout
+    expect(selectKeyForRequest(state, 'after-storm')).not.toBeNull();
   });
 });

@@ -23,6 +23,10 @@ interface ApiKey {
   consecutiveFailures: number;
   lastUsed: number | null;
   disabledAt: number | null; // C1: timestamp when key was disabled for cooldown
+  /** Worst-window used percent (0-100) reported by the upstream usage API. */
+  usagePercent: number | null;
+  /** Smooth weighted round-robin state (nginx-style). */
+  currentWeight: number;
 }
 
 /** Read-only projection returned to callers — cannot mutate internal state. */
@@ -47,30 +51,17 @@ export interface ProxyState {
 }
 
 /**
- * Usage data for a single account, scraped from the OpenCode-Go workspace.
- * All values are percentages (0-100). null means no data for that window.
- */
-export interface UsageInfo {
-  rolling: number | null;
-  weekly: number | null;
-  monthly: number | null;
-}
-
-/**
- * Optional parameters for usage-gated key selection.
- */
-export interface KeySelectionOptions {
-  usageMap?: Map<string, UsageInfo>; // key label -> usage data
-  usageThreshold?: number; // 1-100 threshold for any usage window
-}
-
-/**
  * Error classification for HTTP responses.
- * - KeyFault: the API key should be penalised (invalid, revoked, rate-limited, server fault)
+ * - KeyFault: the API key should be penalised (invalid, revoked, quota exhausted)
  * - RequestFault: the request itself is bad — no key penalisation
  * - ServerFault: transient server issue — key penalised (normal circuit-breaker)
+ * - NetworkFault: timeout / connection error — no key penalisation. The
+ *   upstream base URL is shared by every key, so network-level failures are
+ *   not a per-key fault; disabling keys for them caused total-blackout
+ *   lockups ("all keys unavailable") when the upstream hung. Failover still
+ *   tries the next key for this request.
  */
-export type ErrorType = 'KeyFault' | 'RequestFault' | 'ServerFault';
+export type ErrorType = 'KeyFault' | 'RequestFault' | 'ServerFault' | 'NetworkFault';
 
 // ---------------------------------------------------------------------------
 // State Factory
@@ -91,6 +82,8 @@ export function createProxyState(
       consecutiveFailures: 0,
       lastUsed: null,
       disabledAt: null,
+      usagePercent: null,
+      currentWeight: 0,
     })),
     currentIndex: 0,
     circuitBreakerThreshold: options?.circuitBreakerThreshold ?? 3,
@@ -136,110 +129,6 @@ function isKeyAvailable(state: ProxyState, key: ApiKey): boolean {
 }
 
 /**
- * Check if a key is available based on usage data.
- * A key is unavailable if ANY of its usage windows >= threshold.
- *
- * @param usage - The usage data for this key's account (null = no data = available)
- * @param threshold - The usage threshold (1-100)
- * @returns true if the key is available (usage below threshold or no data)
- */
-function isKeyAvailableByUsage(
-  usage: UsageInfo | null,
-  threshold: number,
-): boolean {
-  if (usage === null) return true; // no data = don't block
-  return (
-    (usage.rolling === null || usage.rolling < threshold) &&
-    (usage.weekly === null || usage.weekly < threshold) &&
-    (usage.monthly === null || usage.monthly < threshold)
-  );
-}
-
-/**
- * Internal: when all circuit-breaker-available keys are over the usage
- * threshold, fall back to the key with the lowest maximum usage across
- * all windows. If a key has no usage data, it is preferred immediately.
- */
-function findFallbackKey(
-  state: ProxyState,
-  usageMap: Map<string, UsageInfo>,
-): KeySnapshot | null {
-  let best: ApiKey | null = null;
-  let bestMaxUsage = Infinity;
-
-  for (const key of state.keys) {
-    if (!isKeyAvailable(state, key)) continue;
-
-    const usage = usageMap.get(key.label);
-    if (!usage) {
-      // No usage data = best possible – take it immediately
-      key.lastUsed = Date.now();
-      return toSnapshot(key);
-    }
-
-    const maxUsage = Math.max(
-      usage.rolling ?? 0,
-      usage.weekly ?? 0,
-      usage.monthly ?? 0,
-    );
-    if (maxUsage < bestMaxUsage) {
-      bestMaxUsage = maxUsage;
-      best = key;
-    }
-  }
-
-  if (best) {
-    best.lastUsed = Date.now();
-    return toSnapshot(best);
-  }
-  return null;
-}
-
-/**
- * Internal: apply usage-gating to an exclusion set, then attempt to find
- * the next available key.  Falls back to findFallbackKey if all
- * circuit-breaker-available keys are over the usage threshold.
- *
- * Shared by selectKeyForRequest and failoverRequest — extracts the ~90%
- * identical usage-gating logic that was previously copy-pasted (PR-5).
- *
- * @param excludeLabels  Mutable set; usage-over-threshold labels are added.
- * @returns A key snapshot, or null if no key is available.
- */
-function selectKeyWithUsageFallback(
-  state: ProxyState,
-  excludeLabels: Set<string>,
-  options?: KeySelectionOptions,
-): KeySnapshot | null {
-  // Exclude keys whose account usage exceeds the threshold
-  if (options?.usageMap && options?.usageThreshold !== undefined) {
-    const threshold = options.usageThreshold;
-    for (const key of state.keys) {
-      const usage = options.usageMap.get(key.label) ?? null;
-      if (!isKeyAvailableByUsage(usage, threshold)) {
-        excludeLabels.add(key.label);
-      }
-    }
-  }
-
-  let snapshot = findNextKey(state, excludeLabels);
-
-  // Fallback: all circuit-breaker-available keys are over threshold
-  if (!snapshot && options?.usageMap) {
-    const fallback = findFallbackKey(state, options.usageMap);
-    if (fallback) {
-      const idx = state.keys.findIndex((k) => k.label === fallback.label);
-      if (idx !== -1) {
-        state.currentIndex = (idx + 1) % state.keys.length;
-      }
-      snapshot = fallback;
-    }
-  }
-
-  return snapshot;
-}
-
-/**
  * Internal: return the set of key labels that are currently *in use* by
  * active requests (C4 double-booking avoidance).
  *
@@ -263,7 +152,14 @@ function buildBookedLabels(state: ProxyState): Set<string> {
  * Internal: find the next available key, skipping:
  *  - disabled / under-cooldown keys
  *  - labels in `excludeLabels`
- * Advances the round-robin index and returns a read-only snapshot.
+ *
+ * Selection strategy (smooth weighted round-robin, nginx-style):
+ *  - When usage data is known for the candidates, keys with more remaining
+ *    quota are proportionally preferred. E.g. key X at 30% used and key Y at
+ *    70% used receive ~70%/30% of requests — exact proportions over a cycle,
+ *    not random sampling.
+ *  - Without usage data (or when every candidate is exhausted), falls back to
+ *    plain round-robin ordering.
  */
 function findNextKey(
   state: ProxyState,
@@ -272,20 +168,61 @@ function findNextKey(
   const n = state.keys.length;
   if (n === 0) return null;
 
+  const candidates: ApiKey[] = [];
   for (let i = 0; i < n; i++) {
-    const idx = (state.currentIndex + i) % n;
-    const key = state.keys[idx];
-
+    const key = state.keys[(state.currentIndex + i) % n];
     if (excludeLabels.has(key.label)) continue;
     if (!isKeyAvailable(state, key)) continue;
-
-    // Advance past the selected key
-    state.currentIndex = (idx + 1) % n;
-    key.lastUsed = Date.now();
-    return toSnapshot(key);
+    candidates.push(key);
   }
+  if (candidates.length === 0) return null;
 
-  return null;
+  const picked = pickWeighted(state, candidates);
+  state.currentIndex = (state.keys.indexOf(picked) + 1) % n;
+  picked.lastUsed = Date.now();
+  return toSnapshot(picked);
+}
+
+/**
+ * Internal: smooth weighted round-robin over the candidates.
+ * Falls back to the first candidate (round-robin order) when usage data is
+ * missing for any candidate or when no candidate has remaining capacity.
+ */
+function pickWeighted(state: ProxyState, candidates: ApiKey[]): ApiKey {
+  const known = candidates.filter((k) => k.usagePercent !== null);
+  if (known.length === 0) return candidates[0];
+
+  let weights = candidates.map((k) => Math.max(0, 100 - (k.usagePercent ?? 0)));
+  // Keys missing usage data get the median of the known weights — neutral,
+  // so one flaky key no longer disables weighting for the whole pool.
+  const sorted = known.map((k) => 100 - (k.usagePercent ?? 0)).sort((a, b) => a - b);
+  const median = sorted[Math.floor(sorted.length / 2)] ?? 0;
+  weights = weights.map((w, i) => (candidates[i].usagePercent === null ? median : w));
+  const totalWeight = weights.reduce((sum, w) => sum + w, 0);
+  if (totalWeight === 0) return candidates[0];
+
+  let best = candidates[0];
+  let bestWeight = -Infinity;
+  for (let i = 0; i < candidates.length; i++) {
+    candidates[i].currentWeight += weights[i];
+    if (candidates[i].currentWeight > bestWeight) {
+      bestWeight = candidates[i].currentWeight;
+      best = candidates[i];
+    }
+  }
+  best.currentWeight -= totalWeight;
+  return best;
+}
+
+/**
+ * Update per-key usage data (worst-window used percent, 0-100).
+ * Keys absent from the map keep their previous value.
+ */
+export function updateKeyUsage(state: ProxyState, usage: Map<string, number>): void {
+  for (const key of state.keys) {
+    const percent = usage.get(key.label);
+    if (typeof percent === 'number') key.usagePercent = percent;
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -301,7 +238,6 @@ function findNextKey(
 export function selectKeyForRequest(
   state: ProxyState,
   requestId: string,
-  options?: KeySelectionOptions,
 ): KeySnapshot | null {
   // If context already exists, return the already-assigned current key
   const existing = state.activeRequests.get(requestId);
@@ -320,13 +256,13 @@ export function selectKeyForRequest(
     excludeLabels.add(label);
   }
 
-  let snapshot = selectKeyWithUsageFallback(state, excludeLabels, options);
+  let snapshot = findNextKey(state, excludeLabels);
 
   // Tier 2: all healthy keys are booked — share one via round-robin.
   // Better to share a key than return 503 when concurrent requests
   // outnumber the key pool.
   if (!snapshot) {
-    snapshot = selectKeyWithUsageFallback(state, new Set(ctx.triedKeys), options);
+    snapshot = findNextKey(state, new Set(ctx.triedKeys));
   }
 
   ctx.currentKey = snapshot;
@@ -342,7 +278,6 @@ export function selectKeyForRequest(
 export function failoverRequest(
   state: ProxyState,
   requestId: string,
-  options?: KeySelectionOptions,
 ): KeySnapshot | null {
   const ctx = state.activeRequests.get(requestId);
   if (!ctx) return null;
@@ -359,13 +294,13 @@ export function failoverRequest(
     excludeLabels.add(label);
   }
 
-  let snapshot = selectKeyWithUsageFallback(state, excludeLabels, options);
+  let snapshot = findNextKey(state, excludeLabels);
 
   // Tier 2: all remaining healthy keys are booked — share one.
   // Still respects per-request triedKeys (don't re-use a key this
   // request already failed on).
   if (!snapshot) {
-    snapshot = selectKeyWithUsageFallback(state, new Set(ctx.triedKeys), options);
+    snapshot = findNextKey(state, new Set(ctx.triedKeys));
   }
 
   ctx.currentKey = snapshot;
@@ -398,14 +333,15 @@ export function completeRequest(
 /**
  * Mark a key as failed according to the error type (C2).
  * - KeyFault / ServerFault: penalise the key (KeyFault disables immediately)
- * - RequestFault: no penalisation (bad request, not bad key)
+ * - RequestFault / NetworkFault: no penalisation (bad request, or network
+ *   trouble that is not the key's fault)
  */
 export function markKeyFailed(
   state: ProxyState,
   keyLabel: string,
   errorType: ErrorType,
 ): void {
-  if (errorType === 'RequestFault') return;
+  if (errorType === 'RequestFault' || errorType === 'NetworkFault') return;
 
   const key = state.keys.find((k) => k.label === keyLabel);
   if (!key) return;

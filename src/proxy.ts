@@ -21,12 +21,9 @@ import {
   classifyHttpError,
   type ProxyState,
   type KeySnapshot,
-  type KeySelectionOptions,
-  type UsageInfo,
 } from './proxy-logic.js';
 import type { ProxyConfig } from './config.js';
 import { logger, maskKey } from './logger.js';
-import { getAllUsage, isScraperRunning } from './scraper.js';
 import {
   MAX_BODY_SIZE,
   MAX_RETRIES,
@@ -34,6 +31,8 @@ import {
   RATE_LIMIT_MAX,
 } from './constants.js';
 import { getModelsList } from './models-fetcher.js';
+import { maybeRefreshUsage } from './usage-client.js';
+import { recordModelRequest } from './model-stats.js';
 
 // Augment Hono's ContextVariableMap for @hono/node-server remote address
 declare module 'hono' {
@@ -174,28 +173,17 @@ export function isStreamingRequest(bodyText: string): boolean {
   }
 }
 
-/**
- * Build usage-based key selection options from scraped data.
- * Returns undefined when no usage data is available or scraping is disabled.
- */
-function buildUsageKeyOptions(config: ProxyConfig): KeySelectionOptions | undefined {
-  const allUsage = getAllUsage();
-  if (allUsage.size === 0) return undefined;
-
-  const usageMap = new Map<string, UsageInfo>();
-  config.keys.forEach((key, i) => {
-    const account = config.scraping?.accounts?.[i];
-    if (account) {
-      const accountUsage = allUsage.get(account.workspaceId);
-      if (accountUsage) {
-        usageMap.set(key.label, accountUsage.usage);
-      }
-    }
-  });
-
-  if (usageMap.size === 0) return undefined;
-  // Caller ensures config.scraping is defined when scraping is enabled
-  return { usageMap, usageThreshold: config.scraping?.usageThreshold ?? 50 };
+/** Single JSON parse of a request body; null on invalid/missing input. */
+function parseRequestBody(bodyText: string): Record<string, unknown> | null {
+  if (!bodyText) return null;
+  try {
+    const parsed = JSON.parse(bodyText) as unknown;
+    return parsed && typeof parsed === 'object' && !Array.isArray(parsed)
+      ? (parsed as Record<string, unknown>)
+      : null;
+  } catch {
+    return null;
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -221,7 +209,6 @@ interface RetryContext {
   bodyText: string;
   kind: RequestKind;
   upstreamUrl: string;
-  keyOptions: KeySelectionOptions | undefined;
   onSuccess: SuccessHandler;
 }
 
@@ -256,7 +243,6 @@ async function executeWithRetry(opts: {
     bodyText: opts.bodyText,
     kind: opts.kind,
     upstreamUrl: buildUpstreamUrl(opts.config.upstreamBaseUrl, opts.path),
-    keyOptions: opts.config.scraping?.enabled ? buildUsageKeyOptions(opts.config) : undefined,
     onSuccess: opts.onSuccess,
   };
 
@@ -298,8 +284,8 @@ async function executeSingleAttempt(attempt: number, ctx: RetryContext): Promise
 
 function pickKey(ctx: RetryContext, attempt: number): KeySnapshot | null {
   return attempt === 0
-    ? selectKeyForRequest(ctx.state, ctx.requestId, ctx.keyOptions)
-    : failoverRequest(ctx.state, ctx.requestId, ctx.keyOptions);
+        ? selectKeyForRequest(ctx.state, ctx.requestId)
+    : failoverRequest(ctx.state, ctx.requestId);
 }
 
 function buildFetchOptions(
@@ -345,13 +331,15 @@ async function handleUpstreamErrorResponse(
 
 function handleNetworkError(err: unknown, ctx: RetryContext, key: KeySnapshot): AttemptResult {
   const lastError = err instanceof Error ? err : new Error(String(err));
+  // Timeouts / connection errors are shared-upstream failures, not per-key
+  // faults: penalising them disabled every key during upstream hangs and
+  // locked the proxy into "all keys unavailable" until cooldown expired.
   if (lastError instanceof TimeoutError) {
     logTimeout(ctx.requestId, key, ctx.config.requestTimeoutMs, ctx.kind);
-    markKeyFailed(ctx.state, key.label, 'ServerFault');
-    return { kind: 'retry', lastError };
+  } else {
+    logNetworkError(ctx.requestId, key, err, ctx.kind);
   }
-  logNetworkError(ctx.requestId, key, err, ctx.kind);
-  markKeyFailed(ctx.state, key.label, 'ServerFault');
+  markKeyFailed(ctx.state, key.label, 'NetworkFault');
   return { kind: 'retry', lastError };
 }
 
@@ -677,24 +665,6 @@ export function createProxyApp(config: ProxyConfig): Hono {
     const disabledCount = keys.length - enabledCount;
     const activeCount = state.activeRequests.size;
 
-    // Build scraping status
-    const scrapingStatus = config.scraping?.enabled
-      ? {
-          enabled: true,
-          running: isScraperRunning(),
-          intervalMs: config.scraping.intervalMs,
-          usageThreshold: config.scraping.usageThreshold,
-          accounts: Array.from(getAllUsage().entries()).map(
-            ([workspaceId, data]) => ({
-              workspaceId,
-              usage: data.usage,
-              lastScrapedAt: data.lastScrapedAt.toISOString(),
-              lastError: data.lastError ?? null,
-            }),
-          ),
-        }
-      : { enabled: false };
-
     return c.json({
       status: 'ok',
       uptime: process.uptime(),
@@ -704,7 +674,6 @@ export function createProxyApp(config: ProxyConfig): Hono {
       activeRequests: activeCount,
       circuitBreakerThreshold: state.circuitBreakerThreshold,
       circuitBreakerCooldownMs: state.circuitBreakerCooldownMs,
-      scraping: scrapingStatus,
     });
   });
 
@@ -736,8 +705,19 @@ export function createProxyApp(config: ProxyConfig): Hono {
       return c.json({ error: 'Request body too large', requestId }, 413);
     }
 
+    maybeRefreshUsage(state, config);
+
+    // Parse once: used for both streaming detection and model tracking
+    const parsedBody = parseRequestBody(bodyText);
+
+    // Track most-used models for `saros-proxy usage` (best-effort)
+    if (parsedBody) {
+      const model = parsedBody.model;
+      if (typeof model === 'string' && model.length > 0) recordModelRequest(model);
+    }
+
     // Check for streaming mode
-    if (bodyText && isStreamingRequest(bodyText)) {
+    if (parsedBody?.stream === true) {
       logger.info({ requestId, method, path }, 'Streaming request detected');
       return handleStreamingRequest({
         state,

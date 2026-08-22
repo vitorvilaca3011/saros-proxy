@@ -72,7 +72,6 @@ vi.mock('../src/cli/ui.js', () => ({
   assertNotCancelled: vi.fn((value: unknown) => value),
   printConfigSummary: vi.fn(),
   printNextSteps: vi.fn(),
-  listWorkspaces: vi.fn(),
 }));
 
 // ---------------------------------------------------------------------------

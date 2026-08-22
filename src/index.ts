@@ -16,10 +16,11 @@ import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { loadConfig, type ProxyConfig } from './config.js';
 import { createProxyApp } from './proxy.js';
+import { flushModelStats } from './model-stats.js';
 import { logger, maskKey } from './logger.js';
-import { startScraper, stopScraper } from './scraper.js';
 import { FORCE_SHUTDOWN_TIMEOUT_MS } from './constants.js';
 import { daemonStart, daemonStop, daemonStatus, daemonRestart } from './cli/daemon.js';
+import { runUsageCommand } from './cli/usage.js';
 import { getDefaultOpencodeConfigPath } from './cli/opencode-config.js';
 import { autostartInstall, autostartUninstall, autostartStatus, type AutostartMethod } from './cli/autostart.js';
 import { checkForUpdate } from './cli/update-check.js';
@@ -103,20 +104,6 @@ if (subcommand === 'start') {
   }
   daemonRestart(port, configPath);
   // daemonRestart owns its own exit path via setTimeout -> daemonStart
-} else if (subcommand === 'sync-models') {
-  const results = await syncModelsInAllHarnesses(undefined, { offline: true });
-  if (results.length === 0) {
-    console.error(chalk.red('✗ No harnesses enabled. Run `saros-proxy configharness` first.'));
-    process.exit(1);
-  }
-  for (const r of results) {
-    if (r.result.success) {
-      console.log(chalk.green(`✓ ${r.harness} synced to ${r.result.path}`));
-    } else {
-      console.error(chalk.red(`✗ ${r.harness}: ${r.result.error}`));
-    }
-  }
-  process.exit(results.every((r) => r.result.success) ? 0 : 1);
 } else if (subcommand === 'setup') {
   const { setup } = await import('./cli/setup.js');
   const { getDefaultConfigPath } = await import('./config.js');
@@ -289,9 +276,10 @@ if (subcommand === 'start') {
 
   console.log(chalk.dim(`\nSummary: ${toProbe.length + cached.length}/${modelsToProbe.length} models probed, ${cached.length} skipped (cached)`));
   process.exit(0);
+} else if (subcommand === 'usage') {
+  process.exit(await runUsageCommand());
 } else if (subcommand === 'serve') {
   // -----------------------------------------------------------------------
-  // `serve` — run proxy in foreground (also what the daemon child spawns).
   // --port/--config are picked up by loadConfig()'s CLI-arg parsing.
   // -----------------------------------------------------------------------
 
@@ -354,12 +342,6 @@ if (subcommand === 'start') {
       logger.info('Proxy listening on http://%s:%d', info.address, info.port);
       logger.info('Upstream: %s', config.upstreamBaseUrl);
       logger.info('API keys loaded: %d', config.keys.length);
-
-      if (config.scraping?.enabled && config.scraping.accounts.length > 0) {
-        startScraper(config.scraping.accounts, config.scraping.intervalMs);
-      } else {
-        logger.info('Usage-based scraping disabled (not configured or no accounts)');
-      }
     },
   );
 
@@ -374,9 +356,8 @@ if (subcommand === 'start') {
     isShuttingDown = true;
 
     logger.info('Received %s, starting graceful shutdown...', signal);
-
-    stopScraper();
-
+    // Persist model counters that are still sitting in the debounce window
+    flushModelStats();
     server.close(() => {
       logger.info('Server closed');
       process.exit(0);

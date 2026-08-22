@@ -79,15 +79,6 @@ export function printConfigSummary(
     }
   }
 
-  if (cfg.scrapingAccounts && cfg.scrapingAccounts.length > 0) {
-    lines.push(
-      '',
-      `${chalk.dim('Scraping accounts:')} ${cfg.scrapingAccounts.length}`,
-      `${chalk.dim('Usage threshold:')}  ${cfg.scrapingThreshold ?? 50}%`,
-      `${chalk.dim('Check interval:')}   ${((cfg.scrapingIntervalMs ?? 90_000) / 1000)}s`,
-    );
-  }
-
   note(lines.join('\n'), 'Configuration Summary');
 
   if (encryptionEnabled && !envSaved) {
@@ -117,21 +108,6 @@ export function printNextSteps(port: number): void {
   log.step('Manage');
   console.log(`  ${bullet} Re-run setup anytime: ${chalk.dim('$ npm run setup')}`);
   console.log(`  ${bullet} Edit config.yaml directly (circuit breaker, CORS, timeouts)`);
-}
-
-// ---------------------------------------------------------------------------
-// Workspace list
-// ---------------------------------------------------------------------------
-
-export function listWorkspaces(workspaceIds: string[]): void {
-  info('Workspaces found in Firefox history:');
-  for (let w = 0; w < workspaceIds.length; w++) {
-    const number = `${w + 1})`;
-    const ws = workspaceIds[w]!;
-    const url = `https://opencode.ai/workspace/${ws}/go`;
-    console.log(`  ${chalk.cyan(number)} ${ws}`);
-    console.log(`     ${chalk.dim(url)}`);
-  }
 }
 
 // ---------------------------------------------------------------------------

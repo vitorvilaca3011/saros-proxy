@@ -331,7 +331,8 @@ describe('Account Switching', () => {
       }
 
       // Verify upstream request log shows alternating auth headers
-      const log = mockControl.getRequestLog();
+      // (usage-refresh probes are filtered out — they are background traffic)
+      const log = mockControl.getRequestLog().filter((e) => !e.url.includes('/usage'));
       expect(log.length).toBe(4);
       expect(log[0].auth).toBe('Bearer sk-e2e-test-1111111111111111');
       expect(log[1].auth).toBe('Bearer sk-e2e-test-2222222222222222');
@@ -484,7 +485,7 @@ describe('Account Switching', () => {
         expect(res.headers.get('X-Proxy-Request-Id')).toBeTruthy();
 
         // Verify upstream log shows 2 entries with different auth headers
-        const log = mockControl.getRequestLog();
+        const log = mockControl.getRequestLog().filter((e) => !e.url.includes('/usage'));
         expect(log.length).toBe(2);
         expect(log[0].auth).not.toBe(log[1].auth);
       });

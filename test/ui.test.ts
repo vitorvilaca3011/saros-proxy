@@ -40,7 +40,6 @@ import {
   panel,
   printConfigSummary,
   printNextSteps,
-  listWorkspaces,
   assertNotCancelled,
 } from '../src/cli/ui.js';
 
@@ -106,7 +105,7 @@ describe('ui.ts', () => {
       keys: [{ label: 'key-1', key: 'sk-test12345678901234567890' }],
     };
 
-    it('prints basic config without encryption or scraping', () => {
+    it('prints basic config without encryption', () => {
       printConfigSummary(baseConfig, false, false);
       expect(mockNote).toHaveBeenCalledTimes(1);
       const content = mockNote.mock.calls[0][0] as string;
@@ -114,7 +113,6 @@ describe('ui.ts', () => {
       expect(content).toContain('https://api.opencode.ai');
       expect(content).toContain('key-1');
       expect(content).not.toContain('Encryption');
-      expect(content).not.toContain('Scraping');
     });
 
     it('prints encryption line when encryptionEnabled=true', () => {
@@ -136,35 +134,6 @@ describe('ui.ts', () => {
       printConfigSummary(baseConfig, true, true);
       expect(mockLog.warn).not.toHaveBeenCalledWith('Your API keys are encrypted.');
     });
-
-    it('prints scraping accounts when present', () => {
-      const configWithScraping: SetupConfig = {
-        ...baseConfig,
-        scrapingAccounts: [
-          { workspaceId: 'wrk_abc123', authCookie: 'cookie1' },
-        ],
-        scrapingThreshold: 75,
-        scrapingIntervalMs: 120_000,
-      };
-      printConfigSummary(configWithScraping, false, false);
-      const content = mockNote.mock.calls[0][0] as string;
-      expect(content).toContain('Scraping accounts');
-      expect(content).toContain('75%');
-      expect(content).toContain('120s');
-    });
-
-    it('uses defaults for scraping when not specified', () => {
-      const configWithScraping: SetupConfig = {
-        ...baseConfig,
-        scrapingAccounts: [
-          { workspaceId: 'wrk_abc123', authCookie: 'cookie1' },
-        ],
-      };
-      printConfigSummary(configWithScraping, false, false);
-      const content = mockNote.mock.calls[0][0] as string;
-      expect(content).toContain('50%');
-      expect(content).toContain('90s');
-    });
   });
 
   describe('printNextSteps', () => {
@@ -176,19 +145,6 @@ describe('ui.ts', () => {
       expect(output).toContain('npm run dev');
       expect(output).toContain('/health');
       expect(output).toContain('saros-proxy');
-    });
-  });
-
-  describe('listWorkspaces', () => {
-    it('prints workspace list with URLs', () => {
-      listWorkspaces(['wrk_abc123', 'wrk_def456']);
-      expect(mockLog.info).toHaveBeenCalledWith(
-        expect.stringContaining('Workspaces found')
-      );
-      const output = consoleSpy.mock.calls.map((c: unknown[]) => String(c[0])).join('\n');
-      expect(output).toContain('wrk_abc123');
-      expect(output).toContain('wrk_def456');
-      expect(output).toContain('https://opencode.ai/workspace/wrk_abc123/go');
     });
   });
 

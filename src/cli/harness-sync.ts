@@ -144,13 +144,11 @@ export function updateHarnessSettings(op: Omit<HarnessCommandArgs, 'errors'>): H
  * Sync models to every enabled harness (opt-in via the settings file).
  *
  * @param config — Proxy config; required for the live (upstream) opencode
- *   sync. When undefined, opencode falls back to the bundled fast-path.
- * @param opts.offline — Skip network: use bundled models.json everywhere.
+ *   sync. When undefined, harnesses fall back to the bundled model list.
  * @returns One result per enabled harness, in the order opencode, pi, omp.
  */
 export async function syncModelsInAllHarnesses(
   config?: ProxyConfig,
-  opts: { offline?: boolean } = {},
 ): Promise<HarnessSyncResult[]> {
   const enabled = readHarnessSettings();
   if (enabled.length === 0) return [];
@@ -158,7 +156,7 @@ export async function syncModelsInAllHarnesses(
   const results: HarnessSyncResult[] = [];
 
   if (enabled.includes('opencode')) {
-    if (opts.offline || !config) {
+    if (!config) {
       results.push({ harness: 'opencode', result: syncModelsToOpencodeConfig() });
     } else {
       results.push({ harness: 'opencode', result: await syncOpencodeModelsWithUpstream(config) });
@@ -166,7 +164,7 @@ export async function syncModelsInAllHarnesses(
   }
 
   if (enabled.includes('pi') || enabled.includes('omp')) {
-    const modelsMap = await buildCanonicalModels(config, opts);
+    const modelsMap = await buildCanonicalModels(config);
     const port = config?.port ?? 3000;
 
     if (enabled.includes('pi')) {
