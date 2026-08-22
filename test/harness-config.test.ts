@@ -263,6 +263,50 @@ describe('toPiOmpModel transform', () => {
     });
     expect(result.cost).toEqual({ input: 1, output: 2, cacheRead: 0, cacheWrite: 0 });
   });
+
+  it('maps models.dev reasoning_options to explicit thinking efforts (ox-alpha-free contract)', () => {
+    const result = toPiOmpModel({
+      id: 'ox-alpha-free',
+      name: 'Ox Alpha Free (Unlimited)',
+      reasoning: true,
+      limit: { context: 1000000, output: 131072 },
+      reasoning_options: [{ type: 'effort', values: ['low', 'high', 'max'] }],
+    });
+    expect(result.thinking).toEqual({ mode: 'effort', efforts: ['low', 'high', 'max'] });
+  });
+
+  it('filters unknown efforts, deduplicates, and orders least → most intensive', () => {
+    const result = toPiOmpModel({
+      id: 'm',
+      reasoning: true,
+      reasoning_options: [
+        { type: 'effort', values: ['xhigh', 'bogus', 'minimal', 'high'] },
+        { type: 'effort', values: ['high', 'low'] },
+        { type: 'temperature', values: ['hot'] },
+      ],
+    });
+    expect(result.thinking).toEqual({ mode: 'effort', efforts: ['minimal', 'low', 'high', 'xhigh'] });
+  });
+
+  it('omits thinking when reasoning_options are absent, empty, or all-unknown', () => {
+    expect(toPiOmpModel({ id: 'm', reasoning: true }).thinking).toBeUndefined();
+    expect(
+      toPiOmpModel({ id: 'm', reasoning: true, reasoning_options: [] }).thinking,
+    ).toBeUndefined();
+    expect(
+      toPiOmpModel({ id: 'm', reasoning: true, reasoning_options: [{ type: 'effort', values: ['bogus'] }] })
+        .thinking,
+    ).toBeUndefined();
+  });
+
+  it('omits thinking for non-reasoning models even with reasoning_options', () => {
+    const result = toPiOmpModel({
+      id: 'm',
+      reasoning: false,
+      reasoning_options: [{ type: 'effort', values: ['low', 'high'] }],
+    });
+    expect(result.thinking).toBeUndefined();
+  });
 });
 
 describe('buildCanonicalModels', () => {
@@ -390,7 +434,11 @@ describe('syncModelsToPiConfig (JSON)', () => {
     ] as Record<string, unknown>);
     const { models: _origModels, ...origSarosRest } = origSaros;
     const { models: _newModels, ...sarosRest } = saros;
-    expect(sarosRest).toEqual(origSarosRest);
+    expect(sarosRest).toEqual({
+      ...origSarosRest,
+      // saros owns this flag; a stale `false` is migrated on sync
+      compat: { ...(origSarosRest.compat as Record<string, unknown>), supportsReasoningEffort: true },
+    });
     expect(saros.models).toEqual(EXPECTED_PI_OMP_MODELS);
   });
 
@@ -453,7 +501,7 @@ describe('syncModelsToPiConfig (JSON)', () => {
     expect(saros.api).toBe('openai-completions');
     expect(saros.compat).toEqual({
       supportsDeveloperRole: false,
-      supportsReasoningEffort: false,
+      supportsReasoningEffort: true,
       maxTokensField: 'max_tokens',
     });
   });
@@ -543,6 +591,39 @@ describe('syncModelsToPiConfig (JSON)', () => {
     const updated = JSON.parse(readFileSync(piPath, 'utf-8')) as Record<string, unknown>;
     expect((updated.providers as Record<string, unknown>)['saros-proxy']).toBeDefined();
   });
+
+  it('writes explicit thinking efforts and forces supportsReasoningEffort on stale configs', () => {
+    const modelsMap = {
+      'ox-alpha-free': {
+        id: 'ox-alpha-free',
+        name: 'Ox Alpha Free (Unlimited)',
+        reasoning: true,
+        limit: { context: 1000000, output: 131072 },
+        reasoning_options: [{ type: 'effort', values: ['low', 'high', 'max'] }],
+      },
+    };
+    writeFileSync(piPath, JSON.stringify(richPiFixture(), null, 2), 'utf-8');
+
+    const result = syncModelsToPiConfig(modelsMap, 3000, { configPath: piPath });
+    expect(result.success).toBe(true);
+
+    const updated = JSON.parse(readFileSync(piPath, 'utf-8')) as Record<string, unknown>;
+    const saros = (updated.providers as Record<string, unknown>)[
+      'saros-proxy'
+    ] as Record<string, unknown>;
+    expect(saros.models).toEqual([
+      {
+        id: 'ox-alpha-free',
+        name: 'Ox Alpha Free (Unlimited)',
+        reasoning: true,
+        input: ['text'],
+        contextWindow: 1000000,
+        maxTokens: 131072,
+        thinking: { mode: 'effort', efforts: ['low', 'high', 'max'] },
+      },
+    ]);
+    expect((saros.compat as Record<string, unknown>).supportsReasoningEffort).toBe(true);
+  });
 });
 
 describe('syncModelsToOmpConfig (YAML)', () => {
@@ -585,7 +666,11 @@ describe('syncModelsToOmpConfig (YAML)', () => {
     ] as Record<string, unknown>);
     const { models: _origModels, ...origSarosRest } = origSaros;
     const { models: _newModels, ...sarosRest } = saros;
-    expect(sarosRest).toEqual(origSarosRest);
+    expect(sarosRest).toEqual({
+      ...origSarosRest,
+      // saros owns this flag; a stale `false` is migrated on sync
+      compat: { ...(origSarosRest.compat as Record<string, unknown>), supportsReasoningEffort: true },
+    });
     expect(saros.models).toEqual(EXPECTED_PI_OMP_MODELS);
   });
 
@@ -714,6 +799,39 @@ describe('syncModelsToOmpConfig (YAML)', () => {
     const result = syncModelsToOmpConfig(TEST_MODELS_MAP, 3000, { configPath: ompPath });
     expect(result.success).toBe(false);
     expect(result.error).toBe('disk on fire');
+  });
+
+  it('writes explicit thinking efforts and forces supportsReasoningEffort on stale configs', () => {
+    const modelsMap = {
+      'ox-alpha-free': {
+        id: 'ox-alpha-free',
+        name: 'Ox Alpha Free (Unlimited)',
+        reasoning: true,
+        limit: { context: 1000000, output: 131072 },
+        reasoning_options: [{ type: 'effort', values: ['low', 'high', 'max'] }],
+      },
+    };
+    writeFileSync(ompPath, stringifyYaml(richOmpFixture()), 'utf-8');
+
+    const result = syncModelsToOmpConfig(modelsMap, 3000, { configPath: ompPath });
+    expect(result.success).toBe(true);
+
+    const updated = parseYaml(readFileSync(ompPath, 'utf-8')) as Record<string, unknown>;
+    const saros = (updated.providers as Record<string, unknown>)[
+      'saros-proxy'
+    ] as Record<string, unknown>;
+    expect(saros.models).toEqual([
+      {
+        id: 'ox-alpha-free',
+        name: 'Ox Alpha Free (Unlimited)',
+        reasoning: true,
+        input: ['text'],
+        contextWindow: 1000000,
+        maxTokens: 131072,
+        thinking: { mode: 'effort', efforts: ['low', 'high', 'max'] },
+      },
+    ]);
+    expect((saros.compat as Record<string, unknown>).supportsReasoningEffort).toBe(true);
   });
 });
 

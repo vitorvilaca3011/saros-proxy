@@ -20,6 +20,32 @@ export interface PiOmpModel {
   contextWindow: number;
   maxTokens: number;
   cost?: { input: number; output: number; cacheRead: number; cacheWrite: number };
+  /** Explicit thinking surface (pi/omp schema). Absent → harness infers one. */
+  thinking?: { mode: 'effort'; efforts: string[] };
+}
+
+/** Canonical effort vocabulary, least → most intensive (pi/omp schema). */
+const EFFORT_ORDER = ['minimal', 'low', 'medium', 'high', 'xhigh', 'max'] as const;
+
+/**
+ * Extract the effort ladder from models.dev `reasoning_options`
+ * (`[{ type: 'effort', values: [...] }]`). Keeps only values in the pi/omp
+ * thinking schema vocabulary; deduplicates and orders least → most intensive.
+ */
+function parseEfforts(entry: Record<string, unknown>): string[] {
+  const options = entry.reasoning_options;
+  if (!Array.isArray(options)) return [];
+  const found = new Set<string>();
+  for (const option of options) {
+    if (!option || typeof option !== 'object' || Array.isArray(option)) continue;
+    if ((option as Record<string, unknown>).type !== 'effort') continue;
+    const values = (option as Record<string, unknown>).values;
+    if (!Array.isArray(values)) continue;
+    for (const value of values) {
+      if (typeof value === 'string') found.add(value);
+    }
+  }
+  return EFFORT_ORDER.filter((effort) => found.has(effort));
 }
 
 /**
@@ -33,7 +59,6 @@ export function toPiOmpModel(entry: Record<string, unknown>): PiOmpModel {
   const rawInput = Array.isArray(modalities.input) ? (modalities.input as string[]) : [];
   const input = rawInput.filter((m): m is 'text' | 'image' => m === 'text' || m === 'image');
   const id = typeof entry.id === 'string' ? entry.id : '';
-
   const model: PiOmpModel = {
     id,
     name: typeof entry.name === 'string' ? entry.name : id,
@@ -42,6 +67,15 @@ export function toPiOmpModel(entry: Record<string, unknown>): PiOmpModel {
     contextWindow: typeof limit.context === 'number' ? limit.context : 262144,
     maxTokens: typeof limit.output === 'number' ? limit.output : 65536,
   };
+
+  // Explicit thinking metadata: models.dev effort options → pi/omp
+  // `thinking.efforts`. Without it the harness infers a generic ladder that
+  // can disagree with the model's real contract (e.g. ox-alpha only accepts
+  // low/high/max).
+  if (model.reasoning) {
+    const efforts = parseEfforts(entry);
+    if (efforts.length > 0) model.thinking = { mode: 'effort', efforts };
+  }
 
   // Cost is optional; accept both camelCase (pi/omp) and snake_case (models.dev).
   const rawCost = entry.cost as Record<string, unknown> | undefined;
