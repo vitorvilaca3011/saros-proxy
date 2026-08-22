@@ -79,22 +79,22 @@ export async function fetchKeyUsage(
   upstreamBaseUrl: string,
   apiKey: string,
 ): Promise<KeyUsage | null> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), USAGE_FETCH_TIMEOUT_MS);
   try {
-    const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), USAGE_FETCH_TIMEOUT_MS);
-    let response: Response;
-    try {
-      response = await fetch(new URL(USAGE_PATH, upstreamBaseUrl), {
-        headers: { Authorization: `Bearer ${apiKey}`, Accept: 'application/json' },
-        signal: controller.signal,
-      });
-    } finally {
-      clearTimeout(timer);
-    }
+    const response = await fetch(new URL(USAGE_PATH, upstreamBaseUrl), {
+      headers: { Authorization: `Bearer ${apiKey}`, Accept: 'application/json' },
+      signal: controller.signal,
+    });
+    // Keep the abort armed through the body read: a stalled body after a 200
+    // must still time out, or refreshInFlight stays true forever and usage
+    // rotation freezes on stale percentages.
     if (!response.ok) return null;
     return parseUsageResponse(await response.text());
   } catch {
     return null;
+  } finally {
+    clearTimeout(timer);
   }
 }
 

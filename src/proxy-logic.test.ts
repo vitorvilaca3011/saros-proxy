@@ -650,8 +650,8 @@ describe('updateKeyUsage + weighted selection', () => {
       completeRequest(state, `req-${i}`, true);
       counts[key.label]++;
     }
-    // gamma has no usage data → weighting disabled entirely (fallback RR)
-    expect(counts).toEqual({ alpha: 4, beta: 3, gamma: 3 });
+    // gamma has no usage data → neutral median weight, still weighted overall
+    expect(counts).toEqual({ alpha: 4, beta: 2, gamma: 4 });
   });
 
   it('distributes exactly 7/3 when only two keys exist', () => {

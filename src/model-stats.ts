@@ -7,7 +7,7 @@
  * (write-behind) to keep the request path free of I/O.
  */
 
-import { existsSync, readFileSync, writeFileSync, mkdirSync } from 'node:fs';
+import { existsSync, readFileSync, writeFileSync, mkdirSync, renameSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { MODEL_STATS_SAVE_DEBOUNCE_MS } from './constants.js';
 import { getSarosDir } from './config.js';
@@ -53,14 +53,20 @@ function persist(): void {
       since: since || Date.now(),
       counts: Object.fromEntries([...counters.entries()].sort()),
     };
-    writeFileSync(path, JSON.stringify(file, null, 2), 'utf-8');
+    // Atomic write (temp + rename): a crash mid-write never truncates the
+    // stats file and erases accumulated history.
+    const tmpPath = path + '.tmp';
+    writeFileSync(tmpPath, JSON.stringify(file, null, 2), 'utf-8');
+    renameSync(tmpPath, path);
   } catch (err) {
     logger.debug({ err }, 'failed to persist model stats');
   }
 }
 
 function schedulePersist(): void {
-  clearTimeout(saveTimer);
+  // Throttle, not reset: under sustained load the write must still happen
+  // at least once per debounce window instead of being pushed forever.
+  if (saveTimer !== undefined) return;
   saveTimer = setTimeout(() => {
     saveTimer = undefined;
     persist();
@@ -69,11 +75,46 @@ function schedulePersist(): void {
 }
 
 /** Record one forwarded request for `model` (best-effort, never throws). */
+// Bound on stored model-name keys: keeps the map and stats file bounded even
+// under hostile/varied model fields.
+const MAX_TRACKED_MODELS = 200;
+
+/** Strip control/ANSI characters and cap length before storing. */
+function sanitizeModel(model: string): string {
+  const cleaned = model.replace(/[\u0000-\u001F\u007F]/g, '').slice(0, 128);
+  return cleaned;
+}
+
+/** Record one forwarded request for `model` (best-effort, never throws). */
 export function recordModelRequest(model: string): void {
+  const clean = sanitizeModel(model);
+  if (clean.length === 0) return;
   if (!loaded) load();
   if (!since) since = Date.now();
-  counters.set(model, (counters.get(model) ?? 0) + 1);
+  counters.set(clean, (counters.get(clean) ?? 0) + 1);
+
+  // Evict the least-used entry when over the cap (rare: 200+ distinct models)
+  if (counters.size > MAX_TRACKED_MODELS) {
+    let least: string | null = null;
+    let leastCount = Infinity;
+    for (const [name, count] of counters) {
+      if (count < leastCount) {
+        least = name;
+        leastCount = count;
+      }
+    }
+    if (least !== null) counters.delete(least);
+  }
   schedulePersist();
+}
+
+/** Flush any pending write immediately (called on graceful shutdown). */
+export function flushModelStats(): void {
+  if (saveTimer !== undefined) {
+    clearTimeout(saveTimer);
+    saveTimer = undefined;
+  }
+  persist();
 }
 
 /** Snapshot sorted by count desc. Empty when nothing was ever recorded. */

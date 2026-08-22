@@ -189,10 +189,15 @@ function findNextKey(
  * missing for any candidate or when no candidate has remaining capacity.
  */
 function pickWeighted(state: ProxyState, candidates: ApiKey[]): ApiKey {
-  const weighted = candidates.every((k) => k.usagePercent !== null);
-  if (!weighted) return candidates[0];
+  const known = candidates.filter((k) => k.usagePercent !== null);
+  if (known.length === 0) return candidates[0];
 
-  const weights = candidates.map((k) => Math.max(0, 100 - (k.usagePercent ?? 0)));
+  let weights = candidates.map((k) => Math.max(0, 100 - (k.usagePercent ?? 0)));
+  // Keys missing usage data get the median of the known weights — neutral,
+  // so one flaky key no longer disables weighting for the whole pool.
+  const sorted = known.map((k) => 100 - (k.usagePercent ?? 0)).sort((a, b) => a - b);
+  const median = sorted[Math.floor(sorted.length / 2)] ?? 0;
+  weights = weights.map((w, i) => (candidates[i].usagePercent === null ? median : w));
   const totalWeight = weights.reduce((sum, w) => sum + w, 0);
   if (totalWeight === 0) return candidates[0];
 

@@ -173,6 +173,19 @@ export function isStreamingRequest(bodyText: string): boolean {
   }
 }
 
+/** Single JSON parse of a request body; null on invalid/missing input. */
+function parseRequestBody(bodyText: string): Record<string, unknown> | null {
+  if (!bodyText) return null;
+  try {
+    const parsed = JSON.parse(bodyText) as unknown;
+    return parsed && typeof parsed === 'object' && !Array.isArray(parsed)
+      ? (parsed as Record<string, unknown>)
+      : null;
+  } catch {
+    return null;
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Upstream forwarding with failover
 // ---------------------------------------------------------------------------
@@ -694,18 +707,17 @@ export function createProxyApp(config: ProxyConfig): Hono {
 
     maybeRefreshUsage(state, config);
 
-    // Track most-used models for `saros-proxy usage` (best-effort parse)
-    if (bodyText) {
-      try {
-        const model = (JSON.parse(bodyText) as { model?: unknown }).model;
-        if (typeof model === 'string' && model.length > 0) recordModelRequest(model);
-      } catch {
-        // Non-JSON body — nothing to record
-      }
+    // Parse once: used for both streaming detection and model tracking
+    const parsedBody = parseRequestBody(bodyText);
+
+    // Track most-used models for `saros-proxy usage` (best-effort)
+    if (parsedBody) {
+      const model = parsedBody.model;
+      if (typeof model === 'string' && model.length > 0) recordModelRequest(model);
     }
 
     // Check for streaming mode
-    if (bodyText && isStreamingRequest(bodyText)) {
+    if (parsedBody?.stream === true) {
       logger.info({ requestId, method, path }, 'Streaming request detected');
       return handleStreamingRequest({
         state,

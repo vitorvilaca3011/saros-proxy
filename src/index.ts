@@ -16,6 +16,7 @@ import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { loadConfig, type ProxyConfig } from './config.js';
 import { createProxyApp } from './proxy.js';
+import { flushModelStats } from './model-stats.js';
 import { logger, maskKey } from './logger.js';
 import { FORCE_SHUTDOWN_TIMEOUT_MS } from './constants.js';
 import { daemonStart, daemonStop, daemonStatus, daemonRestart } from './cli/daemon.js';
@@ -355,6 +356,8 @@ if (subcommand === 'start') {
     isShuttingDown = true;
 
     logger.info('Received %s, starting graceful shutdown...', signal);
+    // Persist model counters that are still sitting in the debounce window
+    flushModelStats();
     server.close(() => {
       logger.info('Server closed');
       process.exit(0);
