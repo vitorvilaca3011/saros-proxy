@@ -36,6 +36,18 @@ import { stringify as stringifyYaml } from 'yaml';
 const execFileAsync = promisify(execFile);
 const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
 
+/**
+ * Run npm cross-platform. On Windows npm ships only as npm.cmd, which Node
+ * refuses to spawn without a shell (CVE-2024-27980 mitigation); shell mode
+ * concatenates args unquoted, so path arguments get quoted explicitly.
+ */
+async function npmAsync(args: string[], cwd: string): Promise<{ stdout: string }> {
+  const win = process.platform === 'win32';
+  const cmd = win ? 'npm.cmd' : 'npm';
+  const finalArgs = win ? args.map((a) => (/[/\\]/.test(a) ? `"${a}"` : a)) : args;
+  return execFileAsync(cmd, finalArgs, { cwd, shell: win, windowsHide: true });
+}
+
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
@@ -179,19 +191,14 @@ describe('install e2e (npm pack -> install -> run)', () => {
     // Isolated XDG home: the CLI must never touch the developer's real config.
     mkdirHome(homeDir);
 
-    const { stdout } = await execFileAsync(
-      'npm',
-      ['pack', '--pack-destination', workDir],
-      { cwd: REPO_ROOT },
-    );
+    const { stdout } = await npmAsync(['pack', '--pack-destination', workDir], REPO_ROOT);
     // npm prints the tarball name relative to cwd, but the file lives in
     // --pack-destination: resolve to an absolute path before installing.
     const tarballName = stdout.trim().split('\n').pop() as string;
     const tarball = join(workDir, tarballName.replace(/^.*[/\\]/, ''));
-    await execFileAsync(
-      'npm',
+    await npmAsync(
       ['install', tarball, '--prefix', prefixDir, '--no-audit', '--no-fund'],
-      { cwd: REPO_ROOT },
+      REPO_ROOT,
     );
     installedIndexJs = join(prefixDir, 'node_modules', 'saros-proxy', 'dist', 'index.js');
   }, 180_000);
@@ -275,8 +282,13 @@ describe('install e2e (npm pack -> install -> run)', () => {
       expect(data.choices?.[0]?.message?.content).toBe(MOCK_REPLY);
     } finally {
       if (child) killProcessTree(child);
-      upstream.server.close();
-      await new Promise((r) => upstream.server.close(r));
+      // Drop keep-alive sockets first so close() can't hang on idle undici
+      // connections (masks assertion failures as timeouts otherwise).
+      upstream.server.closeAllConnections();
+      await new Promise<void>((r) => {
+        if (!upstream.server) { r(); return; }
+        upstream.server.close(() => r());
+      });
     }
   }, 60_000);
 });

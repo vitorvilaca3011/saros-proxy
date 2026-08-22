@@ -254,11 +254,66 @@ async function removeTempDir(dir: string): Promise<void> {
 // Suite
 // ---------------------------------------------------------------------------
 
+interface ProxyHandle {
+  child: ChildProcess;
+  port: number;
+  workDir: string;
+  logPath: string;
+}
+
+/** Spawn a fresh real binary against the mock upstream on its own port. */
+async function spawnProxy(upstreamPort: number): Promise<ProxyHandle> {
+  const workDir = mkdtempSync(join(tmpdir(), 'saros-model-e2e-'));
+  mkdirSync(join(workDir, 'home', '.config'), { recursive: true });
+  const logPath = join(workDir, 'proxy.log');
+
+  const port = await getRandomPort();
+  const cfgPath = join(workDir, 'config.yaml');
+  writeFileSync(cfgPath, stringifyYaml({
+    port,
+    host: '127.0.0.1',
+    upstreamBaseUrl: `https://127.0.0.1:${upstreamPort}`,
+    circuitBreakerThreshold: 2,
+    circuitBreakerCooldownMs: 3_000,
+    requestTimeoutMs: 5_000,
+    allowedOrigins: ['http://localhost:*'],
+    keys: [
+      { label: 'key-a', key: KEY_A },
+      { label: 'key-b', key: KEY_B },
+    ],
+  }), 'utf-8');
+
+  const out = openSync(logPath, 'a');
+  const child = spawn(process.execPath, [
+    join(REPO_ROOT, 'dist', 'index.js'), 'serve', '--config', cfgPath,
+  ], {
+    cwd: REPO_ROOT,
+    stdio: ['ignore', out, out],
+    env: {
+      ...process.env,
+      XDG_CONFIG_HOME: join(workDir, 'home', '.config'),
+      NODE_TLS_REJECT_UNAUTHORIZED: '0',
+    },
+    windowsHide: true,
+  });
+
+  if (!(await pollHealth(port, 15_000))) {
+    killProcessTree(child);
+    throw new Error(`proxy not healthy; log:\n${readFileSync(logPath, 'utf-8')}`);
+  }
+  return { child, port, workDir, logPath };
+}
+
+function stopProxy(handle: ProxyHandle | undefined): Promise<void> {
+  if (!handle) return Promise.resolve();
+  killProcessTree(handle.child);
+  return removeTempDir(handle.workDir);
+}
+
 describe('model e2e (real binary, models running)', () => {
-  let workDir: string;
-  let logPath: string;
-  let child: ChildProcess | undefined;
+  let mainProxy: ProxyHandle;
   let port: number;
+  let logPath: string;
   const upstream = new MockModelUpstream();
 
   beforeAll(async () => {
@@ -266,51 +321,14 @@ describe('model e2e (real binary, models running)', () => {
       throw new Error('dist/index.js missing — run via `npm run test:model-e2e`');
     }
     await upstream.start();
-
-    workDir = mkdtempSync(join(tmpdir(), 'saros-model-e2e-'));
-    mkdirSync(join(workDir, 'home', '.config'), { recursive: true });
-    logPath = join(workDir, 'proxy.log');
-
-    port = await getRandomPort();
-    const cfgPath = join(workDir, 'config.yaml');
-    writeFileSync(cfgPath, stringifyYaml({
-      port,
-      host: '127.0.0.1',
-      upstreamBaseUrl: `https://127.0.0.1:${upstream.port}`,
-      circuitBreakerThreshold: 2,
-      circuitBreakerCooldownMs: 3_000,
-      requestTimeoutMs: 5_000,
-      allowedOrigins: ['http://localhost:*'],
-      keys: [
-        { label: 'key-a', key: KEY_A },
-        { label: 'key-b', key: KEY_B },
-      ],
-    }), 'utf-8');
-
-    const out = openSync(logPath, 'a');
-    child = spawn(process.execPath, [
-      join(REPO_ROOT, 'dist', 'index.js'), 'serve', '--config', cfgPath,
-    ], {
-      cwd: REPO_ROOT,
-      stdio: ['ignore', out, out],
-      env: {
-        ...process.env,
-        XDG_CONFIG_HOME: join(workDir, 'home', '.config'),
-        NODE_TLS_REJECT_UNAUTHORIZED: '0',
-      },
-      windowsHide: true,
-    });
-
-    const healthy = await pollHealth(port, 15_000);
-    if (!healthy) {
-      throw new Error(`proxy not healthy; log:\n${readFileSync(logPath, 'utf-8')}`);
-    }
+    mainProxy = await spawnProxy(upstream.port);
+    port = mainProxy.port;
+    logPath = mainProxy.logPath;
   }, 60_000);
 
   afterAll(async () => {
-    if (child) killProcessTree(child);
+    await stopProxy(mainProxy);
     await upstream.stop();
-    await removeTempDir(workDir);
   });
 
   function proxyLog(): string {
@@ -411,33 +429,58 @@ describe('model e2e (real binary, models running)', () => {
   }, 30_000);
 
   it('rotates traffic toward the key with more remaining quota', async () => {
+    // Fresh instance: clean circuit-breaker state (a previous test opens
+    // key-a for 3s) and a fresh 60s usage TTL so the warm-up below really
+    // triggers a /usage refresh.
     upstream.reset();
-    // key-a nearly exhausted (weight 5), key-b comfortable (weight 75).
-    upstream.usagePercent.set(KEY_A, 95);
-    upstream.usagePercent.set(KEY_B, 25);
+    // Weights after refresh: key-a 20 (80% used), key-b 40 (60% used) -> a
+    // deterministic 1:2 distribution over sequential requests (key-b has more
+    // remaining quota). Equal-weight round-robin would yield 6/6; a disabled
+    // key-a would yield 12/0 — both fail the bounds below.
+    upstream.usagePercent.set(KEY_A, 80);
+    upstream.usagePercent.set(KEY_B, 60);
 
-    // Warm-up triggers the lazy usage refresh; give it a moment to land.
-    await complete({ messages: [{ role: 'user', content: 'warmup' }] });
-    await new Promise((r) => setTimeout(r, 400));
-    upstream.requests.length = 0;
+    const rotationProxy = await spawnProxy(upstream.port);
+    try {
+      const p = rotationProxy.port;
+      const completeOn = (body: Record<string, unknown>): Promise<Response> =>
+        fetch(`http://127.0.0.1:${p}/v1/chat/completions`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            model: 'ox-alpha-free',
+            messages: [{ role: 'user', content: 'hi' }],
+            ...body,
+          }),
+        });
 
-    const N = 10;
-    const counts = new Map<string, number>();
-    for (let i = 0; i < N; i++) {
-      const res = await complete({});
-      expect(res.status).toBe(200);
-      const label = res.headers.get('x-proxy-key-label') ?? '?';
-      counts.set(label, (counts.get(label) ?? 0) + 1);
+      // Warm-up fires the lazy /usage refresh; give it a moment to land.
+      await completeOn({ messages: [{ role: 'user', content: 'warmup' }] });
+      await new Promise((r) => setTimeout(r, 400));
+      upstream.requests.length = 0;
+
+      const N = 12;
+      const counts = new Map<string, number>();
+      for (let i = 0; i < N; i++) {
+        const res = await completeOn({});
+        expect(res.status).toBe(200);
+        const label = res.headers.get('x-proxy-key-label') ?? '?';
+        counts.set(label, (counts.get(label) ?? 0) + 1);
+      }
+
+      const toB = counts.get('key-b') ?? 0;
+      const toA = counts.get('key-a') ?? 0;
+      expect(toA + toB).toBe(N);
+      // key-b has more remaining quota (40 vs 20) -> ~8 B and ~4 A. Both
+      // bounds together prove weighted selection: plain RR gives 6/6, a dead
+      // key-a gives 12 B / 0 A.
+      expect(toB).toBeGreaterThanOrEqual(7);
+      expect(toA).toBeGreaterThanOrEqual(3);
+      if (process.env.SAROS_DEBUG_ROTATION) {
+        console.log('rotation distribution:', Object.fromEntries(counts));
+      }
+    } finally {
+      await stopProxy(rotationProxy);
     }
-
-    const toB = counts.get('key-b') ?? 0;
-    const toA = counts.get('key-a') ?? 0;
-    expect(toA + toB).toBe(N);
-    // Weights 75:5 -> key-b dominates. Tolerant bound absorbs a refresh race
-    // with the warm-up request.
-    expect(toB).toBeGreaterThanOrEqual(7);
-    if (process.env.SAROS_DEBUG_ROTATION) {
-      console.log('rotation distribution:', Object.fromEntries(counts));
-    }
-  }, 60_000);
+  }, 90_000);
 });

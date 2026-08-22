@@ -19,6 +19,7 @@ import { describe, it, expect, beforeAll, afterAll } from 'vitest';
 import { spawn, execSync } from 'node:child_process';
 import type { ChildProcess } from 'node:child_process';
 import { existsSync, mkdtempSync, mkdirSync, openSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { createServer } from 'node:http';
 import { tmpdir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -28,6 +29,17 @@ const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
 const ENABLED = process.env.SAROS_LIVE_E2E === '1' && !!process.env.SAROS_LIVE_API_KEY;
 const MODEL = process.env.SAROS_LIVE_MODEL ?? 'ox-alpha-free';
 const UPSTREAM = process.env.SAROS_LIVE_UPSTREAM ?? 'https://opencode.ai';
+
+function getRandomPort(): Promise<number> {
+  return new Promise((resolve, reject) => {
+    const probe = createServer();
+    probe.listen(0, '127.0.0.1', () => {
+      const port = (probe.address() as { port: number }).port;
+      probe.close(() => resolve(port));
+    });
+    probe.on('error', reject);
+  });
+}
 
 function killProcessTree(child: ChildProcess): void {
   if (!child.pid) return;
@@ -60,13 +72,13 @@ describe.skipIf(!ENABLED)('live model e2e (real upstream)', () => {
 
   beforeAll(async () => {
     if (!existsSync(join(REPO_ROOT, 'dist', 'index.js'))) {
-      throw new Error('dist/index.js missing — run via `npm run test:model-e2e` first');
+      throw new Error('dist/index.js missing — run via `npm run test:live-model` first');
     }
     workDir = mkdtempSync(join(tmpdir(), 'saros-live-e2e-'));
     mkdirSync(join(workDir, 'home', '.config'), { recursive: true });
     logPath = join(workDir, 'proxy.log');
 
-    port = 31077;
+    port = await getRandomPort();
     const keys = [{ label: 'live-1', key: process.env.SAROS_LIVE_API_KEY! }];
     if (process.env.SAROS_LIVE_SECOND_KEY) {
       keys.push({ label: 'live-2', key: process.env.SAROS_LIVE_SECOND_KEY });
