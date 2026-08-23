@@ -270,7 +270,11 @@ export async function daemonStart(port?: number, configPath?: string): Promise<v
 
   // Capture child stderr (also appended to daemon.log) so startup failures
   // can be diagnosed instead of swallowed by stdio ignore.
+  // Best-effort: an unopenable log (dir deleted under us, permissions) must
+  // not crash the starter — the stream open is async and can lose the race
+  // with cleanup in tests.
   const logStream = createWriteStream(DAEMON_LOG, { flags: 'a' });
+  logStream.on('error', () => { /* daemon.log is diagnostic only */ });
   let stderrBuf = '';
 
   const child = spawn('node', args, {
