@@ -26,6 +26,7 @@ import {
   mkdtempSync,
   mkdirSync,
   openSync,
+  closeSync,
   readFileSync,
   rmSync,
   writeFileSync,
@@ -57,6 +58,8 @@ class MockModelUpstream {
   /** bearer -> used percent reported by /usage */
   readonly usagePercent = new Map<string, number>([[KEY_A, 10], [KEY_B, 10]]);
   readonly requests: MockRequest[] = [];
+  /** bearers that fetched /usage — lets tests await the lazy refresh */
+  readonly usageRequests: string[] = [];
   private server: ReturnType<typeof createHttpsServer> | null = null;
   port = 0;
 
@@ -86,6 +89,7 @@ class MockModelUpstream {
     this.usagePercent.set(KEY_A, 10);
     this.usagePercent.set(KEY_B, 10);
     this.requests.length = 0;
+    this.usageRequests.length = 0;
   }
 
   private label(bearer: string): string | null {
@@ -106,6 +110,7 @@ class MockModelUpstream {
 
       // --- Usage endpoint (feeds weighted rotation) ---
       if (url === '/zen/go/v1/usage' && method === 'GET') {
+        if (this.label(bearer)) this.usageRequests.push(bearer);
         const pct = this.usagePercent.get(bearer);
         if (pct === undefined || !this.label(bearer)) {
           res.writeHead(401, { 'Content-Type': 'application/json' });
@@ -265,6 +270,7 @@ interface ProxyHandle {
 async function spawnProxy(upstreamPort: number): Promise<ProxyHandle> {
   const workDir = mkdtempSync(join(tmpdir(), 'saros-model-e2e-'));
   mkdirSync(join(workDir, 'home', '.config'), { recursive: true });
+  mkdirSync(join(workDir, 'home', 'AppData', 'Local'), { recursive: true });
   const logPath = join(workDir, 'proxy.log');
 
   const port = await getRandomPort();
@@ -292,13 +298,17 @@ async function spawnProxy(upstreamPort: number): Promise<ProxyHandle> {
     env: {
       ...process.env,
       XDG_CONFIG_HOME: join(workDir, 'home', '.config'),
+      LOCALAPPDATA: join(workDir, 'home', 'AppData', 'Local'),
+      HOME: join(workDir, 'home'),
       NODE_TLS_REJECT_UNAUTHORIZED: '0',
     },
     windowsHide: true,
   });
+  child.once('spawn', () => { try { closeSync(out); } catch { /* closed */ } });
 
   if (!(await pollHealth(port, 15_000))) {
     killProcessTree(child);
+    await removeTempDir(workDir);
     throw new Error(`proxy not healthy; log:\n${readFileSync(logPath, 'utf-8')}`);
   }
   return { child, port, workDir, logPath };
@@ -454,9 +464,16 @@ describe('model e2e (real binary, models running)', () => {
           }),
         });
 
-      // Warm-up fires the lazy /usage refresh; give it a moment to land.
+      // Warm-up fires the lazy /usage refresh; wait until BOTH keys' usage
+      // was actually fetched instead of sleeping a fixed amount.
       await completeOn({ messages: [{ role: 'user', content: 'warmup' }] });
-      await new Promise((r) => setTimeout(r, 400));
+      const refreshDeadline = Date.now() + 5_000;
+      while (Date.now() < refreshDeadline) {
+        const seen = new Set(upstream.usageRequests);
+        if (seen.has(KEY_A) && seen.has(KEY_B)) break;
+        await new Promise((r) => setTimeout(r, 100));
+      }
+      expect(new Set(upstream.usageRequests)).toEqual(new Set([KEY_A, KEY_B]));
       upstream.requests.length = 0;
 
       const N = 12;

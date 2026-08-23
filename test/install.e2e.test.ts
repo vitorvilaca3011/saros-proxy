@@ -8,8 +8,11 @@
  *   4. Start the installed proxy against a local mock upstream and push a
  *      real chat completion through it
  *
- * Fully offline (no npm registry access), hermetic (isolated XDG_CONFIG_HOME),
- * cross-platform (no shell shims — everything spawns through node directly).
+ * Network-isolated as far as practical: npm runs with an isolated cache and
+ * empty userconfig (deps still resolve from the registry — the package has no
+ * bundled dependencies), and the spawned proxy gets an isolated XDG home so
+ * it never touches real user config. Cross-platform (no shell shims on POSIX;
+ * npm.cmd needs shell:true on Windows per CVE-2024-27980).
  *   Run: npm run test:install
  */
 
@@ -24,6 +27,7 @@ import {
   writeFileSync,
   readFileSync,
   openSync,
+  closeSync,
 } from 'node:fs';
 import { createServer, type IncomingMessage } from 'node:http';
 import { createServer as createHttpsServer } from 'node:https';
@@ -41,11 +45,30 @@ const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
  * refuses to spawn without a shell (CVE-2024-27980 mitigation); shell mode
  * concatenates args unquoted, so path arguments get quoted explicitly.
  */
-async function npmAsync(args: string[], cwd: string): Promise<{ stdout: string }> {
+async function npmAsync(
+  args: string[],
+  cwd: string,
+  env?: NodeJS.ProcessEnv,
+): Promise<{ stdout: string }> {
   const win = process.platform === 'win32';
   const cmd = win ? 'npm.cmd' : 'npm';
   const finalArgs = win ? args.map((a) => (/[/\\]/.test(a) ? `"${a}"` : a)) : args;
-  return execFileAsync(cmd, finalArgs, { cwd, shell: win, windowsHide: true });
+  return execFileAsync(cmd, finalArgs, {
+    cwd,
+    shell: win,
+    windowsHide: true,
+    // Isolated cache/userconfig keep the run off the developer's global npm
+    // state (mirrors, auth tokens); deps still come from the registry.
+    env: { ...process.env, ...env },
+  });
+}
+
+/** Per-run isolated npm cache + blank userconfig inside dir. */
+function npmIsolationEnv(dir: string): NodeJS.ProcessEnv {
+  return {
+    npm_config_cache: join(dir, 'npm-cache'),
+    npm_config_userconfig: join(dir, 'npmrc'),
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -188,10 +211,11 @@ describe('install e2e (npm pack -> install -> run)', () => {
     workDir = mkdtempSync(join(tmpdir(), 'saros-install-'));
     prefixDir = join(workDir, 'prefix');
     homeDir = join(workDir, 'home');
-    // Isolated XDG home: the CLI must never touch the developer's real config.
     mkdirHome(homeDir);
+    mkdirSync(join(homeDir, 'AppData', 'Local'), { recursive: true });
+    const npmEnv = npmIsolationEnv(workDir);
 
-    const { stdout } = await npmAsync(['pack', '--pack-destination', workDir], REPO_ROOT);
+    const { stdout } = await npmAsync(['pack', '--pack-destination', workDir], REPO_ROOT, npmEnv);
     // npm prints the tarball name relative to cwd, but the file lives in
     // --pack-destination: resolve to an absolute path before installing.
     const tarballName = stdout.trim().split('\n').pop() as string;
@@ -199,6 +223,7 @@ describe('install e2e (npm pack -> install -> run)', () => {
     await npmAsync(
       ['install', tarball, '--prefix', prefixDir, '--no-audit', '--no-fund'],
       REPO_ROOT,
+      npmEnv,
     );
     installedIndexJs = join(prefixDir, 'node_modules', 'saros-proxy', 'dist', 'index.js');
   }, 180_000);
@@ -305,17 +330,24 @@ function spawnDetached(
   home: string,
   logPath: string,
 ): ChildProcess {
-  // Isolated XDG_CONFIG_HOME keeps the daemon out of the real user config.
+  // Isolate every state path the CLI might use: XDG_CONFIG_HOME on POSIX,
+  // LOCALAPPDATA on Windows (getDefaultConfigPath prefers it there), and HOME
+  // as a last-resort fallback for anything else.
   // Append-mode fd: lets tests dump the daemon log when assertions fail.
   const out = openSync(logPath, 'a');
-  return spawn(command, args, {
+  const child = spawn(command, args, {
     cwd: REPO_ROOT,
     stdio: ['ignore', out, out],
     env: {
       ...process.env,
       XDG_CONFIG_HOME: join(home, '.config'),
+      LOCALAPPDATA: join(home, 'AppData', 'Local'),
+      HOME: home,
       NODE_TLS_REJECT_UNAUTHORIZED: '0',
     },
     windowsHide: true,
   });
+  // uv_spawn duplicated the fd into the child synchronously; release ours.
+  child.once('spawn', () => { try { closeSync(out); } catch { /* already closed */ } });
+  return child;
 }

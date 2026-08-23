@@ -59,7 +59,7 @@ jobs:
   install-smoke:
     name: Install smoke (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 15
+    timeout-minutes: 20
     strategy:
       fail-fast: false
       matrix:

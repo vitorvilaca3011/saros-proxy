@@ -8,8 +8,10 @@ export function setup() {
 }
 
 export function teardown() {
-  // Give processes 1 second to clean up, then force exit
+  // Give processes 1 second to clean up, then force exit.
+  // Propagate vitest's pending failure code: hardcoding 0 here overrides the
+  // nonzero exit code vitest sets for failed suites, turning a red run green.
   setTimeout(() => {
-    process.exit(0);
+    process.exit(process.exitCode ?? 0);
   }, 1000);
 }

@@ -76,6 +76,7 @@ describe.skipIf(!ENABLED)('live model e2e (real upstream)', () => {
     }
     workDir = mkdtempSync(join(tmpdir(), 'saros-live-e2e-'));
     mkdirSync(join(workDir, 'home', '.config'), { recursive: true });
+    mkdirSync(join(workDir, 'home', 'AppData', 'Local'), { recursive: true });
     logPath = join(workDir, 'proxy.log');
 
     port = await getRandomPort();
@@ -100,7 +101,12 @@ describe.skipIf(!ENABLED)('live model e2e (real upstream)', () => {
     ], {
       cwd: REPO_ROOT,
       stdio: ['ignore', out, out],
-      env: { ...process.env, XDG_CONFIG_HOME: join(workDir, 'home', '.config') },
+      env: {
+        ...process.env,
+        XDG_CONFIG_HOME: join(workDir, 'home', '.config'),
+        LOCALAPPDATA: join(workDir, 'home', 'AppData', 'Local'),
+        HOME: join(workDir, 'home'),
+      },
       windowsHide: true,
     });
 
@@ -139,7 +145,8 @@ describe.skipIf(!ENABLED)('live model e2e (real upstream)', () => {
     const data = (await res.json()) as {
       choices?: Array<{ message?: { content?: string }; finish_reason?: string }>;
     };
-    expect(data.choices?.[0]?.finish_reason).toBe('stop');
+    // Thinking models can legitimately burn max_tokens before stopping.
+    expect(['stop', 'length']).toContain(data.choices?.[0]?.finish_reason);
     expect((data.choices?.[0]?.message?.content ?? '').toLowerCase()).toContain('ok');
   }, 120_000);
 });
