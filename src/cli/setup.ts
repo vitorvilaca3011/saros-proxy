@@ -309,8 +309,13 @@ export async function testProxy(port: number, timeoutMs = 20_000, cwd = PACKAGE_
 
     // Use single-command form with shell:true to avoid DEP0190 deprecation
     // (Node.js deprecates passing both shell:true and separate args)
+    // Invoke the repo-local tsx directly: `npx tsx` with a cwd outside the
+    // package downloads tsx into the shared npx cache, and two concurrent
+    // callers race the extraction (TAR_ENTRY_ERROR -> proxy exits 1).
+    const tsxCli = pathResolve(PACKAGE_ROOT, 'node_modules', 'tsx', 'dist', 'cli.mjs');
+    const runner = existsSync(tsxCli) ? `"${process.execPath}" "${tsxCli}"` : 'npx tsx';
     const configFlag = configPath ? ` --config "${configPath}"` : '';
-    const cmd = `npx tsx "${entryPoint}" serve --port ${port}${configFlag}`;
+    const cmd = `${runner} "${entryPoint}" serve --port ${port}${configFlag}`;
     const child: ChildProcess = spawn(cmd, [], {
       cwd,
       stdio: ['ignore', 'pipe', 'pipe'],
