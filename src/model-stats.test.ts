@@ -94,6 +94,69 @@ describe('model-stats', () => {
     }
   });
 
+  it('sanitizes model names: strips control chars, caps length, drops empty', () => {
+    // Control bytes (NUL, ESC, DEL) are stripped; the remaining ANSI payload
+    // characters are ordinary text and survive.
+    recordModelRequest('ox\u0000-al\u001B[31mpha\u007F');
+    expect(getModelStats()).toEqual([{ model: 'ox-al[31mpha', count: 1 }]);
+
+    // Pure control characters sanitize to empty -> nothing recorded
+    recordModelRequest('\u0000\u001F');
+    recordModelRequest('');
+    expect(getModelStats()).toEqual([{ model: 'ox-al[31mpha', count: 1 }]);
+  });
+
+  it('caps tracked models at 200, evicting the least-used entry', () => {
+    for (let i = 0; i < 200; i++) {
+      recordModelRequest(`model-${String(i).padStart(3, '0')}`);
+    }
+    // Give model-000 extra hits so it survives; model-001 stays at 1 and is
+    // the least-used when the 201st distinct model arrives.
+    recordModelRequest('model-000');
+
+    recordModelRequest('the-new-arrival');
+
+    const stats = getModelStats();
+    expect(stats.length).toBeLessThanOrEqual(200);
+    expect(stats.find((s) => s.model === 'model-001')).toBeUndefined();
+    expect(stats.find((s) => s.model === 'model-000')?.count).toBe(2);
+    expect(stats.find((s) => s.model === 'the-new-arrival')).toBeDefined();
+  });
+
+  it('load filters non-positive counts and preserves since from disk', async () => {
+    vi.useFakeTimers();
+    try {
+      recordModelRequest('glm-5');
+      await vi.advanceTimersByTimeAsync(10_000);
+      const path = getModelStatsPath();
+      // Corrupt the persisted file with junk entries + valid since
+      const raw = JSON.parse(readFileSync(path, 'utf-8')) as { since: number };
+      writeFileSync(path, JSON.stringify({
+        since: raw.since,
+        counts: { glm5: 2, zero: 0, negative: -3, notanumber: 'x' },
+      }), 'utf-8');
+
+      resetModelStats(); // in-memory reset; next access reloads from disk
+      const stats = getModelStats();
+      expect(stats).toEqual([{ model: 'glm5', count: 2 }]);
+      expect(getModelStatsPath()).toBeTruthy();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('reset discards pending debounce write', async () => {
+    vi.useFakeTimers();
+    try {
+      recordModelRequest('glm-5');
+      resetModelStats(); // cancels the scheduled persist
+      await vi.advanceTimersByTimeAsync(10_000);
+      expect(existsSync(getModelStatsPath())).toBe(false);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('ignores corrupt or missing files', () => {
     mkdirSync(join(tmpDir, 'saros'), { recursive: true });
     writeFileSync(join(tmpDir, 'saros', 'model-stats.json'), '{broken', 'utf-8');
