@@ -245,9 +245,11 @@ export function updateKeyUsage(state: ProxyState, usage: Map<string, number>): v
 /**
  * Resolve the provider-preference predicate for a request.
  *
- * When providers declare model affinity, keys of a 'yes' provider are
- * preferred; 'maybe' providers serve as fallback (any healthy key beats a
- * 503). Without a modelId every provider qualifies (legacy behavior).
+ * Rule: exclude providers whose verdict is definitively 'no' for the model
+ * (e.g. claude-* on opencode-go). Everything else — 'yes' AND 'maybe' —
+ * serves the request, so genuinely shared models rotate across ALL their
+ * keys regardless of which catalog loaded first. When no provider says 'no'
+ * the filter is undefined (legacy any-key behavior).
  */
 function makeProviderFilter(
   state: ProxyState,
@@ -256,15 +258,15 @@ function makeProviderFilter(
   if (!modelId) return undefined;
   const resolver = state.affinityResolver;
   if (!resolver) return undefined;
-  // Capture which providers 'yes'-match the model; others are fallback-only.
-  const preferred = new Set<string>();
+  const excluded = new Set<string>();
   for (const key of state.keys) {
-    if (!preferred.has(key.provider) && resolver(key.provider, modelId) === 'yes') {
-      preferred.add(key.provider);
+    if (excluded.has(key.provider)) continue;
+    if (resolver(key.provider, modelId) === 'no') {
+      excluded.add(key.provider);
     }
   }
-  if (preferred.size === 0) return undefined; // nobody claims it → any key
-  return (provider) => preferred.has(provider);
+  if (excluded.size === 0) return undefined;
+  return (provider) => !excluded.has(provider);
 }
 
 /**
@@ -438,13 +440,21 @@ export function markKeySucceeded(state: ProxyState, keyLabel: string): void {
  *  401               → KeyFault  (invalid/revoked key — immediate disable)
  *  429               → ServerFault (transient rate-limit — incremental circuit breaker)
  *  500 / 502 / 503   → KeyFault if body mentions quota/balance, else ServerFault
- *  400 / 404 / 422   → RequestFault (bad request — don't penalise the key)
+ *  400 / 403 / 404 / 422 → RequestFault (bad request or permission denial —
+ *                      don't penalise the key; 403 MODEL_NOT_IN_PLAN is a plan
+ *                      restriction, found live on commandcode)
  *  everything else   → ServerFault
  */
 export function classifyHttpError(status: number, _body?: string): ErrorType {
-  if (status === 401) return 'KeyFault';
+  if (status === 401) {
+    // opencode-go returns 401 ModelError for UNKNOWN MODELS (verified live:
+    // a Model gpt-5.5 is not supported, with a valid key). That is a request
+    // fault — penalising it would disable every key as the pool rotates.
+    if (_body && /ModelError|not supported/i.test(_body)) return 'RequestFault';
+    return 'KeyFault';
+  }
   if (status === 429) return 'ServerFault';
-  if (status === 400 || status === 404 || status === 422) return 'RequestFault';
+  if (status === 400 || status === 403 || status === 404 || status === 422) return 'RequestFault';
   if (status === 500 || status === 502 || status === 503) {
     // Server errors: if the body hints at a quota/balance issue treat as KeyFault
     if (_body && /quota|balance|insufficient|limit/i.test(_body)) {

@@ -87,6 +87,8 @@ export const COMMANDCODE_PROVIDER_MODELS_PATH = '/provider/v1/models';
 
 /** Bare-name index of the live catalog (last path segment of vendor ids). */
 let catalogCache: { bareNames: Set<string>; nativeByBare: Map<string, string> } | null = null;
+/** Ensures the background warm-up fires at most once per process. */
+let warmupStarted = false;
 
 function indexCatalog(models: Array<Record<string, unknown>>): void {
   const bareNames = new Set<string>();
@@ -225,8 +227,11 @@ export const commandcodeProvider: KeyProvider = {
     if (catalogCache) {
       return catalogCache.bareNames.has(bareName.toLowerCase()) ? 'yes' : 'no';
     }
-    // Warm the cache in the background; meanwhile stay non-committal.
-    void commandcodeProvider.fetchCatalog?.();
+    // Warm the cache in the background (once per process); stay non-committal meanwhile.
+    if (!warmupStarted) {
+      warmupStarted = true;
+      void commandcodeProvider.fetchCatalog?.();
+    }
     return 'maybe';
   },
 

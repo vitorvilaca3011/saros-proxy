@@ -63,13 +63,26 @@ describe('affinity-aware key selection', () => {
     expect(snap).not.toBeNull();
   });
 
-  it('prefers keys of providers that yes-match the model', () => {
+  it('excludes providers that definitively reject the model', () => {
+    // claude-opus-5: commandcode yes, opencode-go no (no claude in its catalog)
     const state = makeMixedState((provider, modelId) => {
-      if (modelId === 'claude-opus-5') return provider === 'commandcode' ? 'yes' : 'maybe';
-      return 'maybe';
+      if (modelId !== 'claude-opus-5') return 'maybe';
+      return provider === 'commandcode' ? 'yes' : 'no';
     });
     const snap = selectKeyForRequest(state, 'r1', 'claude-opus-5');
     expect(snap?.provider).toBe('commandcode');
+  });
+
+  it('shared models (both yes) rotate across ALL serving keys', () => {
+    // deepseek-v4-flash: both providers claim it → the round-robin must
+    // alternate between the two keys instead of monopolizing one.
+    const state = makeMixedState(() => 'yes');
+    const seen = new Set<string>();
+    for (let i = 0; i < 4; i++) {
+      const snap = selectKeyForRequest(state, 'rr-' + i, 'deepseek-v4-flash');
+      if (snap) seen.add(snap.provider);
+    }
+    expect(seen.size).toBe(2);
   });
 
   it('falls back to any provider when the preferred pool is busy', () => {
