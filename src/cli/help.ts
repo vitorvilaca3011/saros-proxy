@@ -17,7 +17,7 @@ Commands:
   status                                     Check daemon status
   setup                                      Run interactive setup wizard
   sync-upstream                              Sync new models from upstream into enabled harnesses
-  configharness [omp|ohmypi] [pi] [oc|opencode]  Add harnesses; --remove <h> / --clear to disable
+  configharness [omp|ohmypi] [pi] [oc|opencode] [dsh]  Add harnesses; --remove <h> / --clear to disable
   probe [model-id]                           Test model capabilities (liveness, reasoning, tools)
   usage                                      Show per-key quota usage and most-used models
   autostart install [--method <method>]      Install autostart
