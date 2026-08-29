@@ -12,6 +12,13 @@ export const DEFAULT_REQUEST_TIMEOUT_MS = 30_000;
 export const MIN_KEY_LENGTH = 20;
 export const API_KEY_PREFIX = 'sk-';
 export const DEFAULT_UPSTREAM_URL = 'https://opencode.ai';
+// Multi-provider upstreams (overridable via config `upstreams:` map)
+export const DEFAULT_UPSTREAM_OPENCODE_GO = DEFAULT_UPSTREAM_URL;
+export const DEFAULT_UPSTREAM_COMMANDCODE = 'https://api.commandcode.ai';
+// CommandCode serves an OpenAI-compatible surface under /provider/v1;
+// opencode-go paths /zen/go/v1/<rest> remap to /provider/v1/<rest>.
+export const COMMANDCODE_CHAT_BASE_PATH = '/provider/v1';
+export const OPENCODE_CHAT_BASE_PATH = '/zen/go/v1';
 export const MAX_BODY_SIZE = 10 * 1024 * 1024;
 export const MAX_RETRIES = 2;
 export const RATE_LIMIT_WINDOW_MS = 60_000;

@@ -33,6 +33,36 @@ import {
 import { getModelsList } from './models-fetcher.js';
 import { maybeRefreshUsage } from './usage-client.js';
 import { recordModelRequest } from './model-stats.js';
+import { getProvider, inferProvider } from './providers/index.js';
+import type { KeyProvider } from './providers/index.js';
+import {
+  COMMANDCODE_CHAT_BASE_PATH,
+  OPENCODE_CHAT_BASE_PATH,
+} from './constants.js';
+
+/**
+ * Resolve the upstream URL for one attempt: per-provider base URL + path
+ * remapping. Canonical saros routes are /zen/go/v1/<rest>; commandcode keys
+ * remap to /provider/v1/<rest> (its OpenAI-compatible surface).
+ */
+export function resolveUpstreamUrl(config: ProxyConfig, provider: KeyProvider, path: string): string {
+  const base = (config.upstreams?.[provider.id] ?? (provider.id === 'opencode-go' ? config.upstreamBaseUrl : provider.baseUrl))
+    .replace(/\/+$/, '');
+  if (provider.id === 'opencode-go') {
+    return buildUpstreamUrl(base, path);
+  }
+  const remapped = path.startsWith(OPENCODE_CHAT_BASE_PATH)
+    ? COMMANDCODE_CHAT_BASE_PATH + path.slice(OPENCODE_CHAT_BASE_PATH.length)
+    : path;
+  return buildUpstreamUrl(base, remapped);
+}
+
+/** Provider for a key snapshot (structural inference; config already validated). */
+function providerForKey(key: KeySnapshot, config: ProxyConfig): KeyProvider {
+  const inferred = inferProvider({ label: key.label, key: key.key });
+  void config;
+  return getProvider(inferred) ?? getProvider('opencode-go')!;
+}
 
 // Augment Hono's ContextVariableMap for @hono/node-server remote address
 declare module 'hono' {
@@ -149,6 +179,10 @@ export function buildDownstreamHeaders(upstreamHeaders: Headers): Headers {
       lower === 'upgrade' ||
       // Security-sensitive
       lower === 'set-cookie' ||
+      // Body is already decoded: Node fetch transparently gunzips upstream
+      // responses, so forwarding content-encoding would make clients try to
+      // decompress plain text (found live against api.commandcode.ai).
+      lower === 'content-encoding' ||
       // Internal debug
       lower === 'x-request-id' ||
       // Response constructor recalculates content-length
@@ -208,7 +242,6 @@ interface RetryContext {
   incomingHeaders: Headers;
   bodyText: string;
   kind: RequestKind;
-  upstreamUrl: string;
   onSuccess: SuccessHandler;
 }
 
@@ -242,7 +275,6 @@ async function executeWithRetry(opts: {
     incomingHeaders: opts.incomingHeaders,
     bodyText: opts.bodyText,
     kind: opts.kind,
-    upstreamUrl: buildUpstreamUrl(opts.config.upstreamBaseUrl, opts.path),
     onSuccess: opts.onSuccess,
   };
 
@@ -264,10 +296,13 @@ async function executeSingleAttempt(attempt: number, ctx: RetryContext): Promise
   }
 
   logKeyAttempt(ctx.requestId, key, attempt, ctx.kind);
-  const fetchOptions = buildFetchOptions(ctx.method, ctx.bodyText, ctx.kind, ctx.incomingHeaders, key.key);
+  // Per-attempt upstream: keys may be mixed-provider within one failover chain
+  const provider = providerForKey(key, ctx.config);
+  const upstreamUrl = resolveUpstreamUrl(ctx.config, provider, ctx.path);
+  const fetchOptions = buildFetchOptions(ctx.method, ctx.bodyText, ctx.kind, ctx.incomingHeaders, key.key, provider);
 
   try {
-    const response = await fetchWithTimeout(ctx.upstreamUrl, fetchOptions, ctx.config.requestTimeoutMs);
+    const response = await fetchWithTimeout(upstreamUrl, fetchOptions, ctx.config.requestTimeoutMs);
     if (response.ok) {
       markKeySucceeded(ctx.state, key.label);
       completeRequest(ctx.state, ctx.requestId, true);
@@ -294,8 +329,15 @@ function buildFetchOptions(
   kind: RequestKind,
   incomingHeaders: Headers,
   bearerToken: string,
+  provider?: KeyProvider,
 ): RequestInit & { duplex?: 'half' } {
   const headers = buildUpstreamHeaders(incomingHeaders, bearerToken);
+  // Provider-specific identity headers (e.g. CommandCode CLI headers)
+  if (provider?.extraUpstreamHeaders) {
+    for (const [name, value] of Object.entries(provider.extraUpstreamHeaders())) {
+      headers.set(name, value);
+    }
+  }
   const options: RequestInit & { duplex?: 'half' } = { method, headers };
   if (!bodyText) return options;
   // Node.js fetch requires `duplex: 'half'` when body is a stream or string

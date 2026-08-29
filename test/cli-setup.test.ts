@@ -49,23 +49,25 @@ const mockState = vi.hoisted(() => ({
   //   1. text     → port
   //   2. text     → upstream
   //   3. text     → num accounts
-  //   4. confirm  → encrypt keys (y/n)
-  //   5. text     → acc 1 label
-  //   6. password → acc 1 api key
-  //   7. text     → acc 2 label
-  //   8. password → acc 2 api key
-  //   9. text     → opencode.json path (or Enter to skip)
-  //  10. confirm  → configure opencode.json? (y/n)
+  //   4. confirm  → paste keys mode? (n → typed keys)
+  //   5. confirm  → encrypt keys (y/n)
+  //   6. text     → acc 1 label
+  //   7. password → acc 1 api key
+  //   8. text     → acc 2 label
+  //   9. password → acc 2 api key
+  //  10. text     → opencode.json path (or Enter to skip)
+  //  11. confirm  → configure opencode.json? (y/n)
   baseAnswers: [
     '3001',                                           // 0. port (text)
     'https://opencode.ai',                            // 1. upstream (text)
     '2',                                              // 2. num accounts (text)
-    'n',                                              // 3. encrypt? → NO (confirm)
-    'main',                                           // 4. acc 1 label (text)
-    'sk-valid-key-111111111111111',                   // 5. acc 1 api key (password)
-    'backup',                                         // 6. acc 2 label (text)
-    'sk-valid-key-222222222222222',                   // 7. acc 2 api key (password)
-    '',                                               // 8. opencode path → skip (text, empty)
+    'n',                                              // 3. paste mode? → NO (confirm)
+    'n',                                              // 4. encrypt? → NO (confirm)
+    'main',                                           // 5. acc 1 label (text)
+    'sk-valid-key-111111111111111',                   // 6. acc 1 api key (password)
+    'backup',                                         // 7. acc 2 label (text)
+    'sk-valid-key-222222222222222',                   // 8. acc 2 api key (password)
+    '',                                               // 9. opencode path → skip (text, empty)
   ],
   answers: [] as string[],
   idx: 0,
@@ -372,7 +374,7 @@ describe('CLI Setup Wizard', () => {
         'http://127.0.0.1:*',
       ]);
       expect(parsed.keys).toEqual([
-        { label: 'main', key: 'sk-valid-key-111111111111111' },
+        { label: 'main', key: 'sk-valid-key-111111111111111', provider: 'opencode-go' },
       ]);
     });
 
@@ -395,6 +397,8 @@ describe('CLI Setup Wizard', () => {
       expect(keys[0].label).toBe('key1');
       expect(keys[1].label).toBe('key2');
       expect(keys[2].label).toBe('key3');
+      // Provider is inferred and persisted for upstream routing
+      expect(keys[0].provider).toBe('opencode-go');
     });
 
   });
@@ -577,7 +581,7 @@ describe('CLI Setup Wizard', () => {
       const opencodePath = join(tmpDir, 'opencode.json');
 
       // Override answers to provide a path and confirm
-      mockState.answers[9] = opencodePath;  // opencode.json path
+      mockState.answers[10] = opencodePath;  // opencode.json path
       mockState.answers.push('y');           // confirm configure
       mockState.idx = 0;
 
@@ -592,7 +596,7 @@ describe('CLI Setup Wizard', () => {
       const opencodePath = join(tmpDir, 'opencode.json');
 
       // Override answers to provide a path but decline
-      mockState.answers[9] = opencodePath;  // opencode.json path
+      mockState.answers[10] = opencodePath;  // opencode.json path
       mockState.answers.push('n');           // decline configure
       mockState.idx = 0;
 

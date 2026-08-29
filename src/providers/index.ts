@@ -11,6 +11,7 @@ import { commandcodeProvider } from './commandcode.js';
 import type { KeyProvider, ProviderId, SmokeResult } from './types.js';
 
 export * from './types.js';
+export { inferProvider, type KeyEntry } from './infer.js';
 export { opencodeGoProvider, parseOpencodeUsage } from './opencode-go.js';
 export {
   commandcodeProvider,

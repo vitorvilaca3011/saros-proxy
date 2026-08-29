@@ -6,6 +6,28 @@
 > `@mars-sea/dsh-commandcode-provider` 0.9.1, plus live `curl` probing of
 > `api.commandcode.ai` and comparison against `opencode.ai`.
 
+> **STATUS UPDATE (2026-08-29, later the same day — prototype implemented &
+> live-validated with a real key).** §6's "not plain OpenAI" conclusion was
+> WRONG for the provider surface: `POST /provider/v1/chat/completions`
+> **exists and is fully OpenAI-compatible** (standard `chat.completion`
+> responses and `chat.completion.chunk` SSE deltas, `Authorization: Bearer`
+> only — no CLI-identity headers required, verified: bogus key → 401
+> `authentication_error`). Live E2E through saros-proxy passed for both
+> non-streaming and streaming. The proprietary `/alpha/generate` envelope is
+> the CLI's own protocol; harnesses don't need it. Implementation landed on
+> branch `feat/multi-provider-keys`: `src/providers/` (KeyProvider interface,
+> opencode-go + commandcode adapters, `identifyKey()`, `inferProvider()`),
+> config `provider` field on keys, per-provider upstream routing with path
+> remap `/zen/go/v1/* → /provider/v1/*`, provider-aware usage refresh, TUI
+> paste-a-key flow, and a live-verified fix: `buildDownstreamHeaders` must
+> strip `content-encoding` (Node fetch decodes gzipped upstream bodies;
+> api.commandcode.ai gzips, opencode.ai doesn't).
+>
+> Also learned live: `planId` for this account is `individual-goat`; the
+> deepseek-v4-flash reasoning stream emits `reasoning` deltas (saros's
+> existing SSE pass-through handles them untouched); small `max_tokens` gets
+> consumed by reasoning with empty `content` (`finish_reason: length`).
+
 ## 1. What CommandCode is
 
 CommandCode (commandcode.ai, CLI package `command-code`, latest 1.38.2) is a

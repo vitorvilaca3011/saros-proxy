@@ -32,7 +32,10 @@ import {
 } from '../constants.js';
 import { isValidPort, isValidApiKey, isValidHttpsUrl, isValidPositiveInt } from '../validation.js';
 import { getDefaultConfigPath } from '../config.js';
+import { extractKeys, identifyKey, inferProvider } from '../providers/index.js';
+import type { ProviderId } from '../providers/index.js';
 import * as ui from './ui.js';
+import { maskKey } from '../logger.js';
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -265,7 +268,7 @@ function saveEnvVar(name: string, value: string): boolean {
 export interface SetupConfig {
   port: number;
   upstreamBaseUrl: string;
-  keys: Array<{ label: string; key: string }>;
+  keys: Array<{ label: string; key: string; provider?: ProviderId }>;
 }
 
 export function generateYaml(cfg: SetupConfig, encryptionEnabled = false): string {
@@ -277,7 +280,13 @@ export function generateYaml(cfg: SetupConfig, encryptionEnabled = false): strin
     circuitBreakerCooldownMs: DEFAULT_CIRCUIT_BREAKER_COOLDOWN_MS,
     requestTimeoutMs: DEFAULT_REQUEST_TIMEOUT_MS,
     allowedOrigins: ['http://localhost:*', 'http://127.0.0.1:*'],
-    keys: cfg.keys,
+    keys: cfg.keys.map((k) => ({
+      label: k.label,
+      key: k.key,
+      // Persist the provider so encrypted keys (prefix hidden) still route
+      // to the right upstream after a restart.
+      provider: k.provider ?? inferProvider(k),
+    })),
   };
 
   let yaml = stringifyYaml(config);
@@ -531,17 +540,85 @@ async function promptEncryption(): Promise<EncryptionConfig> {
 async function collectAccountCredentials(opts: {
   numAccounts: number;
   encryptionKey: string | undefined;
-}): Promise<Array<{ label: string; key: string }>> {
-  const keys: Array<{ label: string; key: string }> = [];
+}): Promise<Array<{ label: string; key: string; provider?: ProviderId }>> {
+  const keys: Array<{ label: string; key: string; provider?: ProviderId }> = [];
+
+  // Paste-a-key mode: drop any text containing keys; saros extracts and
+  // identifies each one by pinging the candidate providers (smoke test).
+  const pasteMode = ui.assertNotCancelled(await ui.confirm({
+    message: 'Paste API keys instead of typing them? (auto-detects the provider)',
+    initialValue: false,
+  }));
+
+  if (pasteMode) {
+    return collectPastedKeys(opts);
+  }
 
   for (let i = 0; i < opts.numAccounts; i++) {
     ui.step(`Account ${i + 1} of ${opts.numAccounts}`);
 
     const label = await promptAccountLabel(i, opts.numAccounts);
     const key = await promptAccountApiKey();
+    const provider = inferProvider({ label, key });
     const finalKey = opts.encryptionKey ? encryptKey(key, opts.encryptionKey) : key;
-    keys.push({ label, key: finalKey });
-    ui.success(`"${label}" API key configured`);
+    keys.push({ label, key: finalKey, provider });
+    ui.success(`"${label}" API key configured (${provider})`);
+  }
+
+  return keys;
+}
+
+/**
+ * Paste mode: accept arbitrary text (notes, .env dumps, chat messages),
+ * extract every key-looking token, identify its provider with a live smoke
+ * test, and let the user label each one.
+ */
+async function collectPastedKeys(opts: {
+  encryptionKey: string | undefined;
+}): Promise<Array<{ label: string; key: string; provider?: ProviderId }>> {
+  const keys: Array<{ label: string; key: string; provider?: ProviderId }> = [];
+  let batchIndex = 0;
+
+  for (;;) {
+    batchIndex++;
+    const pasted = ui.assertNotCancelled(await ui.text({
+      message: `Paste text containing API key(s) — batch ${batchIndex} (empty to finish)`,
+      placeholder: 'e.g. user_abc123… or sk-abc123… (leave blank when done)',
+      validate: () => undefined,
+    }));
+
+    const found = extractKeys(pasted ?? '');
+    if (found.length === 0) {
+      if (keys.length > 0) break;
+      ui.warn('No API keys found in that text — try again or leave blank to finish.');
+      if (batchIndex > 1) break;
+      continue;
+    }
+
+    for (const key of found) {
+      ui.step(`Identifying ${maskKey(key)}...`);
+      const id = await identifyKey(key);
+      if (id.provider === null) {
+        ui.warn(`Could not verify ${maskKey(key)} — ${id.confidence}. Skipped.`);
+        for (const a of id.attempts) {
+          ui.info(`    ${a.provider}: ${a.status}${a.detail ? ` (${a.detail})` : ''}`);
+        }
+        continue;
+      }
+      if (id.confidence === 'unverified') {
+        ui.warn(`${maskKey(key)} looks like ${id.provider} (prefix match only — offline)`);
+      }
+      const detail = id.attempts.find((a) => a.provider === id.provider)?.detail;
+      if (detail) ui.info(`    ${detail}`);
+
+      const label = await promptAccountLabel(batchIndex - 1 + keys.length, found.length + keys.length);
+      keys.push({
+        label,
+        key: opts.encryptionKey ? encryptKey(key, opts.encryptionKey) : key,
+        provider: id.provider,
+      });
+      ui.success(`"${label}" added — provider: ${id.provider}`);
+    }
   }
 
   return keys;
@@ -563,7 +640,7 @@ async function promptAccountApiKey(): Promise<string> {
   return ui.assertNotCancelled(await ui.password({
     message: 'API key',
     validate: (v) => {
-      if (!v || !isValidApiKey(v)) return 'API key must start with "sk-" and be at least 20 characters long.';
+      if (!v || !isValidApiKey(v)) return 'API key must start with "sk-" or "user_" and be at least 20 characters long.';
     },
   }));
 }
