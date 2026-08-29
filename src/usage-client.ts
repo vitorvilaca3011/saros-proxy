@@ -17,6 +17,7 @@ import { USAGE_FETCH_TIMEOUT_MS, USAGE_PATH, USAGE_REFRESH_TTL_MS } from './cons
 import { updateKeyUsage, type ProxyState } from './proxy-logic.js';
 import type { ProxyConfig } from './config.js';
 import { getProvider, inferProvider } from './providers/index.js';
+import type { ProviderId } from './providers/index.js';
 
 export interface KeyUsage {
   /** Worst-window used percent, 0-100. */
@@ -129,7 +130,7 @@ export function maybeRefreshUsage(state: ProxyState, config: ProxyConfig): void 
     try {
       const entries = await Promise.all(
         state.keys.map(async (k) => {
-          const provider = getProvider(inferProvider(k));
+          const provider = getProvider(inferProvider({ label: k.label, key: k.key, provider: k.provider as ProviderId | undefined }));
           // Providers without a queryable usage API (commandcode) are skipped —
           // weighted rotation simply treats them as having no fresh data.
           if (!provider || !provider.usagePath()) return [k.label, null] as const;

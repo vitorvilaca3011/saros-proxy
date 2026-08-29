@@ -19,6 +19,8 @@ import { DEFAULT_CIRCUIT_BREAKER_COOLDOWN_MS } from './constants.js';
 interface ApiKey {
   label: string;
   key: string;
+  /** Provider id ('opencode-go' | 'commandcode' | future extensions). */
+  provider: string;
   enabled: boolean;
   consecutiveFailures: number;
   lastUsed: number | null;
@@ -33,6 +35,8 @@ interface ApiKey {
 export interface KeySnapshot {
   label: string;
   key: string;
+  /** Provider this key belongs to (set at state creation from config). */
+  provider: string;
 }
 
 /** Tracks a single HTTP request's key usage through its lifecycle. */
@@ -48,6 +52,12 @@ export interface ProxyState {
   circuitBreakerThreshold: number;
   circuitBreakerCooldownMs: number;
   activeRequests: Map<string, RequestContext>; // C4
+  /**
+   * Optional model→provider affinity resolver: (providerId, modelId) →
+   * 'yes' | 'no' | 'maybe'. Wired from the provider registry at app setup;
+   * absence disables affinity routing (single-provider behavior).
+   */
+  affinityResolver?: (provider: string, modelId: string) => 'yes' | 'no' | 'maybe';
 }
 
 /**
@@ -68,7 +78,7 @@ export type ErrorType = 'KeyFault' | 'RequestFault' | 'ServerFault' | 'NetworkFa
 // ---------------------------------------------------------------------------
 
 export function createProxyState(
-  keys: Array<{ label: string; key: string }>,
+  keys: Array<{ label: string; key: string; provider?: string }>,
   options?: {
     circuitBreakerThreshold?: number;
     circuitBreakerCooldownMs?: number;
@@ -78,6 +88,7 @@ export function createProxyState(
     keys: keys.map((k) => ({
       label: k.label,
       key: k.key,
+      provider: k.provider ?? 'opencode-go',
       enabled: true,
       consecutiveFailures: 0,
       lastUsed: null,
@@ -101,7 +112,7 @@ export function createProxyState(
  * (Keeps mutation paths through markKeyFailed / markKeySucceeded.)
  */
 function toSnapshot(key: ApiKey): KeySnapshot {
-  return { label: key.label, key: key.key };
+  return { label: key.label, key: key.key, provider: key.provider };
 }
 
 /**
@@ -164,6 +175,7 @@ function buildBookedLabels(state: ProxyState): Set<string> {
 function findNextKey(
   state: ProxyState,
   excludeLabels: Set<string>,
+  providerFilter?: (provider: string) => boolean,
 ): KeySnapshot | null {
   const n = state.keys.length;
   if (n === 0) return null;
@@ -172,6 +184,7 @@ function findNextKey(
   for (let i = 0; i < n; i++) {
     const key = state.keys[(state.currentIndex + i) % n];
     if (excludeLabels.has(key.label)) continue;
+    if (providerFilter && !providerFilter(key.provider)) continue;
     if (!isKeyAvailable(state, key)) continue;
     candidates.push(key);
   }
@@ -230,14 +243,44 @@ export function updateKeyUsage(state: ProxyState, usage: Map<string, number>): v
 // ---------------------------------------------------------------------------
 
 /**
+ * Resolve the provider-preference predicate for a request.
+ *
+ * When providers declare model affinity, keys of a 'yes' provider are
+ * preferred; 'maybe' providers serve as fallback (any healthy key beats a
+ * 503). Without a modelId every provider qualifies (legacy behavior).
+ */
+function makeProviderFilter(
+  state: ProxyState,
+  modelId?: string,
+): ((provider: string) => boolean) | undefined {
+  if (!modelId) return undefined;
+  const resolver = state.affinityResolver;
+  if (!resolver) return undefined;
+  // Capture which providers 'yes'-match the model; others are fallback-only.
+  const preferred = new Set<string>();
+  for (const key of state.keys) {
+    if (!preferred.has(key.provider) && resolver(key.provider, modelId) === 'yes') {
+      preferred.add(key.provider);
+    }
+  }
+  if (preferred.size === 0) return undefined; // nobody claims it → any key
+  return (provider) => preferred.has(provider);
+}
+
+/**
  * Obtain a key for a new (or in-flight) request.
  * Creates a RequestContext if one does not already exist for this requestId.
  * Skips keys that have already been tried for this request AND keys booked
  * by any other active request.
+ *
+ * When a modelId is supplied and some providers claim it (modelAffinity
+ * 'yes'), keys of other providers are only used after the preferred pool is
+ * exhausted (including its booked-share tier).
  */
 export function selectKeyForRequest(
   state: ProxyState,
   requestId: string,
+  modelId?: string,
 ): KeySnapshot | null {
   // If context already exists, return the already-assigned current key
   const existing = state.activeRequests.get(requestId);
@@ -249,6 +292,8 @@ export function selectKeyForRequest(
   const ctx: RequestContext = { requestId, triedKeys: [], currentKey: null };
   state.activeRequests.set(requestId, ctx);
 
+  const providerFilter = makeProviderFilter(state, modelId);
+
   // Tier 1: prefer a key not booked by another active request (spread load)
   const excludeLabels = new Set(ctx.triedKeys);
   const booked = buildBookedLabels(state);
@@ -256,12 +301,17 @@ export function selectKeyForRequest(
     excludeLabels.add(label);
   }
 
-  let snapshot = findNextKey(state, excludeLabels);
+  let snapshot = findNextKey(state, excludeLabels, providerFilter);
 
-  // Tier 2: all healthy keys are booked — share one via round-robin.
-  // Better to share a key than return 503 when concurrent requests
-  // outnumber the key pool.
+  // Tier 2: all healthy preferred keys are booked — share one via
+  // round-robin. Better to share a key than return 503 when concurrent
+  // requests outnumber the key pool.
   if (!snapshot) {
+    snapshot = findNextKey(state, new Set(ctx.triedKeys), providerFilter);
+  }
+
+  // Tier 3: preferred providers exhausted → fall back to any provider.
+  if (!snapshot && providerFilter) {
     snapshot = findNextKey(state, new Set(ctx.triedKeys));
   }
 
@@ -287,7 +337,8 @@ export function failoverRequest(
     ctx.triedKeys.push(ctx.currentKey.label);
   }
 
-  // Tier 1: prefer a key not tried AND not booked by another request
+  // The provider preference was fixed when the request context was created;
+  // failover stays within the same tiers (tried keys are always excluded).
   const excludeLabels = new Set(ctx.triedKeys);
   const booked = buildBookedLabels(state);
   for (const label of booked) {

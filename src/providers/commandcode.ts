@@ -83,10 +83,13 @@ export function parsePlanId(body: string): string | undefined {
  * route on api.commandcode.ai). Usage-based weighted rotation is opencode-go
  * only; commandcode keys report no usage data.
  */
+export const COMMANDCODE_PROVIDER_MODELS_PATH = '/provider/v1/models';
+
 export const commandcodeProvider: KeyProvider = {
   id: 'commandcode',
   displayName: 'CommandCode',
   baseUrl: COMMANDCODE_BASE_URL,
+  chatBasePath: '/provider/v1',
 
   quickMatch(key: string): PrefixMatch {
     if (key.startsWith('user_') && key.length >= MIN_KEY_LENGTH) return 'yes';
@@ -145,5 +148,42 @@ export const commandcodeProvider: KeyProvider = {
 
   extraUpstreamHeaders() {
     return commandcodeClientHeaders(cachedClientVersion ?? '0.18.10');
-  }
+  },
+
+  /**
+   * Live provider catalog. Verified live: this route is fully public
+   * (200 with any or no Authorization header).
+   */
+  async fetchCatalog(timeoutMs = 5_000): Promise<Array<Record<string, unknown>> | null> {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
+    try {
+      const res = await fetch(
+        `${COMMANDCODE_BASE_URL.replace(/\/$/, '')}${COMMANDCODE_PROVIDER_MODELS_PATH}`,
+        { signal: controller.signal },
+      );
+      if (!res.ok) return null;
+      const body = (await res.json()) as { data?: unknown };
+      if (!Array.isArray(body.data)) return null;
+      return body.data.filter(
+        (m): m is Record<string, unknown> =>
+          typeof m === 'object' && m !== null && typeof (m as Record<string, unknown>).id === 'string',
+      );
+    } catch {
+      return null;
+    } finally {
+      clearTimeout(timer);
+    }
+  },
+
+  /**
+   * Vendor-prefixed ids ('vendor/model') and Claude models are
+   * commandcode-specific naming (opencode-go uses bare ids like 'glm-5').
+   * Everything else is 'maybe' — catalogs overlap.
+   */
+  modelAffinity(modelId: string): 'yes' | 'no' | 'maybe' {
+    if (modelId.includes('/')) return 'yes';
+    if (/^claude/i.test(modelId)) return 'yes';
+    return 'maybe';
+  },
 };

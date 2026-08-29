@@ -43,7 +43,7 @@ export async function printOverview(): Promise<void> {
   const harnesses = readHarnessSettings();
   console.log(`Harnesses: ${harnesses.join(', ') || chalk.dim('(none)')}`);
 
-  let keys: Array<{ label: string; key: string }> = [];
+  let keys: Array<{ label: string; key: string; provider?: string }> = [];
   try {
     keys = loadConfig().keys;
   } catch {
@@ -60,7 +60,8 @@ export async function printOverview(): Promise<void> {
   const labels = keys.map((k) => k.label).join(', ');
   console.log(`API keys:  ${enabledText}${keys.length} configured${labels ? ` (${labels})` : ''}`);
   for (const k of keys) {
-    console.log(`           ${k.label}: ${maskKey(k.key)}`);
+    const provider = k.provider ? chalk.dim(` [${k.provider}]`) : '';
+    console.log(`           ${k.label}: ${maskKey(k.key)}${provider}`);
   }
 
   console.log(`Config:    ${getDefaultConfigPath()}`);

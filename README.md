@@ -5,9 +5,9 @@
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Node.js Version](https://img.shields.io/badge/node-%3E%3D%2022.0.0-brightgreen.svg)](https://nodejs.org/)
 
-Saros — like the eclipse cycle, this proxy predicts exhaustion and rotates accounts before they run out. Built for the OpenCode-Go API.
+Saros — like the eclipse cycle, this proxy predicts exhaustion and rotates accounts before they run out. Built for the OpenCode-Go API, now multi-provider.
 
-Manage multiple OpenCode-Go API keys behind a single endpoint. When one key gets rate-limited, revoked, or returns server errors, the proxy automatically fails over to the next healthy key — zero downtime.
+Manage multiple API keys behind a single endpoint — OpenCode-Go **and** CommandCode keys can live in the same pool. When one key gets rate-limited, revoked, or returns server errors, the proxy automatically fails over to the next healthy key — zero downtime.
 
 ---
 
@@ -34,6 +34,8 @@ Manage multiple OpenCode-Go API keys behind a single endpoint. When one key gets
 
 ## Features
 
+- **Multi-provider keys** — Mix OpenCode-Go (`sk-…`) and CommandCode (`user_…` / `sk-…`) keys in one pool.
+- **Paste-a-key setup** — Drop any text containing keys into the setup wizard; Saros extracts them and identifies the provider by pinging each provider's API (smoke test).
 - **Multi-key rotation** — Round-robin across all your API keys.
 - **Auto failover** — Retry failed requests with the next healthy key.
 - **Circuit breaker** — Disable flaky keys after a configurable threshold, then lazily re-enable them after cooldown.
@@ -223,10 +225,11 @@ npx saros-proxy setup
 
 The wizard will:
 1. Ask for your proxy port (default: 3000)
-2. Ask for your API keys (name + key)
-3. Generate `config.yaml` automatically
-4. Run a smoke test to verify everything works
-5. Configure opencode.json with provider settings and model definitions
+2. Offer a **paste-a-key mode**: drop any text containing your keys (a `.env` dump, chat message, notes file) — Saros extracts every key and identifies its provider with a live smoke test, showing the detected provider and plan
+3. Ask for your API keys manually if you prefer (typed input also auto-detects `user_` CommandCode tokens)
+4. Generate `config.yaml` automatically
+5. Run a smoke test to verify everything works
+6. Configure opencode.json with provider settings and model definitions
 
 Want to run manually instead? Skip the wizard and just create a `config.yaml`:
 
@@ -239,6 +242,8 @@ keys:
     key: sk-your-primary-key-here-12345678
   - label: secondary
     key: sk-your-secondary-key-here-87654321
+  - label: commandcode
+    key: user_your-commandcode-token-here
 circuitBreakerThreshold: 3
 circuitBreakerCooldownMs: 60000
 requestTimeoutMs: 30000
@@ -287,23 +292,61 @@ Every option can be set via YAML (`config.yaml`), environment variables, or CLI 
 | `circuitBreakerCooldownMs` | — | `CIRCUIT_BREAKER_COOLDOWN_MS` | `60000` | Cooldown before re-enabling (1000–3600000) |
 | `requestTimeoutMs` | — | `REQUEST_TIMEOUT_MS` | `30000` | Upstream timeout (1000–300000) |
 | `allowedOrigins` | — | — | `["http://localhost:*", "http://127.0.0.1:*"]` | CORS origins (`[]` = allow all) |
-| `keys` | — | `OPENCODE_GO_KEYS` | — | Array of `{label, key}` |
+| `keys` | — | `OPENCODE_GO_KEYS` | — | Array of `{label, key, provider?}` |
+| `upstreams` | — | — | provider defaults | Per-provider upstream URL overrides (HTTPS only) |
 | `config` | `--config` | — | `config.yaml` | Path to YAML config |
 
 ### API Key Format
 
-Keys must start with `sk-` and be at least 20 characters.
+Saros accepts keys from multiple providers. A key must be at least 20 characters and match one of these formats:
+
+| Prefix | Provider | Notes |
+|---|---|---|
+| `sk-…` | OpenCode-Go or CommandCode | `sk-` is shared by both providers; Saros infers OpenCode-Go unless an explicit `provider` is set |
+| `user_…` | CommandCode | Always detected as CommandCode |
 
 **YAML:**
 ```yaml
 keys:
   - label: my-account
-    key: sk-your-key-here...
+    key: sk-your-key-here...            # opencode-go (default inference)
+  - label: cc-account
+    key: user_your-token-here...        # commandcode (inferred from prefix)
+  - label: cc-console-key
+    key: sk-your-console-key-here...    # ambiguous prefix → set provider explicitly
+    provider: commandcode
+```
+
+The `provider` field is optional — it wins over prefix inference and is required only when a CommandCode `sk-` console key must be distinguished from an OpenCode-Go key. When keys are encrypted at rest (prefix hidden), the provider from setup time is persisted alongside.
+
+**Per-provider upstream override (optional):**
+
+```yaml
+upstreams:
+  commandcode: https://api.commandcode.ai   # default
+  opencode-go: https://opencode.ai          # default
 ```
 
 **Environment variable:**
 ```bash
-OPENCODE_GO_KEYS="account1:sk-xxx,account2:sk-yyy"
+OPENCODE_GO_KEYS="account1:sk-xxx,cc:user_yyy"
+```
+
+#### How multi-provider routing works
+
+- Clients always speak the canonical OpenCode-Go shapes (`/zen/go/v1/...` or the `/v1/...` alias).
+- When a request is served by a CommandCode key, Saros remaps the route to CommandCode's OpenAI-compatible surface (`/provider/v1/...`) and injects the provider's identity headers — transparent to the client.
+- Models uniquely named by a provider (e.g. `claude-*` or vendor-prefixed ids on CommandCode) are routed to a key of that provider first; other providers remain as fallback.
+- Synced harness configs may list provider-specific models as `model@commandcode`; the suffix selects the provider and is stripped before forwarding.
+- The `/health` endpoint reports per-provider key counts under `providers`.
+- Usage-based weighted rotation applies to providers with a queryable usage API (OpenCode-Go). CommandCode keys participate in rotation without usage data.
+
+#### Smoke test (key identification)
+
+`identifyKey` verifies a key by pinging each candidate provider with a cheap, read-only request (no token spend): OpenCode-Go `GET /zen/go/v1/usage`, CommandCode `GET /alpha/billing/subscriptions` (which also reports the subscription plan). `200` = valid, `401/403` = rejected, network error = inconclusive. The setup wizard uses this to label pasted keys; you can run it yourself:
+
+```bash
+CC_KEY=user_your-token npx tsx scripts/live-identify-check.ts
 ```
 
 ### API Key Encryption
@@ -660,6 +703,7 @@ src/
   config.ts             — Config loading from YAML, env vars, CLI
   constants.ts          — All defaults and configuration values
   logger.ts             — Structured logging with Pino + key masking
+  providers/            — Multi-provider key abstraction (KeyProvider, adapters, identifyKey)
   models-fetcher.ts     — Upstream model list fetching + caching
   models-sync.ts        — Auto-sync models from upstream to opencode config
   cli/

@@ -40,6 +40,12 @@ export interface KeyProvider {
   readonly displayName: string;
   /** Upstream base URL (HTTPS enforced by callers). */
   readonly baseUrl: string;
+  /**
+   * Canonical chat route prefix saros accepts from clients. Clients always
+   * speak opencode-go shapes (/zen/go/v1/...); providers without a matching
+   * upstream path get their requests remapped (see remapChatPath).
+   */
+  readonly chatBasePath: string;
 
   /**
    * Cheap structural check. 'yes' = prefix uniquely identifies this
@@ -72,7 +78,31 @@ export interface KeyProvider {
    * must not include Authorization (added by the proxy).
    */
   extraUpstreamHeaders?(): Record<string, string>;
+
+  /**
+   * Fetch this provider's live model catalog (OpenAI list shape).
+   * Returns null when unavailable — callers fall back to bundled data.
+   * Implementations must not require a valid key (catalogs are public).
+   */
+  fetchCatalog?(timeoutMs?: number): Promise<Array<Record<string, unknown>> | null>;
+
+  /**
+   * Structural model-id affinity check. Consulted BEFORE dispatching so a
+   * request naming a commandcode-only model (e.g. 'claude-*') is not sent
+   * with an opencode-go key (and vice versa).
+   */
+  modelAffinity(modelId: string): ModelAffinity;
 }
+
+/**
+ * Model → provider affinity.
+ *
+ * 'yes' = the model id is (almost certainly) served by this provider,
+ * 'no' = definitely not, 'maybe' = cannot be decided structurally — the
+ * proxy tries matching providers first and falls back to any available key.
+ * Used for request routing in mixed-provider key pools.
+ */
+export type ModelAffinity = 'yes' | 'no' | 'maybe';
 
 /** Shared usage shape used across providers (mirrors usage-client KeyUsage). */
 export interface KeyUsage {

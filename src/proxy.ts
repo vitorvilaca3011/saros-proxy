@@ -34,31 +34,72 @@ import { getModelsList } from './models-fetcher.js';
 import { maybeRefreshUsage } from './usage-client.js';
 import { recordModelRequest } from './model-stats.js';
 import { getProvider, inferProvider } from './providers/index.js';
-import type { KeyProvider } from './providers/index.js';
-import {
-  COMMANDCODE_CHAT_BASE_PATH,
-  OPENCODE_CHAT_BASE_PATH,
-} from './constants.js';
+import type { KeyProvider, ProviderId } from './providers/index.js';
+
+/** Canonical client-facing chat route prefix (the opencode-go shape). */
+const CANONICAL_CHAT_BASE = '/zen/go/v1';
 
 /**
  * Resolve the upstream URL for one attempt: per-provider base URL + path
- * remapping. Canonical saros routes are /zen/go/v1/<rest>; commandcode keys
- * remap to /provider/v1/<rest> (its OpenAI-compatible surface).
+ * remapping. Clients always speak canonical saros routes (/zen/go/v1/<rest>,
+ * the opencode-go shape); requests routed to a provider with a different
+ * chat surface get the prefix remapped (e.g. /provider/v1 for commandcode).
  */
 export function resolveUpstreamUrl(config: ProxyConfig, provider: KeyProvider, path: string): string {
   const base = (config.upstreams?.[provider.id] ?? (provider.id === 'opencode-go' ? config.upstreamBaseUrl : provider.baseUrl))
     .replace(/\/+$/, '');
-  if (provider.id === 'opencode-go') {
+  if (provider.chatBasePath === CANONICAL_CHAT_BASE) {
     return buildUpstreamUrl(base, path);
   }
-  const remapped = path.startsWith(OPENCODE_CHAT_BASE_PATH)
-    ? COMMANDCODE_CHAT_BASE_PATH + path.slice(OPENCODE_CHAT_BASE_PATH.length)
+  const remapped = path.startsWith(CANONICAL_CHAT_BASE)
+    ? provider.chatBasePath + path.slice(CANONICAL_CHAT_BASE.length)
     : path;
   return buildUpstreamUrl(base, remapped);
 }
 
-/** Provider for a key snapshot (structural inference; config already validated). */
-function providerForKey(key: KeySnapshot, config: ProxyConfig): KeyProvider {
+/**
+ * Extract a provider-suffix routing hint from a model id
+ * (e.g. 'claude-…@commandcode' → 'commandcode'). Returns null when absent.
+ */
+export function parseProviderSuffix(modelId: string | undefined): string | null {
+  if (!modelId) return null;
+  const at = modelId.lastIndexOf('@');
+  if (at <= 0 || at === modelId.length - 1) return null;
+  return modelId.slice(at + 1);
+}
+
+/** Strip the @provider routing suffix from a model id for upstream forwarding. */
+export function stripProviderSuffix(modelId: string): string {
+  const at = modelId.lastIndexOf('@');
+  return at > 0 ? modelId.slice(0, at) : modelId;
+}
+
+/**
+ * Rewrite the model field inside a JSON request body. Returns the original
+ * text unchanged when the body isn't valid JSON or has no model field.
+ */
+function rewriteModelInBody(bodyText: string, modelId: string): string {
+  try {
+    const parsed = JSON.parse(bodyText) as Record<string, unknown>;
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return bodyText;
+    if (typeof parsed.model !== 'string') return bodyText;
+    parsed.model = modelId;
+    return JSON.stringify(parsed);
+  } catch {
+    return bodyText;
+  }
+}
+
+/**
+ * Provider for a key snapshot. Suffix-routed requests (​@provider model ids)
+ * pin the provider; otherwise structural inference from the key itself.
+ */
+function providerForKey(key: KeySnapshot, config: ProxyConfig, modelId?: string): KeyProvider {
+  const suffixProvider = parseProviderSuffix(modelId);
+  if (suffixProvider) {
+    const pinned = getProvider(suffixProvider as ProviderId);
+    if (pinned) return pinned;
+  }
   const inferred = inferProvider({ label: key.label, key: key.key });
   void config;
   return getProvider(inferred) ?? getProvider('opencode-go')!;
@@ -242,6 +283,8 @@ interface RetryContext {
   incomingHeaders: Headers;
   bodyText: string;
   kind: RequestKind;
+  /** Model id parsed from the request body (for affinity routing); optional. */
+  modelId?: string;
   onSuccess: SuccessHandler;
 }
 
@@ -263,6 +306,7 @@ async function executeWithRetry(opts: {
   incomingHeaders: Headers;
   bodyText: string;
   kind: RequestKind;
+  modelId?: string;
   onSuccess: SuccessHandler;
   maxRetries: number;
 }): Promise<Response> {
@@ -275,6 +319,7 @@ async function executeWithRetry(opts: {
     incomingHeaders: opts.incomingHeaders,
     bodyText: opts.bodyText,
     kind: opts.kind,
+    modelId: opts.modelId,
     onSuccess: opts.onSuccess,
   };
 
@@ -296,10 +341,16 @@ async function executeSingleAttempt(attempt: number, ctx: RetryContext): Promise
   }
 
   logKeyAttempt(ctx.requestId, key, attempt, ctx.kind);
-  // Per-attempt upstream: keys may be mixed-provider within one failover chain
-  const provider = providerForKey(key, ctx.config);
+  // Per-attempt upstream: keys may be mixed-provider within one failover chain.
+  // Suffix-routed models (@provider) pin the provider and lose the suffix
+  // in the forwarded body; the upstream never sees saros's routing shim.
+  const provider = providerForKey(key, ctx.config, ctx.modelId);
   const upstreamUrl = resolveUpstreamUrl(ctx.config, provider, ctx.path);
-  const fetchOptions = buildFetchOptions(ctx.method, ctx.bodyText, ctx.kind, ctx.incomingHeaders, key.key, provider);
+  const outboundBody =
+    ctx.modelId && parseProviderSuffix(ctx.modelId) && ctx.bodyText
+      ? rewriteModelInBody(ctx.bodyText, stripProviderSuffix(ctx.modelId))
+      : ctx.bodyText;
+  const fetchOptions = buildFetchOptions(ctx.method, outboundBody, ctx.kind, ctx.incomingHeaders, key.key, provider);
 
   try {
     const response = await fetchWithTimeout(upstreamUrl, fetchOptions, ctx.config.requestTimeoutMs);
@@ -319,7 +370,7 @@ async function executeSingleAttempt(attempt: number, ctx: RetryContext): Promise
 
 function pickKey(ctx: RetryContext, attempt: number): KeySnapshot | null {
   return attempt === 0
-        ? selectKeyForRequest(ctx.state, ctx.requestId)
+        ? selectKeyForRequest(ctx.state, ctx.requestId, ctx.modelId)
     : failoverRequest(ctx.state, ctx.requestId);
 }
 
@@ -532,6 +583,8 @@ interface HandleRequestOptions {
   path: string;
   incomingHeaders: Headers;
   bodyText: string;
+  /** Model id from the request body — drives provider-affinity routing. */
+  modelId?: string;
   maxRetries?: number;
 }
 
@@ -549,6 +602,7 @@ async function handleWithFailover(opts: HandleRequestOptions): Promise<Response>
     incomingHeaders: opts.incomingHeaders,
     bodyText: opts.bodyText,
     kind: 'standard',
+    modelId: opts.modelId,
     onSuccess: standardSuccessHandler,
     maxRetries: opts.maxRetries ?? MAX_RETRIES,
   });
@@ -569,6 +623,7 @@ async function handleStreamingRequest(opts: HandleRequestOptions): Promise<Respo
     incomingHeaders: opts.incomingHeaders,
     bodyText: opts.bodyText,
     kind: 'streaming',
+    modelId: opts.modelId,
     onSuccess: streamingSuccessHandler,
     maxRetries: opts.maxRetries ?? MAX_RETRIES,
   });
@@ -661,6 +716,12 @@ export function createProxyApp(config: ProxyConfig): Hono {
     circuitBreakerThreshold: config.circuitBreakerThreshold,
     circuitBreakerCooldownMs: config.circuitBreakerCooldownMs,
   });
+  // Model→provider affinity: requests naming a provider-specific model
+  // (e.g. commandcode's vendor-prefixed ids) are routed to a matching key
+  // first; 'maybe' providers remain as fallback. No-op for single-provider
+  // pools and when no provider claims the model.
+  state.affinityResolver = (providerId, modelId) =>
+    getProvider(providerId as ProviderId)?.modelAffinity(modelId) ?? 'maybe';
 
   const app = new Hono();
 
@@ -716,6 +777,13 @@ export function createProxyApp(config: ProxyConfig): Hono {
       activeRequests: activeCount,
       circuitBreakerThreshold: state.circuitBreakerThreshold,
       circuitBreakerCooldownMs: state.circuitBreakerCooldownMs,
+      // Per-provider key counts (multi-provider pools)
+      providers: keys.reduce<Record<string, { total: number; enabled: number }>>((acc, k) => {
+        const entry = (acc[k.provider] ??= { total: 0, enabled: 0 });
+        entry.total++;
+        if (k.enabled) entry.enabled++;
+        return acc;
+      }, {}),
     });
   });
 
@@ -769,6 +837,7 @@ export function createProxyApp(config: ProxyConfig): Hono {
         path,
         incomingHeaders,
         bodyText,
+        modelId: typeof parsedBody.model === 'string' ? parsedBody.model : undefined,
       });
     }
 
@@ -781,6 +850,7 @@ export function createProxyApp(config: ProxyConfig): Hono {
       path,
       incomingHeaders,
       bodyText,
+      modelId: typeof parsedBody?.model === 'string' ? parsedBody.model : undefined,
     });
   }
 

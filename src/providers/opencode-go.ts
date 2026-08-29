@@ -55,6 +55,7 @@ export const opencodeGoProvider: KeyProvider = {
   id: 'opencode-go',
   displayName: 'OpenCode Go',
   baseUrl: 'https://opencode.ai',
+  chatBasePath: '/zen/go/v1',
 
   quickMatch(key: string): PrefixMatch {
     // sk- is shared with commandcode → never a definitive 'yes'.
@@ -99,5 +100,15 @@ export const opencodeGoProvider: KeyProvider = {
 
   parseUsageResponse(body: string): KeyUsage | null {
     return parseOpencodeUsage(body);
-  }
+  },
+
+  /**
+   * Affinity is 'maybe' for everything: opencode-go and commandcode model
+   * catalogs overlap heavily (both route glm/kimi/qwen/deepseek/...), so a
+   * structural no would wrongly block opencode keys from shared models.
+   * Routing treats 'maybe' as fallback-after-specific-match.
+   */
+  modelAffinity(_modelId: string): 'maybe' {
+    return 'maybe';
+  },
 };

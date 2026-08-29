@@ -202,7 +202,7 @@ export function validateNonInteractiveArgs(opts: SetupOptions): ValidationError[
     for (const k of keys) {
       if (!k.label) errors.push({ field: 'keys', message: 'Key label cannot be empty' });
       if (!isValidApiKey(k.key)) {
-        errors.push({ field: 'keys', message: `Key "${k.label}" must start with "sk-" and be at least 20 characters` });
+        errors.push({ field: 'keys', message: `Key "${k.label}" must start with "sk-" or "user_" and be at least 20 characters` });
       }
     }
   }

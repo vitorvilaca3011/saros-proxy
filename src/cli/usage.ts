@@ -11,6 +11,7 @@ import chalk from 'chalk';
 import { existsSync, readFileSync } from 'node:fs';
 import { loadConfig } from '../config.js';
 import { fetchKeyUsage } from '../usage-client.js';
+import { getProvider, inferProvider } from '../providers/index.js';
 import { getModelStatsPath } from '../model-stats.js';
 
 interface ModelStatsFile {
@@ -94,22 +95,34 @@ export async function runUsageCommand(): Promise<number> {
   console.log(chalk.bold('Key usage') + chalk.dim(` (${config.upstreamBaseUrl})`));
 
   const results = await Promise.all(
-    config.keys.map(async ({ label, key }) => ({
-      label,
-      usage: await fetchKeyUsage(config.upstreamBaseUrl, key),
-    })),
+    config.keys.map(async ({ label, key, provider }) => {
+      const providerId = provider ?? inferProvider({ label, key });
+      const p = getProvider(providerId);
+      // Providers without a queryable usage API report 'n/a' instead of an error.
+      if (!p || !p.usagePath()) {
+        return { label, provider: providerId, usage: null, noUsageApi: true };
+      }
+      const base = config.upstreams?.[p.id] ?? (p.id === 'opencode-go' ? config.upstreamBaseUrl : p.baseUrl);
+      return { label, provider: providerId, usage: await fetchKeyUsage(base, key, p.usagePath()), noUsageApi: false };
+    }),
   );
 
   let failures = 0;
-  for (const { label, usage } of results) {
+  for (const { label, provider, usage, noUsageApi } of results) {
+    if (noUsageApi) {
+      console.log(
+        `  ${chalk.yellow('·')} ${label.padEnd(16)}${chalk.dim(` (${provider})`)}`
+        + chalk.dim('  usage: n/a — provider has no queryable usage API'),
+      );
+      continue;
+    }
     if (!usage) {
       failures++;
-      console.log(`  ${chalk.red('✗')} ${label.padEnd(16)} failed to fetch usage`);
+      console.log(`  ${chalk.red('✗')} ${label.padEnd(16)}${chalk.dim(` (${provider})`)} failed to fetch usage`);
       continue;
     }
     console.log(
-      `  ${chalk.green('•')} ${label.padEnd(16)}`
-      + ` 5h: ${formatWindow(usage.rollingPercent)}`
+      `  ${chalk.green('•')} ${label.padEnd(16)}${chalk.dim(` (${provider})`)} 5h: ${formatWindow(usage.rollingPercent)}`
       + `  Weekly: ${formatWindow(usage.weeklyPercent)}`
       + `  Monthly: ${formatWindow(usage.monthlyPercent)}`
       + chalk.dim(`  (tightest resets ${earliestReset(usage)})`),

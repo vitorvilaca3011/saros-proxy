@@ -246,8 +246,8 @@ describe('C3 – Read-only Snapshots', () => {
   it('selectKeyForRequest returns KeySnapshot not ApiKey', () => {
     const state = makeState();
     const snap = selectKeyForRequest(state, 'req-snap');
-    expect(snap).toEqual({ label: 'alpha', key: 'sk-a1' });
-    expect(Object.keys(snap!).sort()).toEqual(['key', 'label']);
+    expect(snap).toEqual({ label: 'alpha', key: 'sk-a1', provider: 'opencode-go' });
+    expect(Object.keys(snap!).sort()).toEqual(['key', 'label', 'provider']);
   });
 
   it('mutating returned snapshot does not affect internal state', () => {
@@ -268,7 +268,7 @@ describe('C3 – Read-only Snapshots', () => {
 
     const failSnap = failoverRequest(state, 'req-1');
     expect(failSnap).not.toBeNull();
-    expect(Object.keys(failSnap!).sort()).toEqual(['key', 'label']);
+    expect(Object.keys(failSnap!).sort()).toEqual(['key', 'label', 'provider']);
   });
 });
 
@@ -284,7 +284,7 @@ describe('C4 – Request-Scoped Key Tracking', () => {
   it('selectKeyForRequest creates context and picks first key', () => {
     const state = makeState();
     const snap = selectKeyForRequest(state, 'req-1');
-    expect(snap).toEqual({ label: 'alpha', key: 'sk-a1' });
+    expect(snap).toEqual({ label: 'alpha', key: 'sk-a1', provider: 'opencode-go' });
 
     const ctx = state.activeRequests.get('req-1');
     expect(ctx).toBeDefined();

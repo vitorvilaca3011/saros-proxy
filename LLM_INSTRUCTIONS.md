@@ -95,8 +95,12 @@ If the user answers "Not saved yet" for keys, tell them:
 > ```
 > primary sk-your-first-key-here
 > secondary sk-your-second-key-here
+> commandcode user_your-commandcode-token
 > ```
-> Keys must start with `sk-` and be at least 20 characters.
+> Keys must start with `sk-` (OpenCode-Go **or** CommandCode) or `user_` (CommandCode), and be at least 20 characters. `user_` keys are always CommandCode; for CommandCode `sk-` console keys add the provider as a third column:
+> ```
+> cc-console sk-your-console-key commandcode
+> ```
 
 Then ask for the file path before proceeding.
 
@@ -116,7 +120,7 @@ Once you have all the info, execute in order:
 
 ### 2.2 Read Keys & Generate Config
 
-Read the keys file, then create `config.yaml`:
+Read the keys file, then create `config.yaml`. Keys starting with `user_` are CommandCode (add `provider: commandcode`); `sk-` keys are OpenCode-Go unless the user said otherwise (add `provider: commandcode` for CommandCode console keys):
 
 ```yaml
 port: {port}
@@ -133,6 +137,10 @@ keys:
     key: {key1}
   - label: {label2}
     key: {key2}
+  # For a CommandCode key:
+  # - label: {labelCC}
+  #   key: user_...
+  #   provider: commandcode
 ```
 
 If encryption was chosen, use the non-interactive setup with `--encryption-key-file`:
@@ -254,8 +262,27 @@ rm {keys-file-path}
 | circuitBreakerCooldownMs | 60000 | 1000–3600000 | `CIRCUIT_BREAKER_COOLDOWN_MS` |
 | requestTimeoutMs | 30000 | 1000–300000 | `REQUEST_TIMEOUT_MS` |
 | allowedOrigins | localhost only | — | — |
-| keys | — | sk- prefix, min 20 chars | `OPENCODE_GO_KEYS` (comma-separated label:key) |
+| keys | — | `sk-` or `user_` prefix, min 20 chars | `OPENCODE_GO_KEYS` (comma-separated label:key) |
 | encryption | — | AES-256-GCM | `OPENCODE_GO_ENCRYPTION_KEY` |
+
+---
+
+## Reference: Multi-Provider Keys
+
+Saros supports keys from multiple providers in one pool:
+
+| Prefix | Provider | In config.yaml |
+|--------|----------|----------------|
+| `user_…` | CommandCode | `provider: commandcode` (optional, inferred) |
+| `sk-…` | OpenCode-Go (default) or CommandCode console key | set `provider:` explicitly for CommandCode `sk-` keys |
+
+Behavior worth telling the user:
+
+- Mixed pools work transparently: requests always use the OpenCode-Go URL shapes; CommandCode-routed requests are remapped internally (`/zen/go/v1/…` → `/provider/v1/…`).
+- CommandCode-only models (e.g. `claude-*`, vendor-prefixed ids) can appear in synced harness configs as `model@commandcode`.
+- `GET /health` reports per-provider key counts (`providers` object).
+- `saros-proxy usage` shows usage percentages for OpenCode-Go keys; CommandCode keys are listed as `usage: n/a` (no queryable usage API yet) — this is not an error.
+- Key identification (which provider a pasted key belongs to) is done with cheap read-only pings: OpenCode-Go `GET /zen/go/v1/usage`, CommandCode `GET /alpha/billing/subscriptions` (also reports the plan). No tokens are spent.
 
 ---
 

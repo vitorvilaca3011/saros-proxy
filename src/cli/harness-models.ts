@@ -11,6 +11,15 @@
 import type { ProxyConfig } from '../config.js';
 import { loadModelsFromJson } from './opencode-config.js';
 import { buildMinimalStub, fetchModelsDevMetadata, fetchUpstreamModelIds } from '../models-sync.js';
+import { allProviders, inferProvider } from '../providers/index.js';
+import type { KeyProvider, ProviderId } from '../providers/index.js';
+
+/**
+ * Suffix for provider-specific model ids in synced harness configs.
+ * Commandcode-only models (claude-*, vendor/model) are exposed to harnesses
+ * as `<id>@commandcode`; the proxy strips the suffix on the way upstream.
+ */
+export const PROVIDER_MODEL_SUFFIX = '@';
 
 export interface PiOmpModel {
   id: string;
@@ -102,11 +111,71 @@ export function toPiOmpModelArray(models: Record<string, unknown>): PiOmpModel[]
 }
 
 /**
+ * Map one provider-catalog entry into the canonical opencode-shaped entry.
+ * Uses the catalog's own fields when present (commandcode serves name +
+ * context_length); models.dev metadata is not available for these providers.
+ */
+function providerCatalogToCanonical(modelId: string, entry: Record<string, unknown>): Record<string, unknown> {
+  const context = typeof entry.context_length === 'number' ? entry.context_length : undefined;
+  const name = typeof entry.name === 'string' ? entry.name : modelId;
+  return {
+    id: modelId,
+    name,
+    tool_call: true,
+    reasoning: true,
+    limit: {
+      context: context ?? 262144,
+      output: 65536,
+    },
+    modalities: { input: ['text'], output: ['text'] },
+    // Hint consumed by display tooling; harmless to harnesses that ignore it.
+    ...(typeof entry.owned_by === 'string' ? { owned_by: entry.owned_by } : {}),
+  };
+}
+
+/**
+ * Fetch model entries from the given providers and merge them into the map
+ * under `<id>@<providerId>` (only for ids the provider uniquely claims —
+ * affinity 'yes'), skipping ids already present.
+ *
+ * Only providers the user actually has keys for are merged: exposing
+ * provider-only models without a usable key would create broken entries in
+ * harness configs.
+ */
+async function appendProviderCatalogModels(
+  map: Record<string, unknown>,
+  existingIds: Set<string>,
+  config: ProxyConfig,
+): Promise<void> {
+  const configured = new Set<ProviderId>((config.keys ?? []).map((k) => inferProvider(k)));
+  const providers = allProviders().filter(
+    (p): p is KeyProvider & { fetchCatalog: NonNullable<KeyProvider['fetchCatalog']> } =>
+      configured.has(p.id) && typeof p.fetchCatalog === 'function',
+  );
+  await Promise.all(
+    providers.map(async (provider) => {
+      const catalog = await provider.fetchCatalog();
+      if (!catalog) return;
+      for (const entry of catalog) {
+        const rawId = typeof entry.id === 'string' ? entry.id : '';
+        if (!rawId) continue;
+        if (provider.modelAffinity(rawId) !== 'yes') continue; // shared ids → primary provider's entry
+        const suffixedId = `${rawId}${PROVIDER_MODEL_SUFFIX}${provider.id}`;
+        if (existingIds.has(suffixedId)) continue;
+        existingIds.add(suffixedId);
+        map[suffixedId] = providerCatalogToCanonical(suffixedId, entry);
+      }
+    }),
+  );
+}
+
+/**
  * Build the canonical model map (id → opencode-shaped entry).
  *
  * Live path (config provided, not offline): fetch upstream model IDs and
- * enrich each with models.dev metadata via buildMinimalStub. Falls back to
- * the bundled models.json when the upstream fetch yields nothing.
+ * enrich each with models.dev metadata via buildMinimalStub, then append
+ * provider-specific catalog models (@commandcode etc.). Falls back to the
+ * bundled models.json when the upstream fetch yields nothing.
  * Offline path (or no config): bundled models.json only.
  */
 export async function buildCanonicalModels(
@@ -128,9 +197,12 @@ export async function buildCanonicalModels(
 
   if (ids && ids.length > 0) {
     const map: Record<string, unknown> = {};
+    const seen = new Set<string>();
     for (const id of ids) {
       map[id] = buildMinimalStub(id, meta ?? undefined);
+      seen.add(id);
     }
+    await appendProviderCatalogModels(map, seen, config);
     return map;
   }
 
