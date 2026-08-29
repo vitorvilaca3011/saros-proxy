@@ -92,6 +92,23 @@ export interface KeyProvider {
    * with an opencode-go key (and vice versa).
    */
   modelAffinity(modelId: string): ModelAffinity;
+
+  /**
+   * Affinity by bare model name (without vendor prefix), e.g. 'ds-v4-flash'
+   * for 'deepseek/ds-v4-flash'. Providers whose catalogs use vendor-prefixed
+   * ids match the bare name against their catalog's last path segment;
+   * others return the same verdict as modelAffinity(id).
+   * Enables cross-provider aliasing so shared models rotate across all keys.
+   */
+  modelAffinityByName?(bareName: string): ModelAffinity;
+
+  /**
+   * Map a bare model name to this provider's native catalog id
+   * ('deepseek-v4-flash' → 'deepseek/deepseek-v4-flash'), or null when the
+   * catalog doesn't serve it. Backed by the provider's live catalog;
+   * providers with 1:1 naming may return the input unchanged.
+   */
+  resolveNativeId?(bareName: string): string | null;
 }
 
 /**

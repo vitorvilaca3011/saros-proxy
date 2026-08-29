@@ -10,7 +10,22 @@ import {
   resolveUpstreamUrl,
 } from '../proxy.js';
 import { getProvider } from './index.js';
+import { bareModelName, annotateName } from '../cli/harness-models.js';
 import type { ProxyConfig } from '../config.js';
+
+describe('rotation-width annotation', () => {
+  it('normalizes vendor ids to bare names', () => {
+    expect(bareModelName('deepseek/deepseek-v4-flash')).toBe('deepseek-v4-flash');
+    expect(bareModelName('GLM-5')).toBe('glm-5');
+    expect(bareModelName('gpt_5_mini')).toBe('gpt-5-mini');
+  });
+
+  it('annotates names with the serving-key count', () => {
+    expect(annotateName('DeepSeek V4 Flash', 3)).toBe('DeepSeek V4 Flash (3)');
+    expect(annotateName('Claude Sonnet 5', 1)).toBe('Claude Sonnet 5 (1)');
+    expect(annotateName('No keys model', 0)).toBe('No keys model');
+  });
+});
 
 /** Two-key mixed pool: opencode-go + commandcode. */
 function makeMixedState(affinity?: ProxyState['affinityResolver']): ProxyState {

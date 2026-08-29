@@ -91,6 +91,34 @@ function rewriteModelInBody(bodyText: string, modelId: string): string {
 }
 
 /**
+ * Rewrite a request's model id for the provider about to serve it.
+ *
+ * 1. '@provider' suffix → strip it (the suffix is saros's routing shim).
+ * 2. Otherwise, when the serving provider names the same model differently
+ *    (bare name matches its catalog under a vendor-prefixed id — e.g.
+ *    'deepseek-v4-flash' → 'deepseek/deepseek-v4-flash' on commandcode),
+ *    rewrite to the provider's native id so the upstream recognizes it.
+ *    This is what makes cross-provider round-robin seamless: one id in,
+ *    any of the serving keys out.
+ */
+function rewriteModelForProvider(
+  bodyText: string,
+  modelId: string | undefined,
+  provider: KeyProvider,
+): string {
+  if (!modelId) return bodyText;
+  if (parseProviderSuffix(modelId)) {
+    return rewriteModelInBody(bodyText, stripProviderSuffix(modelId));
+  }
+  const bare = modelId.split('/').pop() ?? modelId;
+  const native = provider.resolveNativeId?.(bare.toLowerCase());
+  if (native && native !== modelId) {
+    return rewriteModelInBody(bodyText, native);
+  }
+  return bodyText;
+}
+
+/**
  * Provider for a key snapshot. Suffix-routed requests (​@provider model ids)
  * pin the provider; otherwise structural inference from the key itself.
  */
@@ -170,8 +198,11 @@ export function buildUpstreamUrl(base: string, path: string): string {
 }
 
 /**
- * Clean headers for upstream forwarding: remove hop-by-hop headers
- * and any pre-existing Authorization.
+ * Clean headers for upstream forwarding: remove hop-by-hop headers,
+ * pre-existing Authorization, and content-length (the forwarded body may be
+ * rewritten — model-id aliasing / suffix strip — so a stale content-length
+ * makes the upstream wait for bytes that never arrive; undici recomputes it
+ * from the real body).
  */
 export function buildUpstreamHeaders(
   incoming: Headers,
@@ -189,7 +220,8 @@ export function buildUpstreamHeaders(
       lower === 'te' ||
       lower === 'transfer-encoding' ||
       lower === 'upgrade' ||
-      lower === 'authorization'
+      lower === 'authorization' ||
+      lower === 'content-length'
     ) {
       continue;
     }
@@ -224,6 +256,11 @@ export function buildDownstreamHeaders(upstreamHeaders: Headers): Headers {
       // responses, so forwarding content-encoding would make clients try to
       // decompress plain text (found live against api.commandcode.ai).
       lower === 'content-encoding' ||
+      // The forwarded body may be rewritten (model-id aliasing/suffix strip),
+      // so a forwarded content-length can disagree with the actual body and
+      // hang the upstream waiting for missing bytes (found live). Undici
+      // recomputes content-length from the real body.
+      lower === 'content-length' ||
       // Internal debug
       lower === 'x-request-id' ||
       // Response constructor recalculates content-length
@@ -346,10 +383,9 @@ async function executeSingleAttempt(attempt: number, ctx: RetryContext): Promise
   // in the forwarded body; the upstream never sees saros's routing shim.
   const provider = providerForKey(key, ctx.config, ctx.modelId);
   const upstreamUrl = resolveUpstreamUrl(ctx.config, provider, ctx.path);
-  const outboundBody =
-    ctx.modelId && parseProviderSuffix(ctx.modelId) && ctx.bodyText
-      ? rewriteModelInBody(ctx.bodyText, stripProviderSuffix(ctx.modelId))
-      : ctx.bodyText;
+  const outboundBody = ctx.bodyText
+    ? rewriteModelForProvider(ctx.bodyText, ctx.modelId, provider)
+    : ctx.bodyText;
   const fetchOptions = buildFetchOptions(ctx.method, outboundBody, ctx.kind, ctx.incomingHeaders, key.key, provider);
 
   try {
@@ -718,10 +754,20 @@ export function createProxyApp(config: ProxyConfig): Hono {
   });
   // Model→provider affinity: requests naming a provider-specific model
   // (e.g. commandcode's vendor-prefixed ids) are routed to a matching key
-  // first; 'maybe' providers remain as fallback. No-op for single-provider
-  // pools and when no provider claims the model.
-  state.affinityResolver = (providerId, modelId) =>
-    getProvider(providerId as ProviderId)?.modelAffinity(modelId) ?? 'maybe';
+  // first; 'maybe' providers remain as fallback. Bare-name matching lets
+  // shared models (deepseek-v4-flash etc.) rotate across ALL serving keys
+  // cross-provider. No-op for single-provider pools and when no provider
+  // claims the model.
+  state.affinityResolver = (providerId, modelId) => {
+    const provider = getProvider(providerId as ProviderId);
+    if (!provider) return 'maybe';
+    const direct = provider.modelAffinity(modelId);
+    if (direct !== 'maybe') return direct;
+    // Bare-name cross-check: 'deepseek-v4-flash' may be commandcode's
+    // 'deepseek/deepseek-v4-flash'.
+    const bare = (modelId.split('/').pop() ?? modelId).toLowerCase();
+    return provider.modelAffinityByName?.(bare) ?? 'maybe';
+  };
 
   const app = new Hono();
 

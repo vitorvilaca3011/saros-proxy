@@ -85,6 +85,27 @@ export function parsePlanId(body: string): string | undefined {
  */
 export const COMMANDCODE_PROVIDER_MODELS_PATH = '/provider/v1/models';
 
+/** Bare-name index of the live catalog (last path segment of vendor ids). */
+let catalogCache: { bareNames: Set<string>; nativeByBare: Map<string, string> } | null = null;
+
+function indexCatalog(models: Array<Record<string, unknown>>): void {
+  const bareNames = new Set<string>();
+  const nativeByBare = new Map<string, string>();
+  for (const entry of models) {
+    const id = typeof entry.id === 'string' ? entry.id : '';
+    if (!id) continue;
+    bareNames.add(id.toLowerCase());
+    const lastSegment = id.split('/').pop() ?? id;
+    if (lastSegment) {
+      bareNames.add(lastSegment.toLowerCase());
+      if (!nativeByBare.has(lastSegment.toLowerCase())) {
+        nativeByBare.set(lastSegment.toLowerCase(), id);
+      }
+    }
+  }
+  catalogCache = { bareNames, nativeByBare };
+}
+
 export const commandcodeProvider: KeyProvider = {
   id: 'commandcode',
   displayName: 'CommandCode',
@@ -165,10 +186,12 @@ export const commandcodeProvider: KeyProvider = {
       if (!res.ok) return null;
       const body = (await res.json()) as { data?: unknown };
       if (!Array.isArray(body.data)) return null;
-      return body.data.filter(
+      const models = body.data.filter(
         (m): m is Record<string, unknown> =>
           typeof m === 'object' && m !== null && typeof (m as Record<string, unknown>).id === 'string',
       );
+      indexCatalog(models);
+      return models;
     } catch {
       return null;
     } finally {
@@ -185,5 +208,29 @@ export const commandcodeProvider: KeyProvider = {
     if (modelId.includes('/')) return 'yes';
     if (/^claude/i.test(modelId)) return 'yes';
     return 'maybe';
+  },
+
+  /**
+   * Bare-name affinity against the live catalog: 'deepseek-v4-flash' matches
+   * the catalog entry 'deepseek/deepseek-v4-flash' (last path segment).
+   * Cached after the first catalog fetch; 'maybe' until the catalog loads.
+   */
+  modelAffinityByName(bareName: string): 'yes' | 'no' | 'maybe' {
+    if (catalogCache) {
+      return catalogCache.bareNames.has(bareName.toLowerCase()) ? 'yes' : 'no';
+    }
+    // Warm the cache in the background; meanwhile stay non-committal.
+    void commandcodeProvider.fetchCatalog?.();
+    return 'maybe';
+  },
+
+  /**
+   * Bare name → commandcode's native id ('deepseek-v4-flash' →
+   * 'deepseek/deepseek-v4-flash'). null when the catalog isn't loaded or
+   * doesn't serve the name.
+   */
+  resolveNativeId(bareName: string): string | null {
+    if (!catalogCache) return null;
+    return catalogCache.nativeByBare.get(bareName.toLowerCase()) ?? null;
   },
 };
