@@ -186,10 +186,16 @@ export const commandcodeProvider: KeyProvider = {
       if (!res.ok) return null;
       const body = (await res.json()) as { data?: unknown };
       if (!Array.isArray(body.data)) return null;
-      const models = body.data.filter(
+      const models = (body.data.filter(
         (m): m is Record<string, unknown> =>
           typeof m === 'object' && m !== null && typeof (m as Record<string, unknown>).id === 'string',
-      );
+      )).filter((m) => {
+        // claude-* is served via the Anthropic Messages endpoint only
+        // (verified live: chat/completions → unsupported_model). saros relays
+        // chat/completions shapes, so these models are unusable through it.
+        const id = typeof m.id === 'string' ? m.id : '';
+        return !/^claude/i.test(id);
+      });
       indexCatalog(models);
       return models;
     } catch {
