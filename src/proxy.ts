@@ -10,6 +10,9 @@ import { cors } from 'hono/cors';
 import { rateLimiter } from 'hono-rate-limiter';
 import type { Context } from 'hono';
 import crypto from 'node:crypto';
+import { mkdirSync, writeFileSync } from 'node:fs';
+import { homedir } from 'node:os';
+import { join } from 'node:path';
 
 import {
   createProxyState,
@@ -72,6 +75,48 @@ export function parseProviderSuffix(modelId: string | undefined): string | null 
 export function stripProviderSuffix(modelId: string): string {
   const at = modelId.lastIndexOf('@');
   return at > 0 ? modelId.slice(0, at) : modelId;
+}
+
+function generateRequestId(): string {
+  return crypto.randomUUID();
+}
+
+/**
+ * Opt-in diagnostics: when SAROS_CAPTURE_4XX=1, write the full request
+ * context of every upstream 4xx to <config dir>/captures/ so provider-side
+ * errors (role validation, plan gating) can be replayed and debugged.
+ * Never enabled by default — bodies may contain user content.
+ */
+function captureFailedRequest(ctx: RetryContext, status: number, errorBody: string): void {
+  if (process.env.SAROS_CAPTURE_4XX !== '1') return;
+  if (status < 400 || status >= 500) return;
+  try {
+    const dir = join(homedir(), '.config', 'saros', 'captures');
+    mkdirSync(dir, { recursive: true });
+    const file = join(dir, `${Date.now()}-${ctx.requestId.slice(0, 8)}.json`);
+    writeFileSync(
+      file,
+      JSON.stringify(
+        {
+          ts: new Date().toISOString(),
+          requestId: ctx.requestId,
+          status,
+          method: ctx.method,
+          path: ctx.path,
+          model: ctx.modelId ?? null,
+          kind: ctx.kind,
+          upstreamError: errorBody.slice(0, 2000),
+          requestBody: ctx.bodyText.slice(0, 100_000),
+        },
+        null,
+        2,
+      ),
+      'utf-8',
+    );
+    logger.warn({ requestId: ctx.requestId, file }, 'captured failing request (SAROS_CAPTURE_4XX)');
+  } catch {
+    // diagnostics must never break the proxy
+  }
 }
 
 /**
@@ -177,10 +222,6 @@ class TimeoutError extends Error {
     super(message);
     this.name = 'TimeoutError';
   }
-}
-
-function generateRequestId(): string {
-  return crypto.randomUUID();
 }
 
 /**
@@ -443,6 +484,7 @@ async function handleUpstreamErrorResponse(
   const errorBody = await response.text();
   const errorType = classifyHttpError(response.status, errorBody);
   logUpstreamError(ctx.requestId, key, response.status, errorType, errorBody, ctx.kind);
+  captureFailedRequest(ctx, response.status, errorBody);
 
   if (errorType === 'RequestFault') {
     // Client error — don't retry, don't penalise the key
