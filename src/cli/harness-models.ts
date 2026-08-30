@@ -182,6 +182,10 @@ function providerCatalogToCanonical(
       output: 65536,
     },
     modalities: { input: ['text'], output: ['text'] },
+    // Conservative effort ladder for provider-catalog models (no models.dev
+    // metadata): the commandcode gateway accepts low|medium|high|xhigh and
+    // rejects minimal — better declared here than invented by the harness.
+    reasoning_options: [{ type: 'effort', values: ['low', 'medium', 'high'] }],
     // Hint consumed by display tooling; harmless to harnesses that ignore it.
     ...(typeof entry.owned_by === 'string' ? { owned_by: entry.owned_by } : {}),
   };

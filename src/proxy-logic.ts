@@ -44,6 +44,14 @@ interface RequestContext {
   requestId: string;
   triedKeys: string[]; // keys already attempted for this request (for failover)
   currentKey: KeySnapshot | null; // the key currently in use by this request
+  /**
+   * Provider filter fixed at selection time (model affinity / @suffix pin).
+   * Failover re-applies it so a pinned commandcode request never fails over
+   * to an opencode-go key that cannot serve the (already rewritten) model id.
+   */
+  providerFilter?: (provider: string) => boolean;
+  /** True when the model is provider-pinned (@suffix) — tier-3 cross-provider fallback disabled. */
+  pinned?: boolean;
 }
 
 export interface ProxyState {
@@ -242,6 +250,14 @@ export function updateKeyUsage(state: ProxyState, usage: Map<string, number>): v
 // Request-Scoped Key Tracking (C4)
 // ---------------------------------------------------------------------------
 
+/** Parse a trailing '@provider' suffix from a model id ('x@cc' → 'cc'). */
+function parseModelSuffix(modelId: string | undefined): string | null {
+  if (!modelId) return null;
+  const at = modelId.lastIndexOf('@');
+  if (at <= 0 || at === modelId.length - 1) return null;
+  return modelId.slice(at + 1);
+}
+
 /**
  * Resolve the provider-preference predicate for a request.
  *
@@ -295,6 +311,8 @@ export function selectKeyForRequest(
   state.activeRequests.set(requestId, ctx);
 
   const providerFilter = makeProviderFilter(state, modelId);
+  ctx.providerFilter = providerFilter;
+  ctx.pinned = Boolean(parseModelSuffix(modelId));
 
   // Tier 1: prefer a key not booked by another active request (spread load)
   const excludeLabels = new Set(ctx.triedKeys);
@@ -312,8 +330,10 @@ export function selectKeyForRequest(
     snapshot = findNextKey(state, new Set(ctx.triedKeys), providerFilter);
   }
 
-  // Tier 3: preferred providers exhausted → fall back to any provider.
-  if (!snapshot && providerFilter) {
+  // Tier 3: preferred providers exhausted → fall back to any provider
+  // (pinned requests exempt: a @provider suffix or messages-only model
+  // cannot be served by other providers at all).
+  if (!snapshot && providerFilter && !ctx.pinned) {
     snapshot = findNextKey(state, new Set(ctx.triedKeys));
   }
 
@@ -340,19 +360,26 @@ export function failoverRequest(
   }
 
   // The provider preference was fixed when the request context was created;
-  // failover stays within the same tiers (tried keys are always excluded).
+  // failover re-applies it so cross-provider failover can't pick a key that
+  // cannot serve the (possibly rewritten) model id.
+  const filter = ctx.providerFilter;
   const excludeLabels = new Set(ctx.triedKeys);
   const booked = buildBookedLabels(state);
   for (const label of booked) {
     excludeLabels.add(label);
   }
 
-  let snapshot = findNextKey(state, excludeLabels);
+  let snapshot = findNextKey(state, excludeLabels, filter);
 
-  // Tier 2: all remaining healthy keys are booked — share one.
+  // Tier 2: all remaining healthy preferred keys are booked — share one.
   // Still respects per-request triedKeys (don't re-use a key this
   // request already failed on).
   if (!snapshot) {
+    snapshot = findNextKey(state, new Set(ctx.triedKeys), filter);
+  }
+
+  // Tier 3: exhausted → any provider, unless the model is provider-pinned.
+  if (!snapshot && !ctx.pinned) {
     snapshot = findNextKey(state, new Set(ctx.triedKeys));
   }
 

@@ -134,19 +134,25 @@ export function parseSetupArgs(argv: string[] = process.argv.slice(2)): SetupOpt
   return opts;
 }
 
-/** Parse keys from comma-separated label:key pairs. */
-export function parseKeysFromArgs(keysStr: string): Array<{ label: string; key: string }> {
+/** Parse keys from comma-separated label:key[:provider] triples. */
+export function parseKeysFromArgs(keysStr: string): Array<{ label: string; key: string; provider?: ProviderId }> {
   if (!keysStr.trim()) return [];
   return keysStr.split(',').map((pair) => {
     const trimmed = pair.trim();
     const [label, ...rest] = trimmed.split(':');
     const key = rest.join(':');
+    // Optional third segment: provider (needed for commandcode sk- console keys,
+    // whose sk- prefix is ambiguous with opencode-go)
+    const providerRaw = key.includes(':') ? key.split(':').pop()?.trim() : undefined;
+    if (key.includes(':') && (providerRaw === 'commandcode' || providerRaw === 'opencode-go')) {
+      return { label: label ?? '', key: key.slice(0, key.lastIndexOf(':')), provider: providerRaw as ProviderId };
+    }
     return { label: label ?? '', key };
   });
 }
 
-/** Parse keys from file (one per line: label:key). */
-export function parseKeysFromFile(filePath: string): Array<{ label: string; key: string }> {
+/** Parse keys from file (one per line: label:key[:provider]). */
+export function parseKeysFromFile(filePath: string): Array<{ label: string; key: string; provider?: ProviderId }> {
   const content = readFileSync(filePath, 'utf-8');
   return content
     .split('\n')
@@ -155,6 +161,10 @@ export function parseKeysFromFile(filePath: string): Array<{ label: string; key:
     .map((line) => {
       const [label, ...rest] = line.split(':');
       const key = rest.join(':');
+      const providerRaw = key.includes(':') ? key.split(':').pop()?.trim() : undefined;
+      if (key.includes(':') && (providerRaw === 'commandcode' || providerRaw === 'opencode-go')) {
+        return { label: label ?? '', key: key.slice(0, key.lastIndexOf(':')), provider: providerRaw as ProviderId };
+      }
       return { label: label ?? '', key };
     });
 }
@@ -760,7 +770,7 @@ export async function setup(configDir?: string, skipSmokeTest?: boolean): Promis
     }
 
     // Parse keys
-    let keys: Array<{ label: string; key: string }>;
+    let keys: Array<{ label: string; key: string; provider?: ProviderId }>;
     if (opts.keysFile) {
       keys = parseKeysFromFile(opts.keysFile);
     } else {
@@ -775,10 +785,15 @@ export async function setup(configDir?: string, skipSmokeTest?: boolean): Promis
       encryptionKey = opts.encryptionKey;
     }
 
+    // Infer provider BEFORE encryption: once encrypted, the prefix is hidden
+    // (enc:scrypt:…) and inference would misroute user_ commandcode keys to
+    // opencode-go. The explicit provider column still wins.
+    const withProvider = keys.map((k) => ({ ...k, provider: k.provider ?? inferProvider(k) }));
+
     // Encrypt keys if needed
     const finalKeys = encryptionKey
-      ? keys.map((k) => ({ ...k, key: encryptKey(k.key, encryptionKey!) }))
-      : keys;
+      ? withProvider.map((k) => ({ ...k, key: encryptKey(k.key, encryptionKey!) }))
+      : withProvider;
 
     const cfg: SetupConfig = {
       port: opts.port ?? DEFAULT_PORT,
