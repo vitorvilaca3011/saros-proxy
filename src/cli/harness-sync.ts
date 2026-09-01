@@ -16,16 +16,17 @@ import { syncModelsToOpencodeConfig, type OpencodeConfigResult } from './opencod
 import { syncOpencodeModelsWithUpstream } from '../models-sync.js';
 import { syncModelsToPiConfig } from './pi-config.js';
 import { syncModelsToOmpConfig } from './omp-config.js';
+import { syncModelsToDshConfig } from './dsh-config.js';
 import { buildCanonicalModels } from './harness-models.js';
 
-export type HarnessId = 'opencode' | 'pi' | 'omp';
+export type HarnessId = 'opencode' | 'pi' | 'omp' | 'dsh';
 
 export interface HarnessSyncResult {
   harness: HarnessId;
   result: OpencodeConfigResult;
 }
 
-const VALID_HARNESS_IDS: readonly HarnessId[] = ['opencode', 'pi', 'omp'];
+const VALID_HARNESS_IDS: readonly HarnessId[] = ['opencode', 'pi', 'omp', 'dsh'];
 
 /** Path to the harness-selection setting: ~/.config/saros/harnesses.json */
 export function getHarnessSettingsPath(): string {
@@ -68,6 +69,8 @@ const HARNESS_ALIASES: Record<string, HarnessId> = {
   pi: 'pi',
   oc: 'opencode',
   opencode: 'opencode',
+  dsh: 'dsh',
+  deepseek: 'dsh',
 };
 
 export interface HarnessCommandArgs {
@@ -163,7 +166,11 @@ export async function syncModelsInAllHarnesses(
     }
   }
 
-  if (enabled.includes('pi') || enabled.includes('omp')) {
+  if (
+    enabled.includes('pi') ||
+    enabled.includes('omp') ||
+    enabled.includes('dsh')
+  ) {
     const modelsMap = await buildCanonicalModels(config);
     const port = config?.port ?? 3000;
 
@@ -172,6 +179,9 @@ export async function syncModelsInAllHarnesses(
     }
     if (enabled.includes('omp')) {
       results.push({ harness: 'omp', result: syncModelsToOmpConfig(modelsMap, port) });
+    }
+    if (enabled.includes('dsh')) {
+      results.push({ harness: 'dsh', result: syncModelsToDshConfig(modelsMap, port) });
     }
   }
 

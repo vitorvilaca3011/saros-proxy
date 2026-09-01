@@ -16,14 +16,21 @@ import {
   DEFAULT_REQUEST_TIMEOUT_MS,
 } from './constants.js';
 import { isValidPort, isValidHttpsUrl, isValidApiKey } from './validation.js';
+import type { ProviderId } from './providers/index.js';
+import { inferProvider, type KeyEntry } from './providers/infer.js';
+
+export type { KeyEntry };
 
 export interface ProxyConfig {
   port: number;
   host: string;
-  keys: Array<{ label: string; key: string }>;
+  keys: KeyEntry[];
   circuitBreakerThreshold: number;
   circuitBreakerCooldownMs: number;
+  /** Default upstream (opencode-go). Per-provider overrides in upstreams. */
   upstreamBaseUrl: string;
+  /** Per-provider upstream override map, e.g. { commandcode: 'https://…' }. */
+  upstreams?: Partial<Record<ProviderId, string>>;
   requestTimeoutMs: number;
   allowedOrigins: string[];
 }
@@ -32,11 +39,12 @@ interface YamlConfig {
   port?: number;
   host?: string;
   upstreamBaseUrl?: string;
+  upstreams?: Partial<Record<ProviderId, string>>;
   circuitBreakerThreshold?: number;
   circuitBreakerCooldownMs?: number;
   requestTimeoutMs?: number;
   allowedOrigins?: string[];
-  keys?: Array<{ label: string; key: string }>;
+  keys?: KeyEntry[];
 }
 
 /**
@@ -124,7 +132,7 @@ export function validateConfig(config: Partial<ProxyConfig>): ProxyConfig {
     upstreamBaseUrl = DEFAULT_UPSTREAM_URL;
   }
 
-  // --- API keys (must start with sk- and be >= 20 chars) ---
+  // --- API keys (structurally valid for some provider, >= 20 chars) ---
   const rawKeys = config.keys ?? [];
   const validKeys = rawKeys.filter((k) => {
     if (!isValidApiKey(k.key)) {
@@ -188,13 +196,25 @@ export function validateConfig(config: Partial<ProxyConfig>): ProxyConfig {
     'http://127.0.0.1:*',
   ];
 
+  // --- Per-provider upstreams (SSRF: every value must be HTTPS) ---
+  const upstreams: Partial<Record<ProviderId, string>> = {};
+  for (const [id, url] of Object.entries(config.upstreams ?? {})) {
+    if (!url) continue;
+    if (!isValidHttpsUrl(url)) {
+      logger.warn('Upstream URL for provider "%s" must use HTTPS, ignoring', id);
+      continue;
+    }
+    upstreams[id as ProviderId] = url.replace(/\/$/, '');
+  }
+
   return {
     port,
     host,
-    keys: validKeys,
+    keys: validKeys.map((k) => ({ ...k, provider: inferProvider(k) })),
     circuitBreakerThreshold,
     circuitBreakerCooldownMs,
     upstreamBaseUrl,
+    upstreams,
     requestTimeoutMs,
     allowedOrigins,
   };
@@ -239,6 +259,7 @@ function getBaseConfig(): ProxyConfig {
     circuitBreakerThreshold: 3,
     circuitBreakerCooldownMs: DEFAULT_CIRCUIT_BREAKER_COOLDOWN_MS,
     upstreamBaseUrl: DEFAULT_UPSTREAM_URL,
+    upstreams: {},
     requestTimeoutMs: DEFAULT_REQUEST_TIMEOUT_MS,
     allowedOrigins: ['http://localhost:*', 'http://127.0.0.1:*'],
   };
@@ -266,7 +287,7 @@ function applyEnvConfig(config: ProxyConfig): void {
         label: pair.slice(0, colonIdx).trim(),
         key: pair.slice(colonIdx + 1).trim(),
       };
-    }).filter((k) => k.key.startsWith('sk-'));
+    }).filter((k) => isValidApiKey(k.key));
   }
 }
 
@@ -304,6 +325,7 @@ function applyYamlConfig(config: ProxyConfig, yaml: YamlConfig): void {
   if (yaml.port !== undefined) config.port = yaml.port;
   if (yaml.host !== undefined) config.host = yaml.host;
   if (yaml.upstreamBaseUrl !== undefined) config.upstreamBaseUrl = yaml.upstreamBaseUrl;
+  if (yaml.upstreams !== undefined) config.upstreams = yaml.upstreams;
   if (yaml.circuitBreakerThreshold !== undefined) config.circuitBreakerThreshold = yaml.circuitBreakerThreshold;
   if (yaml.circuitBreakerCooldownMs !== undefined) config.circuitBreakerCooldownMs = yaml.circuitBreakerCooldownMs;
   if (yaml.requestTimeoutMs !== undefined) config.requestTimeoutMs = yaml.requestTimeoutMs;

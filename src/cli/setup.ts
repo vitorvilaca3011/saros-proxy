@@ -32,7 +32,10 @@ import {
 } from '../constants.js';
 import { isValidPort, isValidApiKey, isValidHttpsUrl, isValidPositiveInt } from '../validation.js';
 import { getDefaultConfigPath } from '../config.js';
+import { extractKeys, identifyKey, inferProvider } from '../providers/index.js';
+import type { ProviderId } from '../providers/index.js';
 import * as ui from './ui.js';
+import { maskKey } from '../logger.js';
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -131,19 +134,25 @@ export function parseSetupArgs(argv: string[] = process.argv.slice(2)): SetupOpt
   return opts;
 }
 
-/** Parse keys from comma-separated label:key pairs. */
-export function parseKeysFromArgs(keysStr: string): Array<{ label: string; key: string }> {
+/** Parse keys from comma-separated label:key[:provider] triples. */
+export function parseKeysFromArgs(keysStr: string): Array<{ label: string; key: string; provider?: ProviderId }> {
   if (!keysStr.trim()) return [];
   return keysStr.split(',').map((pair) => {
     const trimmed = pair.trim();
     const [label, ...rest] = trimmed.split(':');
     const key = rest.join(':');
+    // Optional third segment: provider (needed for commandcode sk- console keys,
+    // whose sk- prefix is ambiguous with opencode-go)
+    const providerRaw = key.includes(':') ? key.split(':').pop()?.trim() : undefined;
+    if (key.includes(':') && (providerRaw === 'commandcode' || providerRaw === 'opencode-go')) {
+      return { label: label ?? '', key: key.slice(0, key.lastIndexOf(':')), provider: providerRaw as ProviderId };
+    }
     return { label: label ?? '', key };
   });
 }
 
-/** Parse keys from file (one per line: label:key). */
-export function parseKeysFromFile(filePath: string): Array<{ label: string; key: string }> {
+/** Parse keys from file (one per line: label:key[:provider]). */
+export function parseKeysFromFile(filePath: string): Array<{ label: string; key: string; provider?: ProviderId }> {
   const content = readFileSync(filePath, 'utf-8');
   return content
     .split('\n')
@@ -152,6 +161,10 @@ export function parseKeysFromFile(filePath: string): Array<{ label: string; key:
     .map((line) => {
       const [label, ...rest] = line.split(':');
       const key = rest.join(':');
+      const providerRaw = key.includes(':') ? key.split(':').pop()?.trim() : undefined;
+      if (key.includes(':') && (providerRaw === 'commandcode' || providerRaw === 'opencode-go')) {
+        return { label: label ?? '', key: key.slice(0, key.lastIndexOf(':')), provider: providerRaw as ProviderId };
+      }
       return { label: label ?? '', key };
     });
 }
@@ -199,7 +212,7 @@ export function validateNonInteractiveArgs(opts: SetupOptions): ValidationError[
     for (const k of keys) {
       if (!k.label) errors.push({ field: 'keys', message: 'Key label cannot be empty' });
       if (!isValidApiKey(k.key)) {
-        errors.push({ field: 'keys', message: `Key "${k.label}" must start with "sk-" and be at least 20 characters` });
+        errors.push({ field: 'keys', message: `Key "${k.label}" must start with "sk-" or "user_" and be at least 20 characters` });
       }
     }
   }
@@ -265,7 +278,7 @@ function saveEnvVar(name: string, value: string): boolean {
 export interface SetupConfig {
   port: number;
   upstreamBaseUrl: string;
-  keys: Array<{ label: string; key: string }>;
+  keys: Array<{ label: string; key: string; provider?: ProviderId }>;
 }
 
 export function generateYaml(cfg: SetupConfig, encryptionEnabled = false): string {
@@ -277,7 +290,13 @@ export function generateYaml(cfg: SetupConfig, encryptionEnabled = false): strin
     circuitBreakerCooldownMs: DEFAULT_CIRCUIT_BREAKER_COOLDOWN_MS,
     requestTimeoutMs: DEFAULT_REQUEST_TIMEOUT_MS,
     allowedOrigins: ['http://localhost:*', 'http://127.0.0.1:*'],
-    keys: cfg.keys,
+    keys: cfg.keys.map((k) => ({
+      label: k.label,
+      key: k.key,
+      // Persist the provider so encrypted keys (prefix hidden) still route
+      // to the right upstream after a restart.
+      provider: k.provider ?? inferProvider(k),
+    })),
   };
 
   let yaml = stringifyYaml(config);
@@ -531,17 +550,85 @@ async function promptEncryption(): Promise<EncryptionConfig> {
 async function collectAccountCredentials(opts: {
   numAccounts: number;
   encryptionKey: string | undefined;
-}): Promise<Array<{ label: string; key: string }>> {
-  const keys: Array<{ label: string; key: string }> = [];
+}): Promise<Array<{ label: string; key: string; provider?: ProviderId }>> {
+  const keys: Array<{ label: string; key: string; provider?: ProviderId }> = [];
+
+  // Paste-a-key mode: drop any text containing keys; saros extracts and
+  // identifies each one by pinging the candidate providers (smoke test).
+  const pasteMode = ui.assertNotCancelled(await ui.confirm({
+    message: 'Paste API keys instead of typing them? (auto-detects the provider)',
+    initialValue: false,
+  }));
+
+  if (pasteMode) {
+    return collectPastedKeys(opts);
+  }
 
   for (let i = 0; i < opts.numAccounts; i++) {
     ui.step(`Account ${i + 1} of ${opts.numAccounts}`);
 
     const label = await promptAccountLabel(i, opts.numAccounts);
     const key = await promptAccountApiKey();
+    const provider = inferProvider({ label, key });
     const finalKey = opts.encryptionKey ? encryptKey(key, opts.encryptionKey) : key;
-    keys.push({ label, key: finalKey });
-    ui.success(`"${label}" API key configured`);
+    keys.push({ label, key: finalKey, provider });
+    ui.success(`"${label}" API key configured (${provider})`);
+  }
+
+  return keys;
+}
+
+/**
+ * Paste mode: accept arbitrary text (notes, .env dumps, chat messages),
+ * extract every key-looking token, identify its provider with a live smoke
+ * test, and let the user label each one.
+ */
+async function collectPastedKeys(opts: {
+  encryptionKey: string | undefined;
+}): Promise<Array<{ label: string; key: string; provider?: ProviderId }>> {
+  const keys: Array<{ label: string; key: string; provider?: ProviderId }> = [];
+  let batchIndex = 0;
+
+  for (;;) {
+    batchIndex++;
+    const pasted = ui.assertNotCancelled(await ui.text({
+      message: `Paste text containing API key(s) — batch ${batchIndex} (empty to finish)`,
+      placeholder: 'e.g. user_abc123… or sk-abc123… (leave blank when done)',
+      validate: () => undefined,
+    }));
+
+    const found = extractKeys(pasted ?? '');
+    if (found.length === 0) {
+      if (keys.length > 0) break;
+      ui.warn('No API keys found in that text — try again or leave blank to finish.');
+      if (batchIndex > 1) break;
+      continue;
+    }
+
+    for (const key of found) {
+      ui.step(`Identifying ${maskKey(key)}...`);
+      const id = await identifyKey(key);
+      if (id.provider === null) {
+        ui.warn(`Could not verify ${maskKey(key)} — ${id.confidence}. Skipped.`);
+        for (const a of id.attempts) {
+          ui.info(`    ${a.provider}: ${a.status}${a.detail ? ` (${a.detail})` : ''}`);
+        }
+        continue;
+      }
+      if (id.confidence === 'unverified') {
+        ui.warn(`${maskKey(key)} looks like ${id.provider} (prefix match only — offline)`);
+      }
+      const detail = id.attempts.find((a) => a.provider === id.provider)?.detail;
+      if (detail) ui.info(`    ${detail}`);
+
+      const label = await promptAccountLabel(batchIndex - 1 + keys.length, found.length + keys.length);
+      keys.push({
+        label,
+        key: opts.encryptionKey ? encryptKey(key, opts.encryptionKey) : key,
+        provider: id.provider,
+      });
+      ui.success(`"${label}" added — provider: ${id.provider}`);
+    }
   }
 
   return keys;
@@ -563,7 +650,7 @@ async function promptAccountApiKey(): Promise<string> {
   return ui.assertNotCancelled(await ui.password({
     message: 'API key',
     validate: (v) => {
-      if (!v || !isValidApiKey(v)) return 'API key must start with "sk-" and be at least 20 characters long.';
+      if (!v || !isValidApiKey(v)) return 'API key must start with "sk-" or "user_" and be at least 20 characters long.';
     },
   }));
 }
@@ -683,7 +770,7 @@ export async function setup(configDir?: string, skipSmokeTest?: boolean): Promis
     }
 
     // Parse keys
-    let keys: Array<{ label: string; key: string }>;
+    let keys: Array<{ label: string; key: string; provider?: ProviderId }>;
     if (opts.keysFile) {
       keys = parseKeysFromFile(opts.keysFile);
     } else {
@@ -698,10 +785,15 @@ export async function setup(configDir?: string, skipSmokeTest?: boolean): Promis
       encryptionKey = opts.encryptionKey;
     }
 
+    // Infer provider BEFORE encryption: once encrypted, the prefix is hidden
+    // (enc:scrypt:…) and inference would misroute user_ commandcode keys to
+    // opencode-go. The explicit provider column still wins.
+    const withProvider = keys.map((k) => ({ ...k, provider: k.provider ?? inferProvider(k) }));
+
     // Encrypt keys if needed
     const finalKeys = encryptionKey
-      ? keys.map((k) => ({ ...k, key: encryptKey(k.key, encryptionKey!) }))
-      : keys;
+      ? withProvider.map((k) => ({ ...k, key: encryptKey(k.key, encryptionKey!) }))
+      : withProvider;
 
     const cfg: SetupConfig = {
       port: opts.port ?? DEFAULT_PORT,

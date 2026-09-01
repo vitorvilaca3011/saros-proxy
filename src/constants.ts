@@ -12,6 +12,10 @@ export const DEFAULT_REQUEST_TIMEOUT_MS = 30_000;
 export const MIN_KEY_LENGTH = 20;
 export const API_KEY_PREFIX = 'sk-';
 export const DEFAULT_UPSTREAM_URL = 'https://opencode.ai';
+// Multi-provider upstreams (overridable via config `upstreams:` map).
+// Chat route prefixes live on the provider adapters (chatBasePath).
+export const DEFAULT_UPSTREAM_OPENCODE_GO = DEFAULT_UPSTREAM_URL;
+export const DEFAULT_UPSTREAM_COMMANDCODE = 'https://api.commandcode.ai';
 export const MAX_BODY_SIZE = 10 * 1024 * 1024;
 export const MAX_RETRIES = 2;
 export const RATE_LIMIT_WINDOW_MS = 60_000;

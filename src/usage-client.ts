@@ -16,6 +16,8 @@ import { logger } from './logger.js';
 import { USAGE_FETCH_TIMEOUT_MS, USAGE_PATH, USAGE_REFRESH_TTL_MS } from './constants.js';
 import { updateKeyUsage, type ProxyState } from './proxy-logic.js';
 import type { ProxyConfig } from './config.js';
+import { getProvider, inferProvider } from './providers/index.js';
+import type { ProviderId } from './providers/index.js';
 
 export interface KeyUsage {
   /** Worst-window used percent, 0-100. */
@@ -78,11 +80,12 @@ export function parseUsageResponse(body: string): KeyUsage {
 export async function fetchKeyUsage(
   upstreamBaseUrl: string,
   apiKey: string,
+  usagePath: string = USAGE_PATH,
 ): Promise<KeyUsage | null> {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), USAGE_FETCH_TIMEOUT_MS);
   try {
-    const response = await fetch(new URL(USAGE_PATH, upstreamBaseUrl), {
+    const response = await fetch(new URL(usagePath, upstreamBaseUrl), {
       headers: { Authorization: `Bearer ${apiKey}`, Accept: 'application/json' },
       signal: controller.signal,
     });
@@ -127,7 +130,12 @@ export function maybeRefreshUsage(state: ProxyState, config: ProxyConfig): void 
     try {
       const entries = await Promise.all(
         state.keys.map(async (k) => {
-          const usage = await fetchKeyUsage(config.upstreamBaseUrl, k.key);
+          const provider = getProvider(inferProvider({ label: k.label, key: k.key, provider: k.provider as ProviderId | undefined }));
+          // Providers without a queryable usage API (commandcode) are skipped —
+          // weighted rotation simply treats them as having no fresh data.
+          if (!provider || !provider.usagePath()) return [k.label, null] as const;
+          const base = config.upstreams?.[provider.id] ?? (provider.id === 'opencode-go' ? config.upstreamBaseUrl : provider.baseUrl);
+          const usage = await fetchKeyUsage(base, k.key, provider.usagePath());
           return [k.label, usage] as const;
         }),
       );

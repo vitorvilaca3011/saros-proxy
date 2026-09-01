@@ -19,6 +19,8 @@ import { DEFAULT_CIRCUIT_BREAKER_COOLDOWN_MS } from './constants.js';
 interface ApiKey {
   label: string;
   key: string;
+  /** Provider id ('opencode-go' | 'commandcode' | future extensions). */
+  provider: string;
   enabled: boolean;
   consecutiveFailures: number;
   lastUsed: number | null;
@@ -33,6 +35,8 @@ interface ApiKey {
 export interface KeySnapshot {
   label: string;
   key: string;
+  /** Provider this key belongs to (set at state creation from config). */
+  provider: string;
 }
 
 /** Tracks a single HTTP request's key usage through its lifecycle. */
@@ -40,6 +44,14 @@ interface RequestContext {
   requestId: string;
   triedKeys: string[]; // keys already attempted for this request (for failover)
   currentKey: KeySnapshot | null; // the key currently in use by this request
+  /**
+   * Provider filter fixed at selection time (model affinity / @suffix pin).
+   * Failover re-applies it so a pinned commandcode request never fails over
+   * to an opencode-go key that cannot serve the (already rewritten) model id.
+   */
+  providerFilter?: (provider: string) => boolean;
+  /** True when the model is provider-pinned (@suffix) — tier-3 cross-provider fallback disabled. */
+  pinned?: boolean;
 }
 
 export interface ProxyState {
@@ -48,6 +60,12 @@ export interface ProxyState {
   circuitBreakerThreshold: number;
   circuitBreakerCooldownMs: number;
   activeRequests: Map<string, RequestContext>; // C4
+  /**
+   * Optional model→provider affinity resolver: (providerId, modelId) →
+   * 'yes' | 'no' | 'maybe'. Wired from the provider registry at app setup;
+   * absence disables affinity routing (single-provider behavior).
+   */
+  affinityResolver?: (provider: string, modelId: string) => 'yes' | 'no' | 'maybe';
 }
 
 /**
@@ -68,7 +86,7 @@ export type ErrorType = 'KeyFault' | 'RequestFault' | 'ServerFault' | 'NetworkFa
 // ---------------------------------------------------------------------------
 
 export function createProxyState(
-  keys: Array<{ label: string; key: string }>,
+  keys: Array<{ label: string; key: string; provider?: string }>,
   options?: {
     circuitBreakerThreshold?: number;
     circuitBreakerCooldownMs?: number;
@@ -78,6 +96,7 @@ export function createProxyState(
     keys: keys.map((k) => ({
       label: k.label,
       key: k.key,
+      provider: k.provider ?? 'opencode-go',
       enabled: true,
       consecutiveFailures: 0,
       lastUsed: null,
@@ -101,7 +120,7 @@ export function createProxyState(
  * (Keeps mutation paths through markKeyFailed / markKeySucceeded.)
  */
 function toSnapshot(key: ApiKey): KeySnapshot {
-  return { label: key.label, key: key.key };
+  return { label: key.label, key: key.key, provider: key.provider };
 }
 
 /**
@@ -164,6 +183,7 @@ function buildBookedLabels(state: ProxyState): Set<string> {
 function findNextKey(
   state: ProxyState,
   excludeLabels: Set<string>,
+  providerFilter?: (provider: string) => boolean,
 ): KeySnapshot | null {
   const n = state.keys.length;
   if (n === 0) return null;
@@ -172,6 +192,7 @@ function findNextKey(
   for (let i = 0; i < n; i++) {
     const key = state.keys[(state.currentIndex + i) % n];
     if (excludeLabels.has(key.label)) continue;
+    if (providerFilter && !providerFilter(key.provider)) continue;
     if (!isKeyAvailable(state, key)) continue;
     candidates.push(key);
   }
@@ -229,15 +250,55 @@ export function updateKeyUsage(state: ProxyState, usage: Map<string, number>): v
 // Request-Scoped Key Tracking (C4)
 // ---------------------------------------------------------------------------
 
+/** Parse a trailing '@provider' suffix from a model id ('x@cc' → 'cc'). */
+function parseModelSuffix(modelId: string | undefined): string | null {
+  if (!modelId) return null;
+  const at = modelId.lastIndexOf('@');
+  if (at <= 0 || at === modelId.length - 1) return null;
+  return modelId.slice(at + 1);
+}
+
+/**
+ * Resolve the provider-preference predicate for a request.
+ *
+ * Rule: exclude providers whose verdict is definitively 'no' for the model
+ * (e.g. claude-* on opencode-go). Everything else — 'yes' AND 'maybe' —
+ * serves the request, so genuinely shared models rotate across ALL their
+ * keys regardless of which catalog loaded first. When no provider says 'no'
+ * the filter is undefined (legacy any-key behavior).
+ */
+function makeProviderFilter(
+  state: ProxyState,
+  modelId?: string,
+): ((provider: string) => boolean) | undefined {
+  if (!modelId) return undefined;
+  const resolver = state.affinityResolver;
+  if (!resolver) return undefined;
+  const excluded = new Set<string>();
+  for (const key of state.keys) {
+    if (excluded.has(key.provider)) continue;
+    if (resolver(key.provider, modelId) === 'no') {
+      excluded.add(key.provider);
+    }
+  }
+  if (excluded.size === 0) return undefined;
+  return (provider) => !excluded.has(provider);
+}
+
 /**
  * Obtain a key for a new (or in-flight) request.
  * Creates a RequestContext if one does not already exist for this requestId.
  * Skips keys that have already been tried for this request AND keys booked
  * by any other active request.
+ *
+ * When a modelId is supplied and some providers claim it (modelAffinity
+ * 'yes'), keys of other providers are only used after the preferred pool is
+ * exhausted (including its booked-share tier).
  */
 export function selectKeyForRequest(
   state: ProxyState,
   requestId: string,
+  modelId?: string,
 ): KeySnapshot | null {
   // If context already exists, return the already-assigned current key
   const existing = state.activeRequests.get(requestId);
@@ -249,6 +310,10 @@ export function selectKeyForRequest(
   const ctx: RequestContext = { requestId, triedKeys: [], currentKey: null };
   state.activeRequests.set(requestId, ctx);
 
+  const providerFilter = makeProviderFilter(state, modelId);
+  ctx.providerFilter = providerFilter;
+  ctx.pinned = Boolean(parseModelSuffix(modelId));
+
   // Tier 1: prefer a key not booked by another active request (spread load)
   const excludeLabels = new Set(ctx.triedKeys);
   const booked = buildBookedLabels(state);
@@ -256,12 +321,19 @@ export function selectKeyForRequest(
     excludeLabels.add(label);
   }
 
-  let snapshot = findNextKey(state, excludeLabels);
+  let snapshot = findNextKey(state, excludeLabels, providerFilter);
 
-  // Tier 2: all healthy keys are booked — share one via round-robin.
-  // Better to share a key than return 503 when concurrent requests
-  // outnumber the key pool.
+  // Tier 2: all healthy preferred keys are booked — share one via
+  // round-robin. Better to share a key than return 503 when concurrent
+  // requests outnumber the key pool.
   if (!snapshot) {
+    snapshot = findNextKey(state, new Set(ctx.triedKeys), providerFilter);
+  }
+
+  // Tier 3: preferred providers exhausted → fall back to any provider
+  // (pinned requests exempt: a @provider suffix or messages-only model
+  // cannot be served by other providers at all).
+  if (!snapshot && providerFilter && !ctx.pinned) {
     snapshot = findNextKey(state, new Set(ctx.triedKeys));
   }
 
@@ -287,19 +359,27 @@ export function failoverRequest(
     ctx.triedKeys.push(ctx.currentKey.label);
   }
 
-  // Tier 1: prefer a key not tried AND not booked by another request
+  // The provider preference was fixed when the request context was created;
+  // failover re-applies it so cross-provider failover can't pick a key that
+  // cannot serve the (possibly rewritten) model id.
+  const filter = ctx.providerFilter;
   const excludeLabels = new Set(ctx.triedKeys);
   const booked = buildBookedLabels(state);
   for (const label of booked) {
     excludeLabels.add(label);
   }
 
-  let snapshot = findNextKey(state, excludeLabels);
+  let snapshot = findNextKey(state, excludeLabels, filter);
 
-  // Tier 2: all remaining healthy keys are booked — share one.
+  // Tier 2: all remaining healthy preferred keys are booked — share one.
   // Still respects per-request triedKeys (don't re-use a key this
   // request already failed on).
   if (!snapshot) {
+    snapshot = findNextKey(state, new Set(ctx.triedKeys), filter);
+  }
+
+  // Tier 3: exhausted → any provider, unless the model is provider-pinned.
+  if (!snapshot && !ctx.pinned) {
     snapshot = findNextKey(state, new Set(ctx.triedKeys));
   }
 
@@ -387,13 +467,21 @@ export function markKeySucceeded(state: ProxyState, keyLabel: string): void {
  *  401               → KeyFault  (invalid/revoked key — immediate disable)
  *  429               → ServerFault (transient rate-limit — incremental circuit breaker)
  *  500 / 502 / 503   → KeyFault if body mentions quota/balance, else ServerFault
- *  400 / 404 / 422   → RequestFault (bad request — don't penalise the key)
+ *  400 / 403 / 404 / 422 → RequestFault (bad request or permission denial —
+ *                      don't penalise the key; 403 MODEL_NOT_IN_PLAN is a plan
+ *                      restriction, found live on commandcode)
  *  everything else   → ServerFault
  */
 export function classifyHttpError(status: number, _body?: string): ErrorType {
-  if (status === 401) return 'KeyFault';
+  if (status === 401) {
+    // opencode-go returns 401 ModelError for UNKNOWN MODELS (verified live:
+    // a Model gpt-5.5 is not supported, with a valid key). That is a request
+    // fault — penalising it would disable every key as the pool rotates.
+    if (_body && /ModelError|not supported/i.test(_body)) return 'RequestFault';
+    return 'KeyFault';
+  }
   if (status === 429) return 'ServerFault';
-  if (status === 400 || status === 404 || status === 422) return 'RequestFault';
+  if (status === 400 || status === 403 || status === 404 || status === 422) return 'RequestFault';
   if (status === 500 || status === 502 || status === 503) {
     // Server errors: if the body hints at a quota/balance issue treat as KeyFault
     if (_body && /quota|balance|insufficient|limit/i.test(_body)) {

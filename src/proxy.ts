@@ -10,6 +10,9 @@ import { cors } from 'hono/cors';
 import { rateLimiter } from 'hono-rate-limiter';
 import type { Context } from 'hono';
 import crypto from 'node:crypto';
+import { mkdirSync, writeFileSync } from 'node:fs';
+import { homedir } from 'node:os';
+import { join } from 'node:path';
 
 import {
   createProxyState,
@@ -33,6 +36,147 @@ import {
 import { getModelsList } from './models-fetcher.js';
 import { maybeRefreshUsage } from './usage-client.js';
 import { recordModelRequest } from './model-stats.js';
+import { getProvider, inferProvider } from './providers/index.js';
+import type { KeyProvider, ProviderId } from './providers/index.js';
+
+/** Canonical client-facing chat route prefix (the opencode-go shape). */
+const CANONICAL_CHAT_BASE = '/zen/go/v1';
+
+/**
+ * Resolve the upstream URL for one attempt: per-provider base URL + path
+ * remapping. Clients always speak canonical saros routes (/zen/go/v1/<rest>,
+ * the opencode-go shape); requests routed to a provider with a different
+ * chat surface get the prefix remapped (e.g. /provider/v1 for commandcode).
+ */
+export function resolveUpstreamUrl(config: ProxyConfig, provider: KeyProvider, path: string): string {
+  const base = (config.upstreams?.[provider.id] ?? (provider.id === 'opencode-go' ? config.upstreamBaseUrl : provider.baseUrl))
+    .replace(/\/+$/, '');
+  if (provider.chatBasePath === CANONICAL_CHAT_BASE) {
+    return buildUpstreamUrl(base, path);
+  }
+  const remapped = path.startsWith(CANONICAL_CHAT_BASE)
+    ? provider.chatBasePath + path.slice(CANONICAL_CHAT_BASE.length)
+    : path;
+  return buildUpstreamUrl(base, remapped);
+}
+
+/**
+ * Extract a provider-suffix routing hint from a model id
+ * (e.g. 'claude-…@commandcode' → 'commandcode'). Returns null when absent.
+ */
+export function parseProviderSuffix(modelId: string | undefined): string | null {
+  if (!modelId) return null;
+  const at = modelId.lastIndexOf('@');
+  if (at <= 0 || at === modelId.length - 1) return null;
+  return modelId.slice(at + 1);
+}
+
+/** Strip the @provider routing suffix from a model id for upstream forwarding. */
+export function stripProviderSuffix(modelId: string): string {
+  const at = modelId.lastIndexOf('@');
+  return at > 0 ? modelId.slice(0, at) : modelId;
+}
+
+function generateRequestId(): string {
+  return crypto.randomUUID();
+}
+
+/**
+ * Opt-in diagnostics: when SAROS_CAPTURE_4XX=1, write the full request
+ * context of every upstream 4xx to <config dir>/captures/ so provider-side
+ * errors (role validation, plan gating) can be replayed and debugged.
+ * Never enabled by default — bodies may contain user content.
+ */
+function captureFailedRequest(ctx: RetryContext, status: number, errorBody: string): void {
+  if (process.env.SAROS_CAPTURE_4XX !== '1') return;
+  if (status < 400 || status >= 500) return;
+  try {
+    const dir = join(homedir(), '.config', 'saros', 'captures');
+    mkdirSync(dir, { recursive: true });
+    const file = join(dir, `${Date.now()}-${ctx.requestId.slice(0, 8)}.json`);
+    writeFileSync(
+      file,
+      JSON.stringify(
+        {
+          ts: new Date().toISOString(),
+          requestId: ctx.requestId,
+          status,
+          method: ctx.method,
+          path: ctx.path,
+          model: ctx.modelId ?? null,
+          kind: ctx.kind,
+          upstreamError: errorBody.slice(0, 2000),
+          requestBody: ctx.bodyText.slice(0, 100_000),
+        },
+        null,
+        2,
+      ),
+      'utf-8',
+    );
+    logger.warn({ requestId: ctx.requestId, file }, 'captured failing request (SAROS_CAPTURE_4XX)');
+  } catch {
+    // diagnostics must never break the proxy
+  }
+}
+
+/**
+ * Rewrite the model field inside a JSON request body. Returns the original
+ * text unchanged when the body isn't valid JSON or has no model field.
+ */
+function rewriteModelInBody(bodyText: string, modelId: string): string {
+  try {
+    const parsed = JSON.parse(bodyText) as Record<string, unknown>;
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return bodyText;
+    if (typeof parsed.model !== 'string') return bodyText;
+    parsed.model = modelId;
+    return JSON.stringify(parsed);
+  } catch {
+    return bodyText;
+  }
+}
+
+/**
+ * Rewrite a request's model id for the provider about to serve it.
+ *
+ * 1. '@provider' suffix → strip it (the suffix is saros's routing shim).
+ * 2. Otherwise, when the serving provider names the same model differently
+ *    (bare name matches its catalog under a vendor-prefixed id — e.g.
+ *    'deepseek-v4-flash' → 'deepseek/deepseek-v4-flash' on commandcode),
+ *    rewrite to the provider's native id so the upstream recognizes it.
+ *    This is what makes cross-provider round-robin seamless: one id in,
+ *    any of the serving keys out.
+ */
+function rewriteModelForProvider(
+  bodyText: string,
+  modelId: string | undefined,
+  provider: KeyProvider,
+): string {
+  if (!modelId) return bodyText;
+  if (parseProviderSuffix(modelId)) {
+    return rewriteModelInBody(bodyText, stripProviderSuffix(modelId));
+  }
+  const bare = modelId.split('/').pop() ?? modelId;
+  const native = provider.resolveNativeId?.(bare.toLowerCase());
+  if (native && native !== modelId) {
+    return rewriteModelInBody(bodyText, native);
+  }
+  return bodyText;
+}
+
+/**
+ * Provider for a key snapshot. Suffix-routed requests (​@provider model ids)
+ * pin the provider; otherwise structural inference from the key itself.
+ */
+function providerForKey(key: KeySnapshot, config: ProxyConfig, modelId?: string): KeyProvider {
+  const suffixProvider = parseProviderSuffix(modelId);
+  if (suffixProvider) {
+    const pinned = getProvider(suffixProvider as ProviderId);
+    if (pinned) return pinned;
+  }
+  const inferred = inferProvider({ label: key.label, key: key.key });
+  void config;
+  return getProvider(inferred) ?? getProvider('opencode-go')!;
+}
 
 // Augment Hono's ContextVariableMap for @hono/node-server remote address
 declare module 'hono' {
@@ -80,10 +224,6 @@ class TimeoutError extends Error {
   }
 }
 
-function generateRequestId(): string {
-  return crypto.randomUUID();
-}
-
 /**
  * Build upstream URL from base + request path.
  */
@@ -99,8 +239,11 @@ export function buildUpstreamUrl(base: string, path: string): string {
 }
 
 /**
- * Clean headers for upstream forwarding: remove hop-by-hop headers
- * and any pre-existing Authorization.
+ * Clean headers for upstream forwarding: remove hop-by-hop headers,
+ * pre-existing Authorization, and content-length (the forwarded body may be
+ * rewritten — model-id aliasing / suffix strip — so a stale content-length
+ * makes the upstream wait for bytes that never arrive; undici recomputes it
+ * from the real body).
  */
 export function buildUpstreamHeaders(
   incoming: Headers,
@@ -118,7 +261,8 @@ export function buildUpstreamHeaders(
       lower === 'te' ||
       lower === 'transfer-encoding' ||
       lower === 'upgrade' ||
-      lower === 'authorization'
+      lower === 'authorization' ||
+      lower === 'content-length'
     ) {
       continue;
     }
@@ -149,6 +293,15 @@ export function buildDownstreamHeaders(upstreamHeaders: Headers): Headers {
       lower === 'upgrade' ||
       // Security-sensitive
       lower === 'set-cookie' ||
+      // Body is already decoded: Node fetch transparently gunzips upstream
+      // responses, so forwarding content-encoding would make clients try to
+      // decompress plain text (found live against api.commandcode.ai).
+      lower === 'content-encoding' ||
+      // The forwarded body may be rewritten (model-id aliasing/suffix strip),
+      // so a forwarded content-length can disagree with the actual body and
+      // hang the upstream waiting for missing bytes (found live). Undici
+      // recomputes content-length from the real body.
+      lower === 'content-length' ||
       // Internal debug
       lower === 'x-request-id' ||
       // Response constructor recalculates content-length
@@ -208,7 +361,8 @@ interface RetryContext {
   incomingHeaders: Headers;
   bodyText: string;
   kind: RequestKind;
-  upstreamUrl: string;
+  /** Model id parsed from the request body (for affinity routing); optional. */
+  modelId?: string;
   onSuccess: SuccessHandler;
 }
 
@@ -230,6 +384,7 @@ async function executeWithRetry(opts: {
   incomingHeaders: Headers;
   bodyText: string;
   kind: RequestKind;
+  modelId?: string;
   onSuccess: SuccessHandler;
   maxRetries: number;
 }): Promise<Response> {
@@ -242,7 +397,7 @@ async function executeWithRetry(opts: {
     incomingHeaders: opts.incomingHeaders,
     bodyText: opts.bodyText,
     kind: opts.kind,
-    upstreamUrl: buildUpstreamUrl(opts.config.upstreamBaseUrl, opts.path),
+    modelId: opts.modelId,
     onSuccess: opts.onSuccess,
   };
 
@@ -264,10 +419,18 @@ async function executeSingleAttempt(attempt: number, ctx: RetryContext): Promise
   }
 
   logKeyAttempt(ctx.requestId, key, attempt, ctx.kind);
-  const fetchOptions = buildFetchOptions(ctx.method, ctx.bodyText, ctx.kind, ctx.incomingHeaders, key.key);
+  // Per-attempt upstream: keys may be mixed-provider within one failover chain.
+  // Suffix-routed models (@provider) pin the provider and lose the suffix
+  // in the forwarded body; the upstream never sees saros's routing shim.
+  const provider = providerForKey(key, ctx.config, ctx.modelId);
+  const upstreamUrl = resolveUpstreamUrl(ctx.config, provider, ctx.path);
+  const outboundBody = ctx.bodyText
+    ? rewriteModelForProvider(ctx.bodyText, ctx.modelId, provider)
+    : ctx.bodyText;
+  const fetchOptions = buildFetchOptions(ctx.method, outboundBody, ctx.kind, ctx.incomingHeaders, key.key, provider);
 
   try {
-    const response = await fetchWithTimeout(ctx.upstreamUrl, fetchOptions, ctx.config.requestTimeoutMs);
+    const response = await fetchWithTimeout(upstreamUrl, fetchOptions, ctx.config.requestTimeoutMs);
     if (response.ok) {
       markKeySucceeded(ctx.state, key.label);
       completeRequest(ctx.state, ctx.requestId, true);
@@ -284,7 +447,7 @@ async function executeSingleAttempt(attempt: number, ctx: RetryContext): Promise
 
 function pickKey(ctx: RetryContext, attempt: number): KeySnapshot | null {
   return attempt === 0
-        ? selectKeyForRequest(ctx.state, ctx.requestId)
+        ? selectKeyForRequest(ctx.state, ctx.requestId, ctx.modelId)
     : failoverRequest(ctx.state, ctx.requestId);
 }
 
@@ -294,8 +457,15 @@ function buildFetchOptions(
   kind: RequestKind,
   incomingHeaders: Headers,
   bearerToken: string,
+  provider?: KeyProvider,
 ): RequestInit & { duplex?: 'half' } {
   const headers = buildUpstreamHeaders(incomingHeaders, bearerToken);
+  // Provider-specific identity headers (e.g. CommandCode CLI headers)
+  if (provider?.extraUpstreamHeaders) {
+    for (const [name, value] of Object.entries(provider.extraUpstreamHeaders())) {
+      headers.set(name, value);
+    }
+  }
   const options: RequestInit & { duplex?: 'half' } = { method, headers };
   if (!bodyText) return options;
   // Node.js fetch requires `duplex: 'half'` when body is a stream or string
@@ -314,6 +484,7 @@ async function handleUpstreamErrorResponse(
   const errorBody = await response.text();
   const errorType = classifyHttpError(response.status, errorBody);
   logUpstreamError(ctx.requestId, key, response.status, errorType, errorBody, ctx.kind);
+  captureFailedRequest(ctx, response.status, errorBody);
 
   if (errorType === 'RequestFault') {
     // Client error — don't retry, don't penalise the key
@@ -490,6 +661,8 @@ interface HandleRequestOptions {
   path: string;
   incomingHeaders: Headers;
   bodyText: string;
+  /** Model id from the request body — drives provider-affinity routing. */
+  modelId?: string;
   maxRetries?: number;
 }
 
@@ -507,6 +680,7 @@ async function handleWithFailover(opts: HandleRequestOptions): Promise<Response>
     incomingHeaders: opts.incomingHeaders,
     bodyText: opts.bodyText,
     kind: 'standard',
+    modelId: opts.modelId,
     onSuccess: standardSuccessHandler,
     maxRetries: opts.maxRetries ?? MAX_RETRIES,
   });
@@ -527,6 +701,7 @@ async function handleStreamingRequest(opts: HandleRequestOptions): Promise<Respo
     incomingHeaders: opts.incomingHeaders,
     bodyText: opts.bodyText,
     kind: 'streaming',
+    modelId: opts.modelId,
     onSuccess: streamingSuccessHandler,
     maxRetries: opts.maxRetries ?? MAX_RETRIES,
   });
@@ -619,6 +794,22 @@ export function createProxyApp(config: ProxyConfig): Hono {
     circuitBreakerThreshold: config.circuitBreakerThreshold,
     circuitBreakerCooldownMs: config.circuitBreakerCooldownMs,
   });
+  // Model→provider affinity: requests naming a provider-specific model
+  // (e.g. commandcode's vendor-prefixed ids) are routed to a matching key
+  // first; 'maybe' providers remain as fallback. Bare-name matching lets
+  // shared models (deepseek-v4-flash etc.) rotate across ALL serving keys
+  // cross-provider. No-op for single-provider pools and when no provider
+  // claims the model.
+  state.affinityResolver = (providerId, modelId) => {
+    const provider = getProvider(providerId as ProviderId);
+    if (!provider) return 'maybe';
+    const direct = provider.modelAffinity(modelId);
+    if (direct !== 'maybe') return direct;
+    // Bare-name cross-check: 'deepseek-v4-flash' may be commandcode's
+    // 'deepseek/deepseek-v4-flash'.
+    const bare = (modelId.split('/').pop() ?? modelId).toLowerCase();
+    return provider.modelAffinityByName?.(bare) ?? 'maybe';
+  };
 
   const app = new Hono();
 
@@ -674,6 +865,13 @@ export function createProxyApp(config: ProxyConfig): Hono {
       activeRequests: activeCount,
       circuitBreakerThreshold: state.circuitBreakerThreshold,
       circuitBreakerCooldownMs: state.circuitBreakerCooldownMs,
+      // Per-provider key counts (multi-provider pools)
+      providers: keys.reduce<Record<string, { total: number; enabled: number }>>((acc, k) => {
+        const entry = (acc[k.provider] ??= { total: 0, enabled: 0 });
+        entry.total++;
+        if (k.enabled) entry.enabled++;
+        return acc;
+      }, {}),
     });
   });
 
@@ -727,6 +925,7 @@ export function createProxyApp(config: ProxyConfig): Hono {
         path,
         incomingHeaders,
         bodyText,
+        modelId: typeof parsedBody.model === 'string' ? parsedBody.model : undefined,
       });
     }
 
@@ -739,6 +938,7 @@ export function createProxyApp(config: ProxyConfig): Hono {
       path,
       incomingHeaders,
       bodyText,
+      modelId: typeof parsedBody?.model === 'string' ? parsedBody.model : undefined,
     });
   }
 

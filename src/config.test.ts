@@ -707,8 +707,8 @@ describe('loadConfig', () => {
     process.env.OPENCODE_GO_KEYS = `test:${VALID_KEY},other:${VALID_KEY2}`;
     const result = loadConfig(join(os.tmpdir(), 'no-exist.yaml'));
     expect(result.keys).toHaveLength(2);
-    expect(result.keys[0]).toEqual({ label: 'test', key: VALID_KEY });
-    expect(result.keys[1]).toEqual({ label: 'other', key: VALID_KEY2 });
+    expect(result.keys[0]).toEqual({ label: 'test', key: VALID_KEY, provider: 'opencode-go' });
+    expect(result.keys[1]).toEqual({ label: 'other', key: VALID_KEY2, provider: 'opencode-go' });
   });
 
   it('OPENCODE_GO_KEYS with invalid format (no colon) filters out', () => {
@@ -774,7 +774,7 @@ describe('loadConfig', () => {
     try {
       const result = loadConfig();
       expect(result.port).toBe(7777);
-      expect(result.keys).toEqual([{ label: 'cwd', key: VALID_KEY }]);
+      expect(result.keys).toEqual([{ label: 'cwd', key: VALID_KEY, provider: 'opencode-go' }]);
     } finally {
       vi.mocked(existsSync).mockImplementation(realExists!);
       vi.mocked(readFileSync).mockImplementation(realRead!);
@@ -790,7 +790,7 @@ describe('loadConfig', () => {
       // No YAML found anywhere → env/defaults only
       expect(result.port).toBe(3000);
       expect(result.host).toBe('127.0.0.1');
-      expect(result.keys).toEqual([{ label: 'test', key: VALID_KEY }]);
+      expect(result.keys).toEqual([{ label: 'test', key: VALID_KEY, provider: 'opencode-go' }]);
     } finally {
       vi.mocked(existsSync).mockImplementation(realExists!);
     }
@@ -808,7 +808,7 @@ describe('loadConfig', () => {
     try {
       const result = loadConfig();
       expect(result.port).toBe(6666);
-      expect(result.keys).toEqual([{ label: 'test', key: VALID_KEY }]);
+      expect(result.keys).toEqual([{ label: 'test', key: VALID_KEY, provider: 'opencode-go' }]);
     } finally {
       vi.mocked(existsSync).mockImplementation(realExists!);
       vi.mocked(readFileSync).mockImplementation(realRead!);

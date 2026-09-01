@@ -11,6 +11,15 @@
 import type { ProxyConfig } from '../config.js';
 import { loadModelsFromJson } from './opencode-config.js';
 import { buildMinimalStub, fetchModelsDevMetadata, fetchUpstreamModelIds } from '../models-sync.js';
+import { allProviders, getProvider, inferProvider } from '../providers/index.js';
+import type { KeyProvider, ProviderId } from '../providers/index.js';
+
+/**
+ * Suffix for provider-specific model ids in synced harness configs.
+ * Commandcode-only models (claude-*, vendor/model) are exposed to harnesses
+ * as `<id>@commandcode`; the proxy strips the suffix on the way upstream.
+ */
+export const PROVIDER_MODEL_SUFFIX = '@';
 
 export interface PiOmpModel {
   id: string;
@@ -102,11 +111,162 @@ export function toPiOmpModelArray(models: Record<string, unknown>): PiOmpModel[]
 }
 
 /**
+ * Normalize a provider model id to its bare name for cross-provider
+ * matching: 'deepseek/deepseek-v4-flash' → 'deepseek-v4-flash';
+ * 'glm-5' → 'glm-5'. Case- and separator-insensitive.
+ */
+export function bareModelName(modelId: string): string {
+  const last = modelId.split('/').pop() ?? modelId;
+  return last.toLowerCase().replaceAll('_', '-');
+}
+
+/**
+ * Annotate a display name with how many keys can serve the model,
+ * e.g. "DeepSeek V4 Flash (3)". Communicates rotation width: '(3)' rotates
+ * across 3 accounts (possibly cross-provider), '(1)' is a single key.
+ */
+export function annotateName(name: string, keyCount: number): string {
+  if (keyCount <= 0) return name;
+  return `${name} (${keyCount})`;
+}
+
+/**
+ * Count how many of the user's keys can serve a bare model name.
+ *
+ * The owning provider (whose catalog the entry came from) always serves it.
+ * Every OTHER provider must claim the model definitively ('yes' via
+ * bare-name/affinity check) — a structural 'maybe' does not count, or
+ * blanket-maybe providers (opencode-go) would overcount models they don't
+ * actually have (e.g. claude-*).
+ */
+function countServingKeys(
+  config: ProxyConfig,
+  bareName: string,
+  owner: ProviderId,
+): number {
+  return (config.keys ?? []).filter((k) => {
+    const provider = getProvider(inferProvider(k));
+    if (!provider) return false;
+    if (provider.id === owner) return true;
+    const byName = provider.modelAffinityByName?.(bareName);
+    if (byName) return byName === 'yes';
+    return provider.modelAffinity(bareName) === 'yes';
+  }).length;
+}
+
+/**
+ * Map one provider-catalog entry into the canonical opencode-shaped entry.
+ * Uses the catalog's own fields when present (commandcode serves name +
+ * context_length); models.dev metadata is not available for these providers.
+ */
+
+/**
+ * Map one provider-catalog entry into the canonical opencode-shaped entry.
+ * Uses the catalog's own fields when present (commandcode serves name +
+ * context_length); models.dev metadata is not available for these providers.
+ */
+function providerCatalogToCanonical(
+  modelId: string,
+  entry: Record<string, unknown>,
+  keyCount: number,
+): Record<string, unknown> {
+  const context = typeof entry.context_length === 'number' ? entry.context_length : undefined;
+  const name = typeof entry.name === 'string' ? entry.name : modelId;
+  return {
+    id: modelId,
+    name: annotateName(name, keyCount),
+    tool_call: true,
+    reasoning: true,
+    limit: {
+      context: context ?? 262144,
+      output: 65536,
+    },
+    modalities: { input: ['text'], output: ['text'] },
+    // Conservative effort ladder for provider-catalog models (no models.dev
+    // metadata): the commandcode gateway accepts low|medium|high|xhigh and
+    // rejects minimal — better declared here than invented by the harness.
+    reasoning_options: [{ type: 'effort', values: ['low', 'medium', 'high'] }],
+    // Hint consumed by display tooling; harmless to harnesses that ignore it.
+    ...(typeof entry.owned_by === 'string' ? { owned_by: entry.owned_by } : {}),
+  };
+}
+
+/**
+ * Fetch model entries from the given providers and merge them into the map.
+ *
+ * Cross-provider aliasing: when a provider catalog serves the SAME model
+ * under a different id (bare name matches an existing entry — e.g.
+ * 'deepseek/deepseek-v4-flash' on commandcode vs 'deepseek-v4-flash' on
+ * opencode-go), the existing entry gains the new provider as an alias:
+ * requests naming either id rotate across all serving keys.
+ *
+ * Provider-only models (claude-*, unique vendor ids) are added as
+ * `<id>@<providerId>` suffixed entries.
+ *
+ * Only providers the user actually has keys for are merged: exposing
+ * provider-only models without a usable key would create broken entries in
+ * harness configs.
+ */
+async function appendProviderCatalogModels(
+  map: Record<string, unknown>,
+  existingIds: Set<string>,
+  config: ProxyConfig,
+): Promise<void> {
+  const configured = new Set<ProviderId>((config.keys ?? []).map((k) => inferProvider(k)));
+  const providers = allProviders().filter(
+    (p): p is KeyProvider & { fetchCatalog: NonNullable<KeyProvider['fetchCatalog']> } =>
+      configured.has(p.id) && typeof p.fetchCatalog === 'function',
+  );
+
+  // Bare-name index of what's already in the map (from the primary upstream)
+  const byBareName = new Map<string, string>();
+  for (const id of existingIds) {
+    const bare = bareModelName(id);
+    if (!byBareName.has(bare)) byBareName.set(bare, id);
+  }
+
+  await Promise.all(
+    providers.map(async (provider) => {
+      const catalog = await provider.fetchCatalog();
+      if (!catalog) return;
+      for (const entry of catalog) {
+        const rawId = typeof entry.id === 'string' ? entry.id : '';
+        if (!rawId) continue;
+        const bare = bareModelName(rawId);
+        const existingId = byBareName.get(bare);
+        if (existingId) {
+          // Same model served by both providers → alias it onto the existing
+          // entry so either id routes to the full serving key pool.
+          const entryRec = map[existingId] as Record<string, unknown>;
+          const aliases = Array.isArray(entryRec?.aliases)
+            ? (entryRec.aliases as string[])
+            : [];
+          if (!aliases.includes(rawId)) aliases.push(rawId);
+          entryRec.aliases = aliases;
+          continue;
+        }
+        if (provider.modelAffinity(rawId) !== 'yes') continue; // not uniquely claimable
+        const suffixedId = `${rawId}${PROVIDER_MODEL_SUFFIX}${provider.id}`;
+        if (existingIds.has(suffixedId)) continue;
+        existingIds.add(suffixedId);
+        byBareName.set(bare, suffixedId);
+        map[suffixedId] = providerCatalogToCanonical(
+          suffixedId,
+          entry,
+          countServingKeys(config, bare, provider.id),
+        );
+      }
+    }),
+  );
+}
+
+/**
  * Build the canonical model map (id → opencode-shaped entry).
  *
  * Live path (config provided, not offline): fetch upstream model IDs and
- * enrich each with models.dev metadata via buildMinimalStub. Falls back to
- * the bundled models.json when the upstream fetch yields nothing.
+ * enrich each with models.dev metadata via buildMinimalStub, then append
+ * provider-specific catalog models (@commandcode etc.). Falls back to the
+ * bundled models.json when the upstream fetch yields nothing.
  * Offline path (or no config): bundled models.json only.
  */
 export async function buildCanonicalModels(
@@ -128,8 +288,25 @@ export async function buildCanonicalModels(
 
   if (ids && ids.length > 0) {
     const map: Record<string, unknown> = {};
+    const seen = new Set<string>();
     for (const id of ids) {
       map[id] = buildMinimalStub(id, meta ?? undefined);
+      seen.add(id);
+    }
+    await appendProviderCatalogModels(map, seen, config);
+    // Rotation-width annotation on the primary (opencode-go) entries:
+    // "DeepSeek V4 Flash (3)" = 3 keys can serve this model.
+    for (const [id, entry] of Object.entries(map)) {
+      if (id.includes(PROVIDER_MODEL_SUFFIX)) continue;
+      if (entry && typeof entry === 'object' && !Array.isArray(entry)) {
+        const rec = entry as Record<string, unknown>;
+        if (typeof rec.name === 'string') {
+          rec.name = annotateName(
+            rec.name,
+            countServingKeys(config, bareModelName(id), 'opencode-go'),
+          );
+        }
+      }
     }
     return map;
   }

@@ -6,6 +6,7 @@
  */
 
 import { API_KEY_PREFIX, MIN_KEY_LENGTH } from './constants.js';
+import { isPlausibleKey } from './providers/index.js';
 
 /**
  * Check if the given value is a valid TCP port number (1–65535).
@@ -21,10 +22,14 @@ export function isValidPort(value: unknown): value is number {
 
 /**
  * Check if the given string looks like a valid API key.
- * Must start with `sk-` and be at least {@link MIN_KEY_LENGTH} characters long.
+ *
+ * Multi-provider aware: accepts `sk-` (opencode-go / commandcode console
+ * keys) and `user_` (commandcode tokens) of at least {@link MIN_KEY_LENGTH}
+ * characters. Structural check only — provider identity is confirmed by the
+ * smoke test in `identifyKey()`.
  */
 export function isValidApiKey(key: unknown): key is string {
-  return typeof key === 'string' && key.startsWith(API_KEY_PREFIX) && key.length >= MIN_KEY_LENGTH;
+  return typeof key === 'string' && isPlausibleKey(key);
 }
 
 /**

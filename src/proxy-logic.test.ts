@@ -169,6 +169,14 @@ describe('C2 – Error Classification', () => {
     expect(classifyHttpError(401, 'invalid key')).toBe('KeyFault');
   });
 
+  it('classifyHttpError returns RequestFault for 401 model-unknown errors', () => {
+    // opencode-go returns 401 with ModelError for models it does not serve;
+    // punishing that as a key fault would disable the whole pool on rotation.
+    expect(
+      classifyHttpError(401, '{"error":{"type":"ModelError","message":"Model gpt-5.5 is not supported"}}'),
+    ).toBe('RequestFault');
+  });
+
   it('classifyHttpError returns ServerFault for 429 (transient rate-limit)', () => {
     expect(classifyHttpError(429)).toBe('ServerFault');
     expect(classifyHttpError(429, 'rate limited')).toBe('ServerFault');
@@ -188,12 +196,13 @@ describe('C2 – Error Classification', () => {
 
   it('classifyHttpError returns RequestFault for 400/404/422', () => {
     expect(classifyHttpError(400)).toBe('RequestFault');
+    // 403 = permission denial (e.g. MODEL_NOT_IN_PLAN) — the key is fine
+    expect(classifyHttpError(403)).toBe('RequestFault');
     expect(classifyHttpError(404)).toBe('RequestFault');
     expect(classifyHttpError(422)).toBe('RequestFault');
   });
 
   it('classifyHttpError returns ServerFault for other codes', () => {
-    expect(classifyHttpError(403)).toBe('ServerFault');
     expect(classifyHttpError(408)).toBe('ServerFault');
     expect(classifyHttpError(999)).toBe('ServerFault');
   });
@@ -246,8 +255,8 @@ describe('C3 – Read-only Snapshots', () => {
   it('selectKeyForRequest returns KeySnapshot not ApiKey', () => {
     const state = makeState();
     const snap = selectKeyForRequest(state, 'req-snap');
-    expect(snap).toEqual({ label: 'alpha', key: 'sk-a1' });
-    expect(Object.keys(snap!).sort()).toEqual(['key', 'label']);
+    expect(snap).toEqual({ label: 'alpha', key: 'sk-a1', provider: 'opencode-go' });
+    expect(Object.keys(snap!).sort()).toEqual(['key', 'label', 'provider']);
   });
 
   it('mutating returned snapshot does not affect internal state', () => {
@@ -268,7 +277,7 @@ describe('C3 – Read-only Snapshots', () => {
 
     const failSnap = failoverRequest(state, 'req-1');
     expect(failSnap).not.toBeNull();
-    expect(Object.keys(failSnap!).sort()).toEqual(['key', 'label']);
+    expect(Object.keys(failSnap!).sort()).toEqual(['key', 'label', 'provider']);
   });
 });
 
@@ -284,7 +293,7 @@ describe('C4 – Request-Scoped Key Tracking', () => {
   it('selectKeyForRequest creates context and picks first key', () => {
     const state = makeState();
     const snap = selectKeyForRequest(state, 'req-1');
-    expect(snap).toEqual({ label: 'alpha', key: 'sk-a1' });
+    expect(snap).toEqual({ label: 'alpha', key: 'sk-a1', provider: 'opencode-go' });
 
     const ctx = state.activeRequests.get('req-1');
     expect(ctx).toBeDefined();
