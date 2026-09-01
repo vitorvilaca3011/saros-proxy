@@ -31,7 +31,7 @@ import { runUsageCommand } from './usage.js';
 import { loadConfig } from '../config.js';
 import type { ProxyConfig } from '../config.js';
 
-function makeConfig(keys: Array<{ label: string; key: string }>): ProxyConfig {
+function makeConfig(keys: Array<{ label: string; key: string; provider?: string }>): ProxyConfig {
   return {
     port: 3000,
     host: '127.0.0.1',
@@ -198,6 +198,71 @@ describe('runUsageCommand', () => {
     expect(log).toHaveBeenCalledWith(expect.stringContaining('failed to fetch'));
   });
 
+  it('reports n/a for providers without a queryable usage API', async () => {
+    // commandcode has no usage endpoint; the command must not call fetch.
+    mockConfigRef.config = makeConfig([
+      { label: 'cc', key: 'user_cc-key-abcdefghijklmnop', provider: 'commandcode' },
+      { label: 'oc', key: 'sk-oc-key-abcdefghijklmnop', provider: 'opencode-go' },
+    ]);
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValue(usageBody(25));
+    const log = vi.spyOn(console, 'log').mockImplementation(() => {});
+
+    const code = await runUsageCommand();
+    expect(code).toBe(0);
+    expect(log).toHaveBeenCalledWith(expect.stringContaining('(commandcode)'));
+    expect(log).toHaveBeenCalledWith(
+      expect.stringContaining('usage: n/a — provider has no queryable usage API'),
+    );
+    // opencode-go key still fetched its usage.
+    expect(fetchSpy).toHaveBeenCalledTimes(1);
+    fetchSpy.mockRestore();
+  });
+  it('renders the models section when counts exist but since is absent', async () => {
+    mockConfigRef.config = makeConfig([{ label: 'alpha', key: 'sk-alpha' }]);
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue(usageBody(42));
+    mkdirSync(tmpDir, { recursive: true });
+    writeFileSync(
+      join(tmpDir, 'model-stats.json'),
+      JSON.stringify({ counts: { 'glm-5': 7 } }),
+      'utf-8',
+    );
+    const log = vi.spyOn(console, 'log').mockImplementation(() => {});
+
+    const code = await runUsageCommand();
+    expect(code).toBe(0);
+    const out = log.mock.calls.map((c) => String(c[0])).join('\n');
+    expect(out).toContain('Most used models');
+    expect(out).toContain('glm-5');
+    expect(out).not.toContain('since 202');
+  });
+  it('skips the models section when counts are absent entirely', async () => {
+    mockConfigRef.config = makeConfig([{ label: 'alpha', key: 'sk-alpha' }]);
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue(usageBody(42));
+    mkdirSync(tmpDir, { recursive: true });
+    writeFileSync(join(tmpDir, 'model-stats.json'), JSON.stringify({ since: 1 }), 'utf-8');
+    const log = vi.spyOn(console, 'log').mockImplementation(() => {});
+    await runUsageCommand();
+    expect(log).not.toHaveBeenCalledWith(expect.stringContaining('Most used models'));
+  });
+
+  it('renders a missing reset time as a dash', async () => {
+    mockConfigRef.config = makeConfig([{ label: 'odd', key: 'sk-odd' }]);
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue(usageBody(50, undefined));
+    const log = vi.spyOn(console, 'log').mockImplementation(() => {});
+    await runUsageCommand();
+    const out = log.mock.calls.map((c) => String(c[0])).join('\n');
+    expect(out).toContain('(tightest resets -)');
+  });
+
+  it('reports a non-Error config-load failure verbatim', async () => {
+    mockConfigRef.config = makeConfig([{ label: 'alpha', key: 'sk-alpha' }]);
+    vi.mocked(loadConfig).mockImplementation(() => {
+      throw 'disk on fire';
+    });
+    const err = vi.spyOn(console, 'error').mockImplementation(() => {});
+    expect(await runUsageCommand()).toBe(1);
+    expect(err).toHaveBeenCalledWith(expect.stringContaining('Failed to load config'), 'disk on fire');
+  });
   it('returns 1 when no keys or config load fails', async () => {
     mockConfigRef.config = makeConfig([]);
     const code = await runUsageCommand();

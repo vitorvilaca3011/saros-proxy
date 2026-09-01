@@ -141,6 +141,12 @@ describe('identifyKey (offline)', () => {
     expect(result.provider).toBeNull();
     expect(result.confidence).toBe('unknown');
   });
+
+  it('keeps an sk- key unverified when both providers could match it', async () => {
+    const result = await identifyKey('sk-' + 'a'.repeat(40), { verify: false });
+    expect(result.provider).toBeNull();
+    expect(result.confidence).toBe('unverified');
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -239,6 +245,11 @@ describe('identifyKey (mock upstream, sk- collision)', () => {
       //   /zen/go/v1/usage            → opencode-go
       //   /alpha/billing/subscriptions → commandcode
       if (req.url?.startsWith('/zen/go/v1/usage')) {
+        if (opencodeMode === 'boom') {
+          res.statusCode = 500;
+          res.end('server error');
+          return;
+        }
         res.statusCode = opencodeMode === 'ok' ? 200 : 401;
         res.end(opencodeMode === 'ok'
           ? JSON.stringify({ usage: { rolling: { percent: 10 } } })
@@ -286,5 +297,19 @@ describe('identifyKey (mock upstream, sk- collision)', () => {
     Object.defineProperty(opencodeGoProvider, 'baseUrl', { value: ogOriginal, configurable: true });
     expect(result.provider).toBeNull();
     expect(result.confidence).toBe('invalid');
+  });
+
+  it('returns unknown when candidates give mixed verdicts (one invalid, one errored)', async () => {
+    const ccOriginal = commandcodeProvider.baseUrl;
+    const ogOriginal = opencodeGoProvider.baseUrl;
+    Object.defineProperty(commandcodeProvider, 'baseUrl', { value: baseUrl, configurable: true });
+    Object.defineProperty(opencodeGoProvider, 'baseUrl', { value: baseUrl, configurable: true });
+    // commandcode rejects (401 invalid); opencode-go errors (500 inconclusive)
+    opencodeMode = 'boom';
+    const result = await identifyKey('sk-testkeyabcdefghijklmnop');
+    Object.defineProperty(commandcodeProvider, 'baseUrl', { value: ccOriginal, configurable: true });
+    Object.defineProperty(opencodeGoProvider, 'baseUrl', { value: ogOriginal, configurable: true });
+    expect(result.provider).toBeNull();
+    expect(result.confidence).toBe('unknown');
   });
 });

@@ -795,3 +795,56 @@ describe('network-fault resilience (no blackout lockup)', () => {
     expect(body.enabledCount).toBe(0);
   });
 });
+
+describe('createProxyApp — provider mapping & extra headers', () => {
+  beforeEach(() => {
+    vi.restoreAllMocks();
+    resetModelsFetcherState();
+  });
+
+  it('pins a commandcode key for @commandcode models and injects CLI headers', async () => {
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockResolvedValue(
+      new Response('{"ok":true}', { status: 200 }),
+    );
+    const app = createProxyApp(makeConfig({
+      keys: [{ label: 'cc', key: 'user_cc-key-0001', provider: 'commandcode' }],
+    }));
+    const res = await app.request('/zen/go/v1/chat/completions', {
+      method: 'POST',
+      body: JSON.stringify({ model: 'claude-opus-5@commandcode', messages: [] }),
+      headers: { 'content-type': 'application/json', authorization: 'Bearer old-token' },
+    });
+
+    expect(res.status).toBe(200);
+    // Upstream: commandcode base + remapped provider path.
+    expect(String(fetchMock.mock.calls[0][0])).toBe(
+      'https://api.commandcode.ai/provider/v1/chat/completions',
+    );
+    const init = fetchMock.mock.calls[0][1] as RequestInit;
+    const headers = init.headers as Headers;
+    expect(headers.get('authorization')).toBe('Bearer user_cc-key-0001');
+    // Provider-specific CLI identity headers are injected upstream.
+    expect(headers.get('x-commandcode-client')).toBe('cli');
+    expect(headers.get('x-command-code-version')).toBeTruthy();
+    // The @commandcode routing suffix is stripped before upstream.
+    const body = JSON.parse(String(init.body)) as { model: string };
+    expect(body.model).toBe('claude-opus-5');
+  });
+
+  it('handles a non-object JSON request body (JSON array)', async () => {
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockResolvedValue(
+      new Response('{}', { status: 200 }),
+    );
+    const app = createProxyApp(makeConfig());
+    const res = await app.request('/zen/go/v1/chat/completions', {
+      method: 'POST',
+      body: JSON.stringify([1, 2, 3]),
+      headers: { 'content-type': 'application/json' },
+    });
+    expect(res.status).toBe(200);
+    expect(String(fetchMock.mock.calls[0][0])).toBe(
+      'https://example.com/zen/go/v1/chat/completions',
+    );
+  });
+});
+

@@ -387,6 +387,32 @@ describe('CLI: bare invocation (overview)', () => {
     expect(mockGetDaemonState).toHaveBeenCalled();
   });
 
+  it('shows a provider tag and handles a pid-less daemon with no harnesses', async () => {
+    process.argv = ['node', 'saros-proxy'];
+    vi.resetModules();
+    mockGetDaemonState.mockResolvedValue({
+      running: true,
+      pid: null, // running but no pid recorded
+      port: 3000,
+      stalePid: false,
+      health: { status: 'ok' },
+    });
+    mockLoadConfig.mockReturnValue({
+      keys: [
+        { label: 'cc', key: 'user_abc', provider: 'commandcode' },
+      ],
+    } as any);
+    mockReadHarnessSettings.mockReturnValue([]); // no harnesses enabled
+    mockProcessExit();
+    const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+
+    await expect(import('./index.js')).rejects.toThrow('process.exit(0)');
+    const output = logSpy.mock.calls.map((c) => c[0] as string).join('\n');
+    expect(output).toContain('✓ running');
+    expect(output).toContain('Harnesses: (none)');
+    expect(output).toContain('[commandcode]');
+    expect(output).toContain('1 configured');
+  });
   it('shows not running when the probe finds nothing', async () => {
     process.argv = ['node', 'saros-proxy'];
     vi.resetModules();

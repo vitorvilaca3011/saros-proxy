@@ -76,6 +76,8 @@ import {
   writeHarnessSettings,
   syncModelsInAllHarnesses,
 } from '../src/cli/harness-sync.js';
+import { commandcodeProvider } from '../src/providers/commandcode.js';
+import { opencodeGoProvider } from '../src/providers/opencode-go.js';
 
 const mockedFs = vi.mocked(fs);
 const mockedFetchUpstreamIds = vi.mocked(fetchUpstreamModelIds);
@@ -1090,3 +1092,134 @@ describe('syncModelsInAllHarnesses', () => {
     ).toBe(true);
   });
 });
+
+describe('buildCanonicalModels — provider catalogs', () => {
+  afterEach(() => {
+    // Restore the fetchCatalog spies; the models-sync vi.fn() mocks keep
+    // their per-test implementations (set explicitly in each test).
+    vi.restoreAllMocks();
+  });
+
+  it('appends commandcode-only models as @commandcode entries and aliases shared ones', async () => {
+    mockedFetchUpstreamIds.mockResolvedValue(['deepseek-v4-flash', 'glm-5']);
+    mockedFetchModelsDevMetadata.mockResolvedValue(null);
+    mockedBuildMinimalStub.mockImplementation((id: string) => ({
+      id,
+      name: id,
+      reasoning: true,
+      limit: { context: 1000000, output: 65536 },
+      modalities: { input: ['text'], output: ['text'] },
+    }));
+
+    vi.spyOn(commandcodeProvider, 'fetchCatalog').mockResolvedValue([
+      { id: 'deepseek/deepseek-v4-flash', name: 'DeepSeek V4 Flash', context_length: 1000000, owned_by: 'deepseek' },
+      { id: 'glm-5', name: 'GLM 5' },
+      { id: 'claude-opus-5', name: 'Claude Opus 5', context_length: 200000, owned_by: 'anthropic' },
+      { id: 'vendor/mystery-1' }, // no name -> id becomes the display name
+      { id: 'vendor/nameless-with-context', context_length: 300000 },
+      {}, // missing id -> skipped
+      { id: 42 }, // non-string id -> skipped
+    ]);
+    vi.spyOn(opencodeGoProvider, 'fetchCatalog').mockResolvedValue([
+      { id: 'deepseek-v4-flash' },
+      { id: 'glm-5' },
+    ]);
+
+    const config = {
+      port: 3000,
+      keys: [
+        { label: 'cc', key: 'user_cc-key-abcdefghijklmnop', provider: 'commandcode' },
+        { label: 'oc', key: 'sk-oc-key-abcdefghijklmnop', provider: 'opencode-go' },
+      ],
+    } as unknown as ProxyConfig;
+
+    const result = await buildCanonicalModels(config);
+
+    // Shared models: commandcode catalog ids alias onto the upstream entries.
+    expect(((result['deepseek-v4-flash'] as Record<string, unknown>).aliases as string[])).toContain(
+      'deepseek/deepseek-v4-flash',
+    );
+    expect(((result['glm-5'] as Record<string, unknown>).aliases as string[])).toContain('glm-5');
+
+    // Provider-only models surface as @commandcode suffixed entries.
+    const ccModel = result['claude-opus-5@commandcode'] as Record<string, unknown>;
+    expect(ccModel).toBeDefined();
+    expect(ccModel.name).toBe('Claude Opus 5 (1)');
+    expect((ccModel.limit as Record<string, unknown>).context).toBe(200000);
+    expect(ccModel.owned_by).toBe('anthropic');
+    expect(ccModel.reasoning_options).toEqual([{ type: 'effort', values: ['low', 'medium', 'high'] }]);
+
+    // Name fallbacks: no `name` -> id; context_length defaults to 262144.
+    expect((result['vendor/mystery-1@commandcode'] as Record<string, unknown>).name).toBe(
+      'vendor/mystery-1@commandcode (1)',
+    );
+    expect(
+      (result['vendor/nameless-with-context@commandcode'] as Record<string, unknown>).name,
+    ).toBe('vendor/nameless-with-context@commandcode (1)');
+    // No owned_by -> no owned_by key (nothing spread).
+    expect((result['vendor/mystery-1@commandcode'] as Record<string, unknown>).owned_by).toBeUndefined();
+
+    // Fallback context default is exercised by a catalog entry without one.
+    expect((result['vendor/mystery-1@commandcode'] as Record<string, unknown>).limit).toEqual({
+      context: 262144,
+      output: 65536,
+    });
+
+    // Rotation width: the upstream entry shows how many keys can serve it.
+    expect(((result['glm-5'] as Record<string, unknown>).name)).toBe('glm-5 (1)');
+  });
+
+  it('skips provider catalogs entirely when the user holds no key for them', async () => {
+    mockedFetchUpstreamIds.mockResolvedValue(['glm-5']);
+    mockedFetchModelsDevMetadata.mockResolvedValue(null);
+    mockedBuildMinimalStub.mockImplementation((id: string) => ({ id, name: id }));
+    const ccSpy = vi.spyOn(commandcodeProvider, 'fetchCatalog').mockResolvedValue([
+      { id: 'claude-opus-5', name: 'Claude Opus 5' },
+    ]);
+    const ocSpy = vi.spyOn(opencodeGoProvider, 'fetchCatalog').mockResolvedValue([]);
+
+    const result = await buildCanonicalModels({ port: 3000 } as ProxyConfig);
+
+    expect(result['claude-opus-5@commandcode']).toBeUndefined();
+    expect(ccSpy).not.toHaveBeenCalled();
+    expect(ocSpy).not.toHaveBeenCalled();
+  });
+
+  it('handles a provider catalog that returns null (fetch failure)', async () => {
+    mockedFetchUpstreamIds.mockResolvedValue(['glm-5']);
+    mockedFetchModelsDevMetadata.mockResolvedValue(null);
+    mockedBuildMinimalStub.mockImplementation((id: string) => ({ id, name: id }));
+    vi.spyOn(commandcodeProvider, 'fetchCatalog').mockResolvedValue(null);
+
+    const config = {
+      port: 3000,
+      keys: [{ label: 'cc', key: 'user_cc-key-abcdefghijklmnop', provider: 'commandcode' }],
+    } as unknown as ProxyConfig;
+
+    const result = await buildCanonicalModels(config);
+    expect(result['glm-5']).toBeDefined(); // upstream list unaffected
+  });
+
+  it('toPiOmpModel skips junk reasoning_options and unknown effort values', () => {
+    // parseEfforts must not throw or invent efforts from malformed metadata:
+    // a non-effort type, a non-array values field, non-object options and an
+    // out-of-vocabulary effort value are all skipped, leaving no thinking
+    // metadata on the converted model.
+    const model = toPiOmpModel({
+      id: 'ox-alpha-free',
+      name: 'Ox Alpha Free',
+      reasoning: true,
+      limit: { context: 1000000, output: 131072 },
+      reasoning_options: [
+        { type: 'budget', values: ['x'] },
+        { type: 'effort', values: 'not-an-array' },
+        'not-an-object',
+        ['array-entry'],
+        { type: 'effort', values: ['ultra-maximum-effort'] },
+      ],
+    });
+    expect(model.thinking).toBeUndefined();
+    expect(model.contextWindow).toBe(1000000);
+  });
+});
+

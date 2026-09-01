@@ -3,8 +3,18 @@
  */
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { existsSync, readFileSync, writeFileSync, mkdirSync, mkdtempSync, rmSync } from 'node:fs';
+import * as fs from 'node:fs';
 import { join, sep } from 'node:path';
 import { tmpdir } from 'node:os';
+
+// Wrap writeFileSync in a spy (defaulting to the real implementation) so the
+// best-effort persist error path can be simulated per-call.
+vi.mock('node:fs', async (importOriginal) => {
+  const real = await importOriginal<typeof import('node:fs')>();
+  return { ...real, writeFileSync: vi.fn(real.writeFileSync) };
+});
+
+const mockedWriteFileSync = vi.mocked(fs.writeFileSync);
 import {
   getModelStats,
   getModelStatsPath,
@@ -22,10 +32,13 @@ beforeEach(() => {
   resetModelStats();
 });
 
-afterEach(() => {
+afterEach(async () => {
   // Flush any pending debounced write before restoring the environment
   resetModelStats();
   process.env.XDG_CONFIG_HOME = savedConfigHome;
+  const realFs = await vi.importActual<typeof import('node:fs')>('node:fs');
+  mockedWriteFileSync.mockReset();
+  mockedWriteFileSync.mockImplementation(realFs.writeFileSync);
   try {
     rmSync(tmpDir, { recursive: true, force: true });
   } catch {
@@ -163,4 +176,35 @@ describe('model-stats', () => {
     expect(getModelStats()).toEqual([]);
   });
 
+  it('persist swallows write errors (best-effort stats)', async () => {
+    vi.useFakeTimers();
+    try {
+      mockedWriteFileSync.mockImplementationOnce(() => {
+        throw new Error('ENOSPC: no space left on device');
+      });
+      recordModelRequest('glm-5');
+      // Debounce fires -> persist throws -> caught and logged, no crash.
+      await vi.advanceTimersByTimeAsync(10_000);
+      expect(getModelStats()).toEqual([{ model: 'glm-5', count: 1 }]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('flushModelStats persists pending writes immediately (pending-timer path)', async () => {
+    vi.useFakeTimers();
+    try {
+      recordModelRequest('glm-5');
+      flushModelStats(); // clears the pending debounce timer, then persists now
+      const file = JSON.parse(readFileSync(getModelStatsPath(), 'utf-8')) as {
+        counts: Record<string, number>;
+      };
+      expect(file.counts['glm-5']).toBe(1);
+      // Timer was cancelled: advancing the clock writes nothing more.
+      await vi.advanceTimersByTimeAsync(10_000);
+      expect(JSON.parse(readFileSync(getModelStatsPath(), 'utf-8')).counts['glm-5']).toBe(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
 });

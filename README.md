@@ -24,7 +24,7 @@ Manage multiple API keys behind a single endpoint — OpenCode-Go **and** Comman
 - [Configuration Reference](#configuration-reference)
 - [Usage Examples](#usage-examples)
 - [OpenCode Integration](#opencode-integration)
-- [Multi-Harness Integration (pi & oh-my-pi)](#multi-harness-integration-pi--oh-my-pi)
+- [Multi-Harness Integration (pi, oh-my-pi & dsh)](#multi-harness-integration-pi-oh-my-pi--dsh)
 - [Troubleshooting](#troubleshooting)
 - [Development](#development)
 - [Security](#security)
@@ -78,15 +78,17 @@ Manage multiple API keys behind a single endpoint — OpenCode-Go **and** Comman
                                   ▼           ▼           ▼
                            ┌──────────┐ ┌──────────┐ ┌──────────┐
                            │  Key A   │ │  Key B   │ │  Key C   │
-                           │ sk-abc…  │ │ sk-def…  │ │ sk-ghi…  │
+                           │ sk-abc…  │ │ sk-def…  │ │ user_…   │
                            └────┬─────┘ └────┬─────┘ └────┬─────┘
                                 │            │            │
                                 └────────────┼────────────┘
-                                             ▼
-                                ┌──────────────────────────┐
-                                │    OpenCode-Go API       │
-                                │    https://opencode.ai   │
-                                └──────────────────────────┘
+                                             │
+                       ┌─────────────────────┴─────────────────────┐
+                       ▼                                           ▼
+              ┌───────────────────────┐                  ┌──────────────────────────┐
+              │      OpenCode-Go API  │                  │      CommandCode API     │
+              │    https://opencode.ai│                  │ https://api.commandcode.ai│
+              └───────────────────────┘                  └──────────────────────────┘
 ```
 
 ### How Request Distribution Works
@@ -236,14 +238,14 @@ Want to run manually instead? Skip the wizard and just create a `config.yaml`:
 ```yaml
 port: 3000
 host: 127.0.0.1
-upstreamBaseUrl: https://opencode.ai
+upstreamBaseUrl: https://opencode.ai   # default upstream for opencode-go (sk-) keys
 keys:
   - label: primary
-    key: sk-your-primary-key-here-12345678
+    key: sk-your-primary-key-here-12345678        # opencode-go
   - label: secondary
-    key: sk-your-secondary-key-here-87654321
+    key: sk-your-secondary-key-here-87654321      # opencode-go
   - label: commandcode
-    key: user_your-commandcode-token-here
+    key: user_your-commandcode-token-here         # commandcode (user_ token)
 circuitBreakerThreshold: 3
 circuitBreakerCooldownMs: 60000
 requestTimeoutMs: 30000
@@ -434,8 +436,8 @@ saros-proxy status
 # Stop it
 saros-proxy stop
 
-# Add harnesses to the model-sync selection (omp|ohmypi, pi, oc|opencode)
-saros-proxy configharness omp pi oc
+# Add harnesses to the model-sync selection (omp|ohmypi, pi, oc|opencode, dsh)
+saros-proxy configharness omp pi oc dsh
 
 # Remove a harness, or disable sync entirely
 saros-proxy configharness --remove pi
@@ -463,18 +465,18 @@ saros-proxy autostart uninstall [--method vbs|registry|auto]
 saros-proxy autostart status [--method vbs|registry|auto]
 ```
 
-The `start` command automatically syncs model definitions to all enabled harnesses (see [Multi-Harness Integration](#multi-harness-integration-pi--oh-my-pi)).
+The `start` command automatically syncs model definitions to all enabled harnesses (see [Multi-Harness Integration](#multi-harness-integration-pi-oh-my-pi--dsh)).
 
 ### Model Sync Commands
 
-Saros keeps your harness configs in sync with the upstream API. Which harnesses are synced is opt-in via the harness selection (see [Multi-Harness Integration](#multi-harness-integration-pi--oh-my-pi)).
+Saros keeps your harness configs in sync with the provider APIs. Which harnesses are synced is opt-in via the harness selection (see [Multi-Harness Integration](#multi-harness-integration-pi-oh-my-pi--dsh)).
 
 ```bash
 # List which harnesses are enabled for model sync
 saros-proxy configharness
 
-# Add oh-my-pi, pi, and OpenCode to the sync selection (additive)
-saros-proxy configharness omp pi oc
+# Add oh-my-pi, pi, OpenCode, and dsh to the sync selection (additive)
+saros-proxy configharness omp pi oc dsh
 
 # Remove a harness, or disable sync entirely
 saros-proxy configharness --remove pi
@@ -576,21 +578,22 @@ Select the proxy provider in OpenCode's model picker, or set it as default:
 
 ---
 
-## Multi-Harness Integration (pi & oh-my-pi)
+## Multi-Harness Integration (pi, oh-my-pi & dsh)
 
-Besides OpenCode, Saros can keep its provider + model config in sync for the `pi` and `oh-my-pi` (`omp`) harnesses. Both belong to the pi-coding-agent family but use different config files:
+Besides OpenCode, Saros can keep its provider + model config in sync for the `pi`, `oh-my-pi` (`omp`), and DeepSeek Harness (`dsh`) harnesses. They use different config files:
 
 | Harness | Config file | Format |
 |---|---|---|
 | OpenCode | `~/.config/opencode/opencode.json[.jsonc]` | JSON/JSONC |
 | pi | `~/.pi/agent/models.json` | JSON |
 | oh-my-pi (`omp`) | `~/.omp/agent/models.yml` | YAML |
+| DeepSeek Harness (`dsh`) | `~/.dsh/profiles/web/cordis.patch.yml` | YAML (patch layer) |
 
 Sync is opt-in per harness, configured with the `configharness` command. The selection is stored in `~/.config/saros/harnesses.json`:
 
 ```bash
-# Add omp + pi + opencode to the sync selection (additive)
-saros-proxy configharness omp pi oc
+# Add omp + pi + opencode + dsh to the sync selection (additive)
+saros-proxy configharness omp pi oc dsh
 
 # Remove a harness, or disable sync entirely
 saros-proxy configharness --remove pi
@@ -599,7 +602,7 @@ saros-proxy configharness --clear
 # See the current selection
 saros-proxy configharness
 
-# Accepted names: omp | ohmypi, pi, oc | opencode
+# Accepted names: omp | ohmypi, pi, oc | opencode, dsh
 ```
 
 `configharness` is additive: each command adds the named harnesses to the current selection (running `configharness omp` then `configharness pi` enables both). Use `--remove <h>...` to disable specific harnesses or `--clear` to disable sync for every harness.
@@ -611,9 +614,9 @@ Behavior:
 - Sync never creates a harness config: harnesses whose config file is missing are skipped.
 - Only `providers["saros-proxy"].models` is replaced; all other providers, fields, and settings are preserved, and a `<file>.backup` is created before the first write.
 
-The model list written to each harness comes from the live upstream catalog enriched with models.dev metadata (falling back to bundled models when offline), so pi/omp stay current alongside OpenCode.
+The model list written to each harness comes from the live provider catalogs (opencode-go) enriched with models.dev metadata, merged with any CommandCode-only models — falling back to bundled models when offline — so every harness stays current alongside OpenCode.
 
-> **Why a static model list?** Both harnesses use a static `models` list on purpose. `pi` has no `/v1/models` discovery for custom providers, and `oh-my-pi`'s discovery cannot recover reasoning/context/output metadata for OpenCode-Go model IDs — dynamic discovery would silently break thinking-level (`:max`/`:high`) role configs in `~/.omp/agent/config.yml`.
+> **Why a static model list?** The harnesses use a static `models` list on purpose. `pi` has no `/v1/models` discovery for custom providers, and `oh-my-pi`'s discovery cannot recover reasoning/context/output metadata for provider model IDs. `dsh` replaces only `providers["saros-proxy"].models` in its patch layer (`cordis.patch.yml`), which dsh rewrites at every boot — a static, explicitly-managed list is the only reliable source. Dynamic discovery would silently break thinking-level (`:max`/`:high`) role configs.
 
 ---
 

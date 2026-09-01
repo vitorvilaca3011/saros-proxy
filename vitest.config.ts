@@ -23,6 +23,9 @@ export default defineConfig({
         // process.kill() paths inside timers; unit-testing it safely requires
         // exit/kill mocking that would test the mocks, not the daemon.
         'src/cli/daemon.ts',
+        // Type-only module (interfaces/type aliases erase at runtime); it has
+        // zero executable statements, so it can never be covered.
+        'src/providers/types.ts',
       ],
     },
     // Exclude compiled output to avoid running tests twice, plus the heavy
