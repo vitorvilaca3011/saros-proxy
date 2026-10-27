@@ -60,6 +60,24 @@ describe('parseTokenCounts', () => {
     });
   });
 
+  it('reads the input/output shape used by OpenAI Responses and Anthropic', () => {
+    expect(parseTokenCounts({ input_tokens: 11, output_tokens: 4, total_tokens: 15 })).toEqual({
+      promptTokens: 11,
+      completionTokens: 4,
+      totalTokens: 15,
+    });
+    expect(parseTokenCounts({ input_tokens: 6, output_tokens: 1 })).toEqual({
+      promptTokens: 6,
+      completionTokens: 1,
+      totalTokens: 7,
+    });
+  });
+
+  it('ignores objects that report no recognizable token field', () => {
+    expect(parseTokenCounts({ foo: 1 })).toBeNull();
+    expect(parseTokenCounts('nope')).toBeNull();
+  });
+
   it('derives the total when the upstream omits it', () => {
     expect(parseTokenCounts({ prompt_tokens: 7, completion_tokens: 2 })).toEqual({
       promptTokens: 7,

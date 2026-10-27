@@ -74,11 +74,14 @@ function isPlainObject(value: unknown): value is Record<string, unknown> {
  */
 export function parseTokenCounts(usage: unknown): TokenCounts | null {
   if (!isPlainObject(usage)) return null;
-  const promptTokens = tokenCount(usage.prompt_tokens);
-  const completionTokens = tokenCount(usage.completion_tokens);
+  // Chat completions report prompt/completion; the OpenAI Responses and
+  // Anthropic shapes report input/output instead. Accept both so a request
+  // through /v1/responses or /v1/messages is not booked as zero.
+  const promptTokens = tokenCount(usage.prompt_tokens) || tokenCount(usage.input_tokens);
+  const completionTokens = tokenCount(usage.completion_tokens) || tokenCount(usage.output_tokens);
   const total = tokenCount(usage.total_tokens);
   if (promptTokens === 0 && completionTokens === 0 && total === 0) {
-    const reported = ['prompt_tokens', 'completion_tokens', 'total_tokens']
+    const reported = ['prompt_tokens', 'completion_tokens', 'total_tokens', 'input_tokens', 'output_tokens']
       .some((field) => typeof usage[field] === 'number');
     if (!reported) return null;
   }

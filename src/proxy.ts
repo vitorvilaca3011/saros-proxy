@@ -785,6 +785,21 @@ async function handleStreamingRequest(opts: HandleRequestOptions): Promise<Respo
 }
 
 /**
+ * Pull token counts out of one SSE event. Chat completions carry `usage` at the
+ * top level; the OpenAI Responses schema nests it under `response.usage` on
+ * `response.completed`, so a top-level-only reader books zero for those streams.
+ */
+function extractEventUsage(parsed: Record<string, unknown>): unknown {
+  if (parsed.usage) return parsed.usage;
+  const response = parsed.response;
+  if (response && typeof response === 'object' && !Array.isArray(response)) {
+    const nested = (response as Record<string, unknown>).usage;
+    if (nested) return nested;
+  }
+  return null;
+}
+
+/**
  * Wrap an upstream SSE stream with error detection.
  * Parses SSE events properly to avoid false positives on
  * `"error"` appearing in non-error JSON payloads.
@@ -856,11 +871,14 @@ function wrapStreamWithErrorDetection(
               return;
             }
             // Intermediate chunks send `usage: null`; the counts arrive on the
-            // finish chunk and/or the usage-only chunk (see bookUsage).
-            if (parsed?.usage) {
-              lastUsage = parsed.usage;
+            // finish chunk and/or the usage-only chunk (see bookUsage). The
+            // OpenAI Responses schema nests them under `response.usage` on the
+            // `response.completed` event instead of at the top level.
+            const eventUsage = extractEventUsage(parsed);
+            if (eventUsage) {
+              lastUsage = eventUsage;
               if (Array.isArray(parsed.choices) && parsed.choices.length === 0) {
-                usageOnlyChunk = parsed.usage;
+                usageOnlyChunk = eventUsage;
               }
             }
           } catch {

@@ -111,6 +111,13 @@ describe('buildUpstreamHeaders', () => {
   });
 });
 
+describe('buildUpstreamHeaders — ZDR opt-in', () => {
+  it('forwards x-cmd-zdr untouched so zero-data-retention is preserved', () => {
+    const headers = buildUpstreamHeaders(new Headers({ 'x-cmd-zdr': '1' }), 'token');
+    expect(headers.get('x-cmd-zdr')).toBe('1');
+  });
+});
+
 describe('isStreamingRequest', () => {
   it('returns true when stream is true', () => {
     expect(isStreamingRequest('{"stream": true}')).toBe(true);
@@ -380,6 +387,31 @@ describe('createProxyApp — standard proxy pipeline', () => {
   beforeEach(() => {
     vi.restoreAllMocks();
     resetModelsFetcherState();
+  });
+
+  it('forwards a decision-model body untouched and books its usage', async () => {
+    resetTokenUsage();
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockResolvedValue(
+      new Response(
+        JSON.stringify({ probabilities: { yes: 0.7 }, usage: { input_tokens: 3, output_tokens: 0, total_tokens: 3 } }),
+        { status: 200, headers: { 'content-type': 'application/json' } },
+      ),
+    );
+    const payload = { model: 'typesafe/jev', state: 'payments failing', questions: [{ text: 'will it recover' }] };
+    const app = createProxyApp(makeConfig());
+    const res = await app.request('/v1/systemone', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+      headers: { 'content-type': 'application/json' },
+    });
+    expect(res.status).toBe(200);
+    await res.text();
+
+    // /systemone is not a chat message: no stream_options injection, no body rewrite.
+    const sent = JSON.parse(String((fetchMock.mock.calls[0][1] as RequestInit).body)) as Record<string, unknown>;
+    expect(sent).toEqual(payload);
+    const recorded = Object.values(getKeyTokenUsage().keys);
+    expect(recorded[0]).toMatchObject({ requests: 1, promptTokens: 3, totalTokens: 3 });
   });
 
   it('forwards successful requests and sanitizes downstream headers', async () => {
@@ -804,6 +836,37 @@ describe('createProxyApp — streaming pipeline', () => {
       promptTokens: 5,
       completionTokens: 2,
       totalTokens: 7,
+    });
+  });
+
+  it('books usage nested under response.usage (OpenAI Responses schema)', async () => {
+    resetTokenUsage();
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue(
+      new Response(
+        sseStream(
+          'event: response.output_text.delta\ndata: {"type":"response.output_text.delta","delta":"hi"}\n\n',
+          'event: response.completed\ndata: {"type":"response.completed","response":{"id":"resp_1","usage":{"input_tokens":11,"output_tokens":4,"total_tokens":15}}}\n\n',
+        ),
+        { status: 200, headers: { 'content-type': 'text/event-stream' } },
+      ),
+    );
+    const app = createProxyApp(makeConfig());
+    const res = await app.request('/v1/responses', {
+      method: 'POST',
+      body: JSON.stringify({ model: 'm', stream: true, input: 'hi' }),
+      headers: { 'content-type': 'application/json' },
+    });
+    await res.text();
+
+    // Responses streams the counts inside response.usage, not at the top level:
+    // without this the request would spend credits unrecorded.
+    const recorded = Object.values(getKeyTokenUsage().keys);
+    expect(recorded).toHaveLength(1);
+    expect(recorded[0]).toMatchObject({
+      requests: 1,
+      promptTokens: 11,
+      completionTokens: 4,
+      totalTokens: 15,
     });
   });
 
