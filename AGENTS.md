@@ -99,8 +99,8 @@ src/
 
 **Bump the npm version only for feature or behavioral changes.** Docs-only changes (README, CHANGELOG, comments) merge to master WITHOUT a version bump and WITHOUT publishing to npm.
 
-- Never republish a taken version. `0.7.2`, `0.7.3` and `0.7.4` are taken on npm; the next feature release is `0.8.0`.
-- Git and npm are aligned at `0.7.4` for now — keep them in lockstep on every release.
+- Never republish a taken version. `0.7.2` through `0.10.1` are taken on npm; the next patch is `0.10.2`, the next feature release `0.11.0`.
+- Git and npm are aligned at `0.10.1` — keep them in lockstep on every release. Pushing a `v*` tag is what publishes (the Publish workflow authenticates with OIDC and refuses a tag that disagrees with `package.json`).
 - Feature release: `npm version <x.y.z>` → `npm run lint` + `npx vitest run` → `npm run build` → commit + `git tag v<x.y.z>` → `npm publish` → push master + tag.
 - Docs-only: commit to master, push. No bump, no tag, no publish.
 

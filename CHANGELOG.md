@@ -7,6 +7,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.10.2] - 2026-10-27
+
+### Fixed
+
+- **Responses and Anthropic calls are no longer booked as zero tokens.** Streams
+  from `/v1/responses` carry `usage` nested under `response.usage` on the
+  `response.completed` event, not at the top level, and both Responses and
+  Anthropic report `input_tokens`/`output_tokens` instead of
+  `prompt_tokens`/`completion_tokens`. The SSE parser now reads either location
+  and `parseTokenCounts` accepts either field shape.
+
+### Changed
+
+- **`models.json` refreshed from models.dev** (provider `opencode-go`): 18 stale
+  entries became 37 current models, 11 ids that no longer exist upstream were
+  dropped, and the catalogue now carries `cost`, `reasoning_options`,
+  `interleaved` and `structured_output`.
+- **Single source of truth for the bundled catalogue.** `OPENCODE_MODELS`
+  duplicated `models.json` and had drifted from it. `src/models-catalog.ts` now
+  loads the packaged `models.json` at runtime (per-path cache; a missing or
+  malformed file degrades to an empty catalogue with one warning). `models.json`
+  is included in the npm package and in both Docker stages, so the offline
+  fallback survives every install path.
+- **Every test suite moved from `src/` to `test/`** (38 suites). `src/` holds
+  production code only; imports, `vi.mock` and dynamic imports were rewritten
+  to `../src/...`.
+
+### Removed
+
+- `OPENCODE_MODELS` in `src/constants.ts` (163 lines).
+
 ## [0.10.1] - 2026-10-24
 
 ### Changed
@@ -226,7 +257,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Hop-by-hop header sanitization
 - Non-root Docker user
 
-[Unreleased]: https://github.com/vitorvilaca3011/saros-proxy/compare/v0.10.1...HEAD
+[Unreleased]: https://github.com/vitorvilaca3011/saros-proxy/compare/v0.10.2...HEAD
+[0.10.2]: https://github.com/vitorvilaca3011/saros-proxy/compare/v0.10.1...v0.10.2
 [0.10.1]: https://github.com/vitorvilaca3011/saros-proxy/compare/v0.10.0...v0.10.1
 [0.10.0]: https://github.com/vitorvilaca3011/saros-proxy/compare/v0.9.0...v0.10.0
 [0.9.0]: https://github.com/vitorvilaca3011/saros-proxy/compare/v0.8.0...v0.9.0
