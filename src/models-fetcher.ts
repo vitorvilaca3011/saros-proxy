@@ -5,12 +5,12 @@
  * Public API:
  *   fetchModelsFromUpstream(config)  — raw fetch + validation
  *   getModelsList(config)            — orchestrator with warm buffer & in-flight dedup
- *   buildFallbackResponse()          — minimal fallback from OPENCODE_MODELS
+ *   buildFallbackResponse()          — minimal fallback from the bundled catalog
  *   resetModelsFetcherState()        — test helper to clear module-level state
  */
 
 import { MODELS_FETCH_TIMEOUT_MS, MODELS_WARM_BUFFER_MS } from './constants.js';
-import { loadModelsFromJson } from './cli/opencode-config.js';
+import { loadModelsCatalog } from './models-catalog.js';
 import type { ProxyConfig } from './config.js';
 
 // ---------------------------------------------------------------------------
@@ -91,13 +91,13 @@ function buildResponse(data: { object: string; data: unknown[] }): Response {
 }
 
 /**
- * Build a 200 JSON Response using the hardcoded OPENCODE_MODELS list.
+ * Build a 200 JSON Response using the bundled model catalog.
  * Used when the upstream endpoint is unreachable.
  *
  * Each entry gets `{ id, object: 'model', created: <unix ts>, owned_by: 'saros' }`.
  */
 export function buildFallbackResponse(): Response {
-  const models = loadModelsFromJson();
+  const models = loadModelsCatalog();
   const now = Math.floor(Date.now() / 1000);
   const data = Object.keys(models).map((id) => ({
     id,

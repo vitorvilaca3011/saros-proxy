@@ -9,6 +9,7 @@
   },
   "files": [
     "dist",
+    "models.json",
     "README.md",
     "LICENSE"
   ],

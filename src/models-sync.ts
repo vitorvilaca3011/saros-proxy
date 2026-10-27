@@ -16,7 +16,7 @@ import {
   MODELS_DEV_PROVIDER_ID,
   MODELS_DEV_SAFE_FIELDS,
 } from './constants.js';
-import { loadModelsFromJson } from './cli/opencode-config.js';
+import { loadModelsCatalog } from './models-catalog.js';
 import { logger } from './logger.js';
 import type { ProxyConfig } from './config.js';
 import type { OpencodeConfigResult } from './cli/opencode-config.js';
@@ -160,7 +160,7 @@ function pickSafeFields(entry: Record<string, unknown>): Record<string, unknown>
  *
  * Priority (first match wins):
  *   1. models.dev metadata (if provided and found for modelId)
- *   2. OPENCODE_MODELS bundled constants
+ *   2. Bundled `models.json` catalog
  *   3. Heuristic title-case of the ID with default limits
  *
  * @param modelId — The upstream model ID (e.g. "glm-5", "kimi-k2.7-code")
@@ -185,7 +185,7 @@ export function buildMinimalStub(
   }
 
   // 2. models.json bundled definitions
-  const bundled = loadModelsFromJson();
+  const bundled = loadModelsCatalog();
   const known = bundled[modelId];
   if (known && typeof known === 'object' && !Array.isArray(known)) {
     return { ...(known as Record<string, unknown>), id: modelId };

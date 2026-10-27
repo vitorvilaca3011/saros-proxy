@@ -18,7 +18,7 @@ import { opencodeGoProvider } from './providers/opencode-go.js';
 import type { KeyProvider } from './providers/index.js';
 import { resetModelsFetcherState } from './models-fetcher.js';
 import { getKeyTokenUsage, resetTokenUsage } from './token-usage.js';
-import { loadModelsFromJson } from './cli/opencode-config.js';
+import { loadModelsCatalog } from './models-catalog.js';
 import type { ProxyConfig } from './config.js';
 import { MAX_BODY_SIZE } from './constants.js';
 
@@ -309,7 +309,7 @@ describe('createProxyApp — /v1/models routes', () => {
   it('GET /v1/models returns all models', async () => {
     const res = await app.request('/v1/models');
     const body = await res.json();
-    expect(body.data).toHaveLength(Object.keys(loadModelsFromJson()).length);
+    expect(body.data).toHaveLength(Object.keys(loadModelsCatalog()).length);
   });
 
   it('GET /v1/models each model entry has minimal format (id, object, created, owned_by)', async () => {
@@ -329,7 +329,7 @@ describe('createProxyApp — /v1/models routes', () => {
     expect(res.status).toBe(200);
     const body = await res.json();
     expect(body.object).toBe('list');
-    expect(body.data).toHaveLength(Object.keys(loadModelsFromJson()).length);
+    expect(body.data).toHaveLength(Object.keys(loadModelsCatalog()).length);
   });
 
   it('POST /v1/* paths are proxied to upstream (no longer 404)', async () => {

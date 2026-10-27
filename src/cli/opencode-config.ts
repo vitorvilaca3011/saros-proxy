@@ -8,7 +8,7 @@
 import { constants, existsSync, readFileSync, writeFileSync, copyFileSync, mkdirSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { homedir } from 'node:os';
-import { OPENCODE_MODELS } from '../constants.js';
+import { loadModelsCatalog } from '../models-catalog.js';
 
 // ---------------------------------------------------------------------------
 // JSONC support
@@ -125,8 +125,8 @@ export function loadModelsFromJson(configPath?: string): Record<string, unknown>
       // Fall through to bundled defaults
     }
   }
-  // Fallback: use bundled constants
-  return OPENCODE_MODELS;
+  // Fallback: use the bundled catalog
+  return loadModelsCatalog();
 }
 
 // ---------------------------------------------------------------------------

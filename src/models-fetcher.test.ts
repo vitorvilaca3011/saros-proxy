@@ -9,7 +9,7 @@
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { MODELS_FETCH_TIMEOUT_MS, MODELS_WARM_BUFFER_MS } from './constants.js';
-import { loadModelsFromJson } from './cli/opencode-config.js';
+import { loadModelsCatalog } from './models-catalog.js';
 import type { ProxyConfig } from './config.js';
 import {
   fetchModelsFromUpstream,
@@ -205,7 +205,7 @@ describe('getModelsList', () => {
     expect(response.status).toBe(200);
     expect(body.object).toBe('list');
     expect(Array.isArray(body.data)).toBe(true);
-    expect(body.data).toHaveLength(Object.keys(loadModelsFromJson()).length);
+    expect(body.data).toHaveLength(Object.keys(loadModelsCatalog()).length);
   });
 
   it('fallback response entries have correct shape', async () => {
@@ -214,7 +214,7 @@ describe('getModelsList', () => {
 
     expect(response.status).toBe(200);
     expect(body.object).toBe('list');
-    expect(body.data).toHaveLength(Object.keys(loadModelsFromJson()).length);
+    expect(body.data).toHaveLength(Object.keys(loadModelsCatalog()).length);
 
     for (const entry of body.data) {
       expect(entry).toHaveProperty('id');

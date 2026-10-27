@@ -12,6 +12,7 @@ RUN npm ci
 
 COPY tsconfig.json ./
 COPY src/ ./src/
+COPY models.json ./
 RUN npm run build
 
 # ===========================================================================
@@ -28,8 +29,9 @@ RUN addgroup -S appgroup && adduser -S appuser -G appgroup
 COPY --from=build /app/package*.json ./
 RUN npm ci --omit=dev && npm cache clean --force
 
-# Copy compiled output
+# Copy compiled output + bundled model catalog
 COPY --from=build /app/dist ./dist
+COPY --from=build /app/models.json ./
 
 # Expose proxy port
 EXPOSE 3000

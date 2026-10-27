@@ -10,6 +10,7 @@ import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import type { ProxyConfig } from './config.js';
 import * as modelsFetcher from './models-fetcher.js';
+import { loadModelsCatalog } from './models-catalog.js';
 import {
   fetchUpstreamModelIds,
   getMissingModels,
@@ -248,22 +249,26 @@ describe('getMissingModels', () => {
 
 describe('buildMinimalStub', () => {
   it('kimi-k2.7-code', () => {
-    expect(buildMinimalStub('kimi-k2.7-code')).toEqual({
-      id: 'kimi-k2.7-code',
-      name: 'Kimi K2.7 Code',
-      limit: { context: 262144, output: 65536 },
-      tool_call: true,
-      reasoning: true,
+    const stub = buildMinimalStub('kimi-k2.7-code');
+    expect(stub.id).toBe('kimi-k2.7-code');
+    expect(stub.name).toBe('Kimi K2.7 Code');
+    expect(stub.tool_call).toBe(true);
+    expect(stub.reasoning).toBe(true);
+    expect(stub.limit).toEqual({ context: 262144, output: 262144 });
+    expect(stub.modalities).toEqual({
+      input: ['text', 'image', 'video'],
+      output: ['text'],
     });
   });
 
-  it('glm-5', () => {
-    const stub = buildMinimalStub('glm-5');
-    expect(stub.id).toBe('glm-5');
-    expect(stub.name).toBe('GLM-5');
+  it('glm-5.3', () => {
+    const stub = buildMinimalStub('glm-5.3');
+    expect(stub.id).toBe('glm-5.3');
+    expect(stub.name).toBe('GLM-5.3');
     expect(stub.tool_call).toBe(true);
     expect(stub.reasoning).toBe(true);
-    expect(stub.limit).toBeDefined();
+    expect(stub.limit).toEqual({ context: 1000000, output: 131072 });
+    expect(stub.modalities).toEqual({ input: ['text'], output: ['text'] });
   });
 
   it('qwen3.7-max', () => {
@@ -278,10 +283,14 @@ describe('buildMinimalStub', () => {
   it('minimax-m3', () => {
     const stub = buildMinimalStub('minimax-m3');
     expect(stub.id).toBe('minimax-m3');
-    expect(stub.name).toBe('MiniMax M3');
-    expect(stub.limit).toBeDefined();
+    expect(stub.name).toBe('MiniMax-M3');
     expect(stub.tool_call).toBe(true);
     expect(stub.reasoning).toBe(true);
+    expect(stub.limit).toEqual({ context: 1000000, output: 131072 });
+    expect(stub.modalities).toEqual({
+      input: ['text', 'image', 'video'],
+      output: ['text'],
+    });
   });
 
   it('hy3-preview', () => {
@@ -339,7 +348,7 @@ describe('buildMinimalStub', () => {
 
   // --- models.dev metadata integration ---
 
-  it('uses models.dev metadata when model is found (models.dev takes precedence over OPENCODE_MODELS)', () => {
+  it('uses models.dev metadata when model is found (models.dev takes precedence over the bundled catalog)', () => {
     const devMetadata = {
       'deepseek-v4-pro': {
         id: 'deepseek-v4-pro',
@@ -406,18 +415,22 @@ describe('buildMinimalStub', () => {
     expect(stub).toHaveProperty('modalities');
   });
 
-  it('falls back to OPENCODE_MODELS when model not in models.dev metadata', () => {
+  it('falls back to the bundled catalog when model not in models.dev metadata', () => {
     const devMetadata = {
       'kimi-k2.7-code': { id: 'kimi-k2.7-code', name: 'Kimi K2.7 Code' },
     };
-    // deepseek-v4-pro IS in OPENCODE_MODELS
+    // deepseek-v4-pro IS in the bundled catalog
     const stub = buildMinimalStub('deepseek-v4-pro', devMetadata);
-    // Should use OPENCODE_MODELS entry, not models.dev
+    // Should use the bundled entry, not models.dev
     expect(stub.id).toBe('deepseek-v4-pro');
-    expect(stub.name).toBe('DeepSeek V4 Pro');
+    expect(stub.name).toBe('DeepSeek V4 Pro (New)');
+    expect(stub.tool_call).toBe(true);
+    expect(stub.reasoning).toBe(true);
+    expect(stub.limit).toEqual({ context: 1000000, output: 384000 });
+    expect(stub.modalities).toEqual({ input: ['text'], output: ['text'] });
   });
 
-  it('falls back to heuristic title-case when model not in models.dev NOR OPENCODE_MODELS', () => {
+  it('falls back to heuristic title-case when model not in models.dev NOR the bundled catalog', () => {
     const devMetadata = {
       'kimi-k2.7-code': { id: 'kimi-k2.7-code', name: 'Kimi K2.7 Code' },
     };
@@ -429,12 +442,15 @@ describe('buildMinimalStub', () => {
     expect(stub.reasoning).toBe(true);
   });
 
-  it('passes through OPENCODE_MODELS when modelsDevMetadata is undefined (unchanged behavior)', () => {
-    // no second arg — identical to existing behavior
+  it('returns the bundled entry when modelsDevMetadata is undefined', () => {
+    // no second arg — models.dev tier is skipped
     const stub = buildMinimalStub('deepseek-v4-pro');
     expect(stub.id).toBe('deepseek-v4-pro');
-    expect(stub.name).toBe('DeepSeek V4 Pro');
-    expect(stub.limit).toBeDefined();
+    expect(stub.name).toBe('DeepSeek V4 Pro (New)');
+    expect(stub.tool_call).toBe(true);
+    expect(stub.reasoning).toBe(true);
+    expect(stub.limit).toEqual({ context: 1000000, output: 384000 });
+    expect(stub.modalities).toEqual({ input: ['text'], output: ['text'] });
   });
 
   it('hy3-preview falls back to heuristic title-case when not in models.dev or bundled', () => {
@@ -802,7 +818,7 @@ describe('addMissingModelsToOpencodeConfig', () => {
     expect(models['existing-model']).toEqual({ id: 'existing-model', name: 'Existing' });
   });
 
-  it('still works without modelsDevMetadata (unchanged behavior)', () => {
+  it('uses the bundled entry without modelsDevMetadata', () => {
     const configPath = join(tmpDir, 'opencode.json');
     writeFileSync(configPath, JSON.stringify({
       provider: {
@@ -817,9 +833,14 @@ describe('addMissingModelsToOpencodeConfig', () => {
 
     const written = JSON.parse(readFileSync(configPath, 'utf-8'));
     const models = written.provider['saros-proxy'].models;
-    expect(models['deepseek-v4-pro']).toBeDefined();
-    expect(models['deepseek-v4-pro'].name).toBe('DeepSeek V4 Pro');
-    expect(models['deepseek-v4-pro'].cost).toBeUndefined(); // no models.dev → no cost
+    expect(models['deepseek-v4-pro']).toMatchObject({
+      id: 'deepseek-v4-pro',
+      name: 'DeepSeek V4 Pro (New)',
+      tool_call: true,
+      reasoning: true,
+      limit: { context: 1000000, output: 384000 },
+      modalities: { input: ['text'], output: ['text'] },
+    });
   });
 
   // --- enrichment tests ---
@@ -1178,9 +1199,8 @@ describe('syncOpencodeModelsWithUpstream', () => {
 
     const written = JSON.parse(readFileSync(configPath, 'utf-8'));
     const models = written.provider['saros-proxy'].models;
-    // Falls back to OPENCODE_MODELS
-    expect(models['deepseek-v4-pro']).toBeDefined();
-    expect(models['deepseek-v4-pro'].name).toBe('DeepSeek V4 Pro');
+    // Plumbing check: the sync fallback is the packaged catalog itself.
+    expect(models['deepseek-v4-pro']).toEqual(loadModelsCatalog()['deepseek-v4-pro']);
   });
 
   it('handles models.dev returning empty (no opencode-go provider)', async () => {
@@ -1213,8 +1233,11 @@ describe('syncOpencodeModelsWithUpstream', () => {
 
     const written = JSON.parse(readFileSync(configPath, 'utf-8'));
     const models = written.provider['saros-proxy'].models;
-    expect(models['deepseek-v4-pro']).toBeDefined();
-    expect(models['deepseek-v4-pro'].name).toBe('DeepSeek V4 Pro');
+    expect(models['deepseek-v4-pro']).toMatchObject({
+      id: 'deepseek-v4-pro',
+      name: 'DeepSeek V4 Pro (New)',
+      limit: { context: 1000000, output: 384000 },
+    });
   });
 });
 

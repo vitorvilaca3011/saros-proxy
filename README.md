@@ -739,6 +739,7 @@ src/
   providers/            — Multi-provider key abstraction (KeyProvider, adapters, identifyKey)
   models-fetcher.ts     — Upstream model list fetching + caching
   models-sync.ts        — Auto-sync models from upstream to opencode config
+  models-catalog.ts     — Single source of truth: loads bundled models.json
   cli/
     setup.ts            — Interactive setup wizard
     daemon.ts           — Background process management

@@ -24,7 +24,7 @@ import {
   loadModelsFromJson,
   syncModelsToOpencodeConfig,
 } from '../src/cli/opencode-config.js';
-import { OPENCODE_MODELS } from '../src/constants.js';
+import { loadModelsCatalog } from '../src/models-catalog.js';
 
 // Mock homedir so path-detection helpers can be pointed at a temp directory.
 // Defaults to the real home directory; tests that need control override it
@@ -513,14 +513,14 @@ describe('OpenCode Config Integration', () => {
     });
 
     it('falls back to bundled defaults when path does not exist', () => {
-      expect(loadModelsFromJson(join(tmpDir, 'missing', 'models.json'))).toBe(OPENCODE_MODELS);
+      expect(loadModelsFromJson(join(tmpDir, 'missing', 'models.json'))).toBe(loadModelsCatalog());
     });
 
     it('falls back to bundled defaults when file contains invalid JSON', () => {
       const modelsPath = join(tmpDir, 'broken.json');
       writeFileSync(modelsPath, '{ not json', 'utf-8');
 
-      expect(loadModelsFromJson(modelsPath)).toBe(OPENCODE_MODELS);
+      expect(loadModelsFromJson(modelsPath)).toBe(loadModelsCatalog());
     });
 
     it('loads from default models.json path when no path given', () => {
