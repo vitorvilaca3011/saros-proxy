@@ -95,6 +95,15 @@ src/
 - `rmSync(tmpDir, { recursive: true, force: true })` can fail with EPERM if child processes still hold file handles.
 - The smoke tests log a warning but don't fail — this is expected on Windows.
 
+## Versioning & Releases
+
+**Bump the npm version only for feature or behavioral changes.** Docs-only changes (README, CHANGELOG, comments) merge to master WITHOUT a version bump and WITHOUT publishing to npm.
+
+- Never republish a taken version. `0.7.2`, `0.7.3` and `0.7.4` are taken on npm; the next feature release is `0.8.0`.
+- Git and npm are aligned at `0.7.4` for now — keep them in lockstep on every release.
+- Feature release: `npm version <x.y.z>` → `npm run lint` + `npx vitest run` → `npm run build` → commit + `git tag v<x.y.z>` → `npm publish` → push master + tag.
+- Docs-only: commit to master, push. No bump, no tag, no publish.
+
 ## Code Conventions
 
 - ESM imports with `.js` extension: `import { foo } from './bar.js'`
