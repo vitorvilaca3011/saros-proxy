@@ -13,14 +13,14 @@ import {
   isStreamingRequest,
   prepareOutboundRequest,
   createProxyApp,
-} from './proxy.js';
-import { opencodeGoProvider } from './providers/opencode-go.js';
-import type { KeyProvider } from './providers/index.js';
-import { resetModelsFetcherState } from './models-fetcher.js';
-import { getKeyTokenUsage, resetTokenUsage } from './token-usage.js';
-import { loadModelsCatalog } from './models-catalog.js';
-import type { ProxyConfig } from './config.js';
-import { MAX_BODY_SIZE } from './constants.js';
+} from '../src/proxy.js';
+import { opencodeGoProvider } from '../src/providers/opencode-go.js';
+import type { KeyProvider } from '../src/providers/index.js';
+import { resetModelsFetcherState } from '../src/models-fetcher.js';
+import { getKeyTokenUsage, resetTokenUsage } from '../src/token-usage.js';
+import { loadModelsCatalog } from '../src/models-catalog.js';
+import type { ProxyConfig } from '../src/config.js';
+import { MAX_BODY_SIZE } from '../src/constants.js';
 
 describe('buildUpstreamUrl', () => {
   it('combines base URL and path', () => {

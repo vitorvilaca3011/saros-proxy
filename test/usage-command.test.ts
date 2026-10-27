@@ -8,8 +8,8 @@ import { tmpdir } from 'node:os';
 
 // loadConfig reads the real config path; mock it to a fixed fixture.
 const mockConfigRef = vi.hoisted(() => ({ config: null as unknown }));
-vi.mock('../config.js', async (importOriginal) => {
-  const actual = await importOriginal<typeof import('../config.js')>();
+vi.mock('../src/config.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../src/config.js')>();
   return {
     ...actual,
     loadConfig: vi.fn(() => mockConfigRef.config),
@@ -19,8 +19,8 @@ vi.mock('../config.js', async (importOriginal) => {
 
 // model-stats reads XDG_CONFIG_HOME; steer it to a temp dir.
 const tmpRef = vi.hoisted(() => ({ dir: '' }));
-vi.mock('../model-stats.js', async (importOriginal) => {
-  const actual = await importOriginal<typeof import('../model-stats.js')>();
+vi.mock('../src/model-stats.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../src/model-stats.js')>();
   return {
     ...actual,
     getModelStatsPath: () => join(tmpRef.dir, 'model-stats.json'),
@@ -28,17 +28,17 @@ vi.mock('../model-stats.js', async (importOriginal) => {
 });
 
 // token-usage also resolves through the real config dir — same treatment.
-vi.mock('../token-usage.js', async (importOriginal) => {
-  const actual = await importOriginal<typeof import('../token-usage.js')>();
+vi.mock('../src/token-usage.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../src/token-usage.js')>();
   return {
     ...actual,
     getTokenUsagePath: () => join(tmpRef.dir, 'token-usage.json'),
   };
 });
 
-import { runUsageCommand } from './usage.js';
-import { loadConfig } from '../config.js';
-import type { ProxyConfig } from '../config.js';
+import { runUsageCommand } from '../src/cli/usage.js';
+import { loadConfig } from '../src/config.js';
+import type { ProxyConfig } from '../src/config.js';
 
 function makeConfig(keys: Array<{ label: string; key: string; provider?: string }>): ProxyConfig {
   return {

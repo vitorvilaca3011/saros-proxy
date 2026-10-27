@@ -3,10 +3,10 @@
  * upstream routing (config + proxy).
  */
 import { describe, it, expect } from 'vitest';
-import { inferProvider } from './infer.js';
-import { resolveUpstreamUrl } from '../proxy.js';
-import { getProvider } from './index.js';
-import type { ProxyConfig } from '../config.js';
+import { inferProvider } from '../src/providers/infer.js';
+import { resolveUpstreamUrl } from '../src/proxy.js';
+import { getProvider } from '../src/providers/index.js';
+import type { ProxyConfig } from '../src/config.js';
 
 const og = getProvider('opencode-go')!;
 const cc = getProvider('commandcode')!;

@@ -8,7 +8,7 @@
  * run before fetchCatalog populates the module state.
  */
 import { describe, it, expect, afterEach, vi } from 'vitest';
-import { commandcodeProvider, resolveClientVersion } from './commandcode.js';
+import { commandcodeProvider, resolveClientVersion } from '../src/providers/commandcode.js';
 
 afterEach(() => {
   vi.unstubAllGlobals();
@@ -55,7 +55,7 @@ describe('resolveClientVersion (fresh module per case)', () => {
       vi.resetModules();
       const fetchMock = vi.fn(c.fetchImpl);
       vi.stubGlobal('fetch', fetchMock);
-      const fresh = await import('./commandcode.js');
+      const fresh = await import('../src/providers/commandcode.js');
       expect(await fresh.resolveClientVersion()).toBe(c.expected);
       // Second call must be served from the cache (no extra fetch).
       expect(await fresh.resolveClientVersion()).toBe(c.expected);

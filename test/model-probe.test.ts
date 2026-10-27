@@ -2,23 +2,23 @@
  * model-probe.test.ts — Unit tests for the model probe module.
  *
  * Mocks globalThis.fetch to simulate API responses.
- * Vitest-based; run with: npx vitest run src/model-probe.test.ts
+ * Vitest-based; run with: npx vitest run test/model-probe.test.ts
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { ProxyConfig } from './config.js';
+import { ProxyConfig } from '../src/config.js';
 import {
   probeLiveness,
   probeReasoning,
   probeToolCalling,
   probeModel,
   probeAllModels,
-} from './model-probe.js';
+} from '../src/model-probe.js';
 
 // ---------------------------------------------------------------------------
 // Mocks
 // ---------------------------------------------------------------------------
 
-vi.mock('./logger.js', () => ({
+vi.mock('../src/logger.js', () => ({
   logger: { info: vi.fn(), warn: vi.fn(), error: vi.fn() },
   maskKey: (key: string) => key.slice(0, 4) + '...' + key.slice(-4),
 }));

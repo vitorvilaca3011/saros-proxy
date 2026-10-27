@@ -8,7 +8,7 @@
  * run before fetchCatalog populates the module state.
  */
 import { describe, it, expect, afterEach, vi } from 'vitest';
-import { opencodeGoProvider, parseOpencodeUsage } from './opencode-go.js';
+import { opencodeGoProvider, parseOpencodeUsage } from '../src/providers/opencode-go.js';
 
 afterEach(() => {
   vi.unstubAllGlobals();

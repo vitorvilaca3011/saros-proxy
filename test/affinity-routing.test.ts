@@ -3,15 +3,15 @@
  * (mixed-provider key pools) and the @provider suffix routing shim.
  */
 import { describe, it, expect } from 'vitest';
-import { createProxyState, selectKeyForRequest, type ProxyState } from '../proxy-logic.js';
+import { createProxyState, selectKeyForRequest, type ProxyState } from '../src/proxy-logic.js';
 import {
   parseProviderSuffix,
   stripProviderSuffix,
   resolveUpstreamUrl,
-} from '../proxy.js';
-import { getProvider } from './index.js';
-import { bareModelName, annotateName } from '../cli/harness-models.js';
-import type { ProxyConfig } from '../config.js';
+} from '../src/proxy.js';
+import { getProvider } from '../src/providers/index.js';
+import { bareModelName, annotateName } from '../src/cli/harness-models.js';
+import type { ProxyConfig } from '../src/config.js';
 
 describe('rotation-width annotation', () => {
   it('normalizes vendor ids to bare names', () => {

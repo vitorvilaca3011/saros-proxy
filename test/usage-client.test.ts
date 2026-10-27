@@ -8,10 +8,10 @@ import {
   maybeRefreshUsage,
   parseUsageResponse,
   resetUsageRefreshState,
-} from './usage-client.js';
-import { createProxyState, type ProxyState } from './proxy-logic.js';
-import { updateKeyUsage } from './proxy-logic.js';
-import type { ProxyConfig } from './config.js';
+} from '../src/usage-client.js';
+import { createProxyState, type ProxyState } from '../src/proxy-logic.js';
+import { updateKeyUsage } from '../src/proxy-logic.js';
+import type { ProxyConfig } from '../src/config.js';
 
 const VALID_BODY = JSON.stringify({
   usage: {

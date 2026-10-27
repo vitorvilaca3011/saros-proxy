@@ -21,7 +21,7 @@ import {
   recordModelRequest,
   resetModelStats,
   flushModelStats,
-} from './model-stats.js';
+} from '../src/model-stats.js';
 
 const savedConfigHome = process.env.XDG_CONFIG_HOME;
 let tmpDir = '';

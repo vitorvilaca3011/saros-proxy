@@ -8,15 +8,15 @@
  */
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { MODELS_FETCH_TIMEOUT_MS, MODELS_WARM_BUFFER_MS } from './constants.js';
-import { loadModelsCatalog } from './models-catalog.js';
-import type { ProxyConfig } from './config.js';
+import { MODELS_FETCH_TIMEOUT_MS, MODELS_WARM_BUFFER_MS } from '../src/constants.js';
+import { loadModelsCatalog } from '../src/models-catalog.js';
+import type { ProxyConfig } from '../src/config.js';
 import {
   fetchModelsFromUpstream,
   getModelsList,
   buildFallbackResponse,
   resetModelsFetcherState,
-} from './models-fetcher.js';
+} from '../src/models-fetcher.js';
 
 // ---------------------------------------------------------------------------
 // Test configuration

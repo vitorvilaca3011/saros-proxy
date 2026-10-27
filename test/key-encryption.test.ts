@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest';
-import { encryptKey, decryptKey, isEncryptedKey } from './key-encryption.js';
+import { encryptKey, decryptKey, isEncryptedKey } from '../src/key-encryption.js';
 
 describe('key-encryption', () => {
   const masterKey = 'test-master-key-that-is-at-least-16-chars';

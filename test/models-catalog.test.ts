@@ -7,8 +7,8 @@ import type { MockInstance } from 'vitest';
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { join, sep } from 'node:path';
 import { tmpdir } from 'node:os';
-import { loadModelsCatalog, resetModelsCatalogCache } from './models-catalog.js';
-import { logger } from './logger.js';
+import { loadModelsCatalog, resetModelsCatalogCache } from '../src/models-catalog.js';
+import { logger } from '../src/logger.js';
 
 describe('loadModelsCatalog', () => {
   let tmpDir: string;

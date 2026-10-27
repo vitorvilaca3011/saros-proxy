@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
-import { maskKey } from './logger.js';
+import { maskKey } from '../src/logger.js';
 
 // ---------------------------------------------------------------------------
 // Mock pino so the tryTransport fallback path can be exercised: pino.transport
@@ -72,14 +72,14 @@ describe('logger creation', () => {
 
   it('creates a logger with JSON transport in production', async () => {
     process.env.NODE_ENV = 'production';
-    const { logger } = await import('./logger.js');
+    const { logger } = await import('../src/logger.js');
     expect(logger).toBeDefined();
     expect(logger.level).toBe('info');
   });
 
   it('respects LOG_LEVEL env var', async () => {
     process.env.LOG_LEVEL = 'debug';
-    const { logger } = await import('./logger.js');
+    const { logger } = await import('../src/logger.js');
     expect(logger.level).toBe('debug');
   });
 
@@ -88,14 +88,14 @@ describe('logger creation', () => {
     // but pino-pretty IS available here (dev incl. devDeps) — so we can only
     // verify the path doesn't throw; the real fallback is at runtime on global install.
     process.env.NODE_ENV = 'development';
-    const { logger } = await import('./logger.js');
+    const { logger } = await import('../src/logger.js');
     expect(logger).toBeDefined();
     expect(logger.level).toBe('info');
   });
 
   it('returns undefined transport when pino.transport throws (fallback to JSON)', async () => {
     process.env.NODE_ENV = 'development';
-    const { logger } = await import('./logger.js');
+    const { logger } = await import('../src/logger.js');
     expect(logger).toBeDefined();
     expect(logger.level).toBe('info');
 
@@ -111,7 +111,7 @@ describe('logger creation', () => {
 
   it('uses default log level when LOG_LEVEL not set', async () => {
     process.env.NODE_ENV = 'production';
-    const { logger } = await import('./logger.js');
+    const { logger } = await import('../src/logger.js');
     expect(logger.level).toBe('info');
   });
 });

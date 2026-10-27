@@ -35,51 +35,51 @@ const mockAutostartStatus = vi.hoisted(() => vi.fn());
 const mockCheckForUpdate = vi.hoisted(() => vi.fn());
 const mockCreateProxyApp = vi.hoisted(() => vi.fn());
 
-vi.mock('./config.js', () => ({
+vi.mock('../src/config.js', () => ({
   loadConfig: mockLoadConfig,
   getDefaultConfigPath: mockConfigDefaultPath,
 }));
-vi.mock('./logger.js', () => ({
+vi.mock('../src/logger.js', () => ({
   logger: { info: vi.fn(), warn: vi.fn(), error: vi.fn() },
   maskKey: vi.fn(),
 }));
-vi.mock('./cli/daemon.js', () => ({
+vi.mock('../src/cli/daemon.js', () => ({
   daemonStart: mockDaemonStart,
   daemonStop: mockDaemonStop,
   daemonStatus: mockDaemonStatus,
   daemonRestart: mockDaemonRestart,
   getDaemonState: mockGetDaemonState,
 }));
-vi.mock('./cli/opencode-config.js', () => ({
+vi.mock('../src/cli/opencode-config.js', () => ({
   syncModelsToOpencodeConfig: mockSyncModels,
   getDefaultOpencodeConfigPath: mockGetDefaultConfigPath,
 }));
-vi.mock('./cli/autostart.js', () => ({
+vi.mock('../src/cli/autostart.js', () => ({
   autostartInstall: mockAutostartInstall,
   autostartUninstall: mockAutostartUninstall,
   autostartStatus: mockAutostartStatus,
 }));
-vi.mock('./cli/update-check.js', () => ({
+vi.mock('../src/cli/update-check.js', () => ({
   checkForUpdate: mockCheckForUpdate,
 }));
-vi.mock('./models-sync.js', () => ({
+vi.mock('../src/models-sync.js', () => ({
   getModelsFromOpencodeConfig: mockGetModelsFromConfig,
 }));
-vi.mock('./cli/harness-sync.js', () => ({
+vi.mock('../src/cli/harness-sync.js', () => ({
   syncModelsInAllHarnesses: mockSyncInAllHarnesses,
   readHarnessSettings: mockReadHarnessSettings,
   writeHarnessSettings: mockWriteHarnessSettings,
   parseHarnessCommandArgs: mockParseHarnessCommandArgs,
   updateHarnessSettings: mockUpdateHarnessSettings,
 }));
-vi.mock('./model-probe.js', () => ({
+vi.mock('../src/model-probe.js', () => ({
   probeModel: mockProbeModel,
 }));
-vi.mock('./probe-cache.js', () => ({
+vi.mock('../src/probe-cache.js', () => ({
   getCachedProbe: mockGetCachedProbe,
   setCachedProbe: mockSetCachedProbe,
 }));
-vi.mock('./proxy.js', () => ({
+vi.mock('../src/proxy.js', () => ({
   createProxyApp: mockCreateProxyApp,
 }));
 
@@ -99,7 +99,7 @@ function mockProcessExit() {
 
 describe('printHelp', () => {
   it('is exported and prints help text', async () => {
-    const { printHelp } = await import('./cli/help.js');
+    const { printHelp } = await import('../src/cli/help.js');
     const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
     printHelp();
     expect(logSpy).toHaveBeenCalled();
@@ -120,7 +120,7 @@ describe('CLI: help subcommand', () => {
     const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
 
     // Top-level module code runs — should print help and exit(0)
-    await expect(import('./index.js')).rejects.toThrow('process.exit(0)');
+    await expect(import('../src/index.js')).rejects.toThrow('process.exit(0)');
 
     expect(logSpy).toHaveBeenCalled();
     const output = logSpy.mock.calls[0][0] as string;
@@ -133,7 +133,7 @@ describe('CLI: help subcommand', () => {
     mockProcessExit();
     vi.spyOn(console, 'log').mockImplementation(() => {});
 
-    await expect(import('./index.js')).rejects.toThrow('process.exit(0)');
+    await expect(import('../src/index.js')).rejects.toThrow('process.exit(0)');
   });
 
   it('-h also prints help and exits 0', async () => {
@@ -142,7 +142,7 @@ describe('CLI: help subcommand', () => {
     mockProcessExit();
     vi.spyOn(console, 'log').mockImplementation(() => {});
 
-    await expect(import('./index.js')).rejects.toThrow('process.exit(0)');
+    await expect(import('../src/index.js')).rejects.toThrow('process.exit(0)');
   });
 });
 
@@ -158,7 +158,7 @@ describe('CLI: sync-upstream subcommand', () => {
     mockProcessExit();
     vi.spyOn(console, 'error').mockImplementation(() => {});
 
-    await expect(import('./index.js')).rejects.toThrow('process.exit(1)');
+    await expect(import('../src/index.js')).rejects.toThrow('process.exit(1)');
   });
 
   it('success path — calls syncModelsInAllHarnesses and exits 0', async () => {
@@ -171,7 +171,7 @@ describe('CLI: sync-upstream subcommand', () => {
     mockProcessExit();
     vi.spyOn(console, 'log').mockImplementation(() => {});
 
-    await expect(import('./index.js')).rejects.toThrow('process.exit(0)');
+    await expect(import('../src/index.js')).rejects.toThrow('process.exit(0)');
     expect(mockSyncInAllHarnesses).toHaveBeenCalled();
   });
 });
@@ -189,7 +189,7 @@ describe('CLI: probe subcommand', () => {
     mockProcessExit();
     const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
 
-    await expect(import('./index.js')).rejects.toThrow('process.exit(1)');
+    await expect(import('../src/index.js')).rejects.toThrow('process.exit(1)');
     expect(errorSpy).toHaveBeenCalledWith(expect.stringMatching(/No models found/i));
   });
 
@@ -201,7 +201,7 @@ describe('CLI: probe subcommand', () => {
     mockProcessExit();
     vi.spyOn(console, 'error').mockImplementation(() => {});
 
-    await expect(import('./index.js')).rejects.toThrow('process.exit(1)');
+    await expect(import('../src/index.js')).rejects.toThrow('process.exit(1)');
   });
 });
 
@@ -216,7 +216,7 @@ describe('CLI: restart subcommand', () => {
     mockDaemonRestart.mockImplementation(() => { throw new Error('process.exit(0)'); });
     mockProcessExit();
 
-    await expect(import('./index.js')).rejects.toThrow('process.exit(0)');
+    await expect(import('../src/index.js')).rejects.toThrow('process.exit(0)');
     expect(mockDaemonRestart).toHaveBeenCalledWith(undefined, undefined);
   });
 
@@ -226,7 +226,7 @@ describe('CLI: restart subcommand', () => {
     mockDaemonRestart.mockImplementation(() => { throw new Error('process.exit(0)'); });
     mockProcessExit();
 
-    await expect(import('./index.js')).rejects.toThrow('process.exit(0)');
+    await expect(import('../src/index.js')).rejects.toThrow('process.exit(0)');
     expect(mockDaemonRestart).toHaveBeenCalledWith(4000, 'my.yaml');
   });
 });
@@ -243,7 +243,7 @@ describe('CLI: configharness subcommand', () => {
     mockProcessExit();
     const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
 
-    await expect(import('./index.js')).rejects.toThrow('process.exit(0)');
+    await expect(import('../src/index.js')).rejects.toThrow('process.exit(0)');
     expect(logSpy).toHaveBeenCalledWith(expect.stringContaining('Enabled harnesses: omp, pi'));
   });
 
@@ -260,7 +260,7 @@ describe('CLI: configharness subcommand', () => {
     mockProcessExit();
     const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
 
-    await expect(import('./index.js')).rejects.toThrow('process.exit(0)');
+    await expect(import('../src/index.js')).rejects.toThrow('process.exit(0)');
     expect(mockParseHarnessCommandArgs).toHaveBeenCalledWith(['omp', 'pi']);
     expect(mockUpdateHarnessSettings).toHaveBeenCalledWith({
       add: ['omp', 'pi'],
@@ -283,7 +283,7 @@ describe('CLI: configharness subcommand', () => {
     mockProcessExit();
     const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
 
-    await expect(import('./index.js')).rejects.toThrow('process.exit(0)');
+    await expect(import('../src/index.js')).rejects.toThrow('process.exit(0)');
     expect(logSpy).toHaveBeenCalledWith(expect.stringContaining('Enabled harnesses: omp'));
   });
 
@@ -300,7 +300,7 @@ describe('CLI: configharness subcommand', () => {
     mockProcessExit();
     const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
 
-    await expect(import('./index.js')).rejects.toThrow('process.exit(0)');
+    await expect(import('../src/index.js')).rejects.toThrow('process.exit(0)');
     expect(mockUpdateHarnessSettings).toHaveBeenCalledWith({ add: [], remove: [], clear: true });
     expect(logSpy).toHaveBeenCalledWith(expect.stringContaining('(none)'));
   });
@@ -318,7 +318,7 @@ describe('CLI: configharness subcommand', () => {
     const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
     mockUpdateHarnessSettings.mockClear();
 
-    await expect(import('./index.js')).rejects.toThrow('process.exit(1)');
+    await expect(import('../src/index.js')).rejects.toThrow('process.exit(1)');
     expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining('Unknown harness'));
     expect(mockUpdateHarnessSettings).not.toHaveBeenCalled();
   });
@@ -335,7 +335,7 @@ describe('CLI: configharness subcommand', () => {
     mockProcessExit();
     const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
 
-    await expect(import('./index.js')).rejects.toThrow('process.exit(1)');
+    await expect(import('../src/index.js')).rejects.toThrow('process.exit(1)');
     expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining('--clear'));
   });
 
@@ -351,7 +351,7 @@ describe('CLI: configharness subcommand', () => {
     mockProcessExit();
     const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
 
-    await expect(import('./index.js')).rejects.toThrow('process.exit(1)');
+    await expect(import('../src/index.js')).rejects.toThrow('process.exit(1)');
     expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining('--remove'));
   });
 });
@@ -378,7 +378,7 @@ describe('CLI: bare invocation (overview)', () => {
     mockProcessExit();
     const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
 
-    await expect(import('./index.js')).rejects.toThrow('process.exit(0)');
+    await expect(import('../src/index.js')).rejects.toThrow('process.exit(0)');
     const output = logSpy.mock.calls.map((c) => c[0] as string).join('\n');
     expect(output).toContain('saros-proxy');
     expect(output).toContain('✓ running');
@@ -406,7 +406,7 @@ describe('CLI: bare invocation (overview)', () => {
     mockProcessExit();
     const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
 
-    await expect(import('./index.js')).rejects.toThrow('process.exit(0)');
+    await expect(import('../src/index.js')).rejects.toThrow('process.exit(0)');
     const output = logSpy.mock.calls.map((c) => c[0] as string).join('\n');
     expect(output).toContain('✓ running');
     expect(output).toContain('Harnesses: (none)');
@@ -427,7 +427,7 @@ describe('CLI: bare invocation (overview)', () => {
     mockProcessExit();
     const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
 
-    await expect(import('./index.js')).rejects.toThrow('process.exit(0)');
+    await expect(import('../src/index.js')).rejects.toThrow('process.exit(0)');
     const output = logSpy.mock.calls.map((c) => c[0] as string).join('\n');
     expect(output).toContain('✗ not running');
     expect(output).toContain('Harnesses: opencode');

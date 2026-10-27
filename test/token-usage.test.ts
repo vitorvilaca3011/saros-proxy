@@ -22,7 +22,7 @@ import {
   parseTokenCounts,
   recordKeyTokens,
   resetTokenUsage,
-} from './token-usage.js';
+} from '../src/token-usage.js';
 
 const savedConfigHome = process.env.XDG_CONFIG_HOME;
 let tmpDir = '';

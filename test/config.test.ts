@@ -1,7 +1,7 @@
 /**
  * config.test.ts — Comprehensive tests for the config module.
  *
- * Vitest-based; run with: npx vitest run src/config.test.ts
+ * Vitest-based; run with: npx vitest run test/config.test.ts
  */
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { writeFileSync, mkdtempSync, rmSync, existsSync, readFileSync } from 'node:fs';
@@ -9,14 +9,14 @@ import { join } from 'node:path';
 import * as os from 'node:os';
 import type * as NodeFs from 'node:fs';
 import type * as NodeOs from 'node:os';
-import { loadConfig, validateConfig, getDefaultConfigPath, type ProxyConfig } from './config.js';
-import { encryptKey } from './key-encryption.js';
+import { loadConfig, validateConfig, getDefaultConfigPath, type ProxyConfig } from '../src/config.js';
+import { encryptKey } from '../src/key-encryption.js';
 
 // ---------------------------------------------------------------------------
 // Mocks
 // ---------------------------------------------------------------------------
 
-vi.mock('./logger.js', () => ({
+vi.mock('../src/logger.js', () => ({
   logger: { info: vi.fn(), warn: vi.fn(), error: vi.fn() },
   maskKey: (key: string) => key.slice(0, 4) + '...' + key.slice(-4),
 }));

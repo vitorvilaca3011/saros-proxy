@@ -8,9 +8,9 @@ import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { readFileSync, mkdtempSync, writeFileSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
-import type { ProxyConfig } from './config.js';
-import * as modelsFetcher from './models-fetcher.js';
-import { loadModelsCatalog } from './models-catalog.js';
+import type { ProxyConfig } from '../src/config.js';
+import * as modelsFetcher from '../src/models-fetcher.js';
+import { loadModelsCatalog } from '../src/models-catalog.js';
 import {
   fetchUpstreamModelIds,
   getMissingModels,
@@ -21,7 +21,7 @@ import {
   extractOpencodeGoModels,
   fetchModelsDevMetadata,
   resetModelsDevCacheState,
-} from './models-sync.js';
+} from '../src/models-sync.js';
 
 // ---------------------------------------------------------------------------
 // Mock node:fs writeFileSync to be controllable (fixes ESM spy issue).

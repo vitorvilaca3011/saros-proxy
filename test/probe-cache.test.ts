@@ -1,13 +1,13 @@
 /**
  * probe-cache.test.ts — Unit tests for the probe cache module.
  *
- * Vitest-based; run with: npx vitest run src/probe-cache.test.ts
+ * Vitest-based; run with: npx vitest run test/probe-cache.test.ts
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { writeFileSync, readFileSync, mkdtempSync, rmSync, existsSync } from 'node:fs';
 import { join } from 'node:path';
 import * as os from 'node:os';
-import { PROBE_CACHE_TTL_MS } from './constants.js';
+import { PROBE_CACHE_TTL_MS } from '../src/constants.js';
 
 // ---------------------------------------------------------------------------
 // Mock getProbeCachePath to use a temporary directory
@@ -15,8 +15,8 @@ import { PROBE_CACHE_TTL_MS } from './constants.js';
 
 const mockCachePathRef = vi.hoisted(() => ({ current: '' }));
 
-vi.mock('./probe-cache.js', async (importOriginal) => {
-  const mod = await importOriginal<typeof import('./probe-cache.js')>();
+vi.mock('../src/probe-cache.js', async (importOriginal) => {
+  const mod = await importOriginal<typeof import('../src/probe-cache.js')>();
   return {
     ...mod,
     getProbeCachePath: vi.fn(() => mockCachePathRef.current),
@@ -30,7 +30,7 @@ import {
   setCachedProbe,
   type ModelProbe,
   type ProbeCacheFile,
-} from './probe-cache.js';
+} from '../src/probe-cache.js';
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -66,7 +66,7 @@ function removeTempDir(dir: string): void {
 describe('getProbeCachePath', () => {
   it('returns path ending with saros/probe-cache.json', async () => {
     // Bypass the mock to test the real implementation
-    const mod = await vi.importActual<typeof import('./probe-cache.js')>('./probe-cache.js');
+    const mod = await vi.importActual<typeof import('../src/probe-cache.js')>('../src/probe-cache.js');
     const result = mod.getProbeCachePath();
     expect(result).toMatch(/saros[/\\]probe-cache\.json$/);
   });

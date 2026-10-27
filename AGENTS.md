@@ -25,15 +25,15 @@
 
 `npx vitest run` works from any invocation (terminal, VS Code, bash tool) — see "Vitest Hanging on Windows" below for the pool choice that makes this possible.
 
-- `npx vitest run` — full suite (~7s, 582 tests)
-- `npx vitest run src/proxy-logic.test.ts` — single file
+- `npx vitest run` — full suite (~8s, 920 tests)
+- `npx vitest run test/proxy-logic.test.ts` — single file
 - `npx vitest run -t "pattern"` — filter by test name
 - VS Code launch configs are in `.vscode/launch.json`
 - `tsc --noEmit` (`npm run lint`) works fine from the bash tool for type checking
 
 ### Test Structure
 
-- `src/proxy-logic.test.ts` — Unit tests for proxy logic (49 tests)
+- `test/proxy-logic.test.ts` — Unit tests for proxy logic (59 tests)
 - `test/e2e.test.ts` — E2E tests with real mock upstream + proxy servers (35 tests)
 - `test/cli-setup.test.ts` — CLI setup wizard tests including smoke tests (46 tests)
 - `test/global-teardown.ts` — Forces `process.exit(0)` after 1s to prevent Windows hanging

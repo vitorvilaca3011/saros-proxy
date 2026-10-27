@@ -11,13 +11,13 @@ import { AddressInfo } from 'node:net';
 import {
   opencodeGoProvider,
   parseOpencodeUsage,
-} from './opencode-go.js';
+} from '../src/providers/opencode-go.js';
 import {
   commandcodeProvider,
   commandcodeClientHeaders,
   parsePlanId,
-} from './commandcode.js';
-import { identifyKey, extractKeys, isPlausibleKey, allProviders } from './index.js';
+} from '../src/providers/commandcode.js';
+import { identifyKey, extractKeys, isPlausibleKey, allProviders } from '../src/providers/index.js';
 
 // ---------------------------------------------------------------------------
 // Pure helpers

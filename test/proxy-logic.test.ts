@@ -1,7 +1,7 @@
 /**
  * proxy-logic.test.ts — Comprehensive unit tests for the proxy logic module.
  *
- * Vitest-based; run with: npx vitest run src/proxy-logic.test.ts
+ * Vitest-based; run with: npx vitest run test/proxy-logic.test.ts
  */
 import { describe, it, expect, beforeEach, vi, afterEach } from 'vitest';
 import {
@@ -15,7 +15,7 @@ import {
   setKeyEntitlement,
   type ProxyState,
   type ErrorType,
-} from './proxy-logic.js';
+} from '../src/proxy-logic.js';
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -646,7 +646,7 @@ describe('Failover edge cases', () => {
 // Usage-Weighted Rotation
 // ---------------------------------------------------------------------------
 
-import { updateKeyUsage } from './proxy-logic.js';
+import { updateKeyUsage } from '../src/proxy-logic.js';
 
 describe('updateKeyUsage + weighted selection', () => {
   it('distributes requests proportionally to remaining quota (30/70 → 7/3)', () => {
