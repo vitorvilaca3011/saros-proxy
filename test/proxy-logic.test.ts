@@ -162,6 +162,35 @@ describe('C1 – Circuit Breaker Cooldown', () => {
     expect(state.keys[0].disabledAt).toBeNull();
     expect(state.keys[0].consecutiveFailures).toBe(0);
   });
+
+  it('re-enables a key that succeeded after being disabled', () => {
+    const state = makeState(1);
+    markKeyFailed(state, 'alpha', 'KeyFault');
+    expect(state.keys[0].enabled).toBe(false);
+
+    markKeySucceeded(state, 'alpha');
+
+    expect(state.keys[0].enabled).toBe(true);
+    expect(state.keys[0].disabledAt).toBeNull();
+    expect(selectKeyForRequest(state, 'req-after-success')!.label).toBe('alpha');
+  });
+
+  it('does not strand a shared key when one request fails and another succeeds', () => {
+    // Tier 2 shares the only key between concurrent requests; one 401s while
+    // the other gets a 200. Before the fix the success left
+    // enabled=false / disabledAt=null, so the key was never selectable again.
+    const state = createProxyState([{ label: 'solo', key: 'sk-solo-000001' }], {
+      circuitBreakerThreshold: 1,
+      circuitBreakerCooldownMs: 60_000,
+    });
+    expect(selectKeyForRequest(state, 'stream-a')!.label).toBe('solo');
+    expect(selectKeyForRequest(state, 'stream-b')!.label).toBe('solo');
+
+    markKeyFailed(state, 'solo', 'KeyFault');
+    markKeySucceeded(state, 'solo');
+
+    expect(selectKeyForRequest(state, 'stream-c')?.label).toBe('solo');
+  });
 });
 
 describe('C2 – Error Classification', () => {
