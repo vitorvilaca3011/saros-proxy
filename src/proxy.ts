@@ -28,6 +28,7 @@ import {
   type ErrorType,
   type KeyFailureInfo,
   type KeyFailureReason,
+  type KeyHealthReport,
 } from './proxy-logic.js';
 import type { ProxyConfig } from './config.js';
 import { logger, maskKey } from './logger.js';
@@ -602,6 +603,13 @@ const FAILURE_CAUSES: Record<KeyFailureReason, string> = {
   server: 'the upstream returned 5xx or broke the stream',
 };
 
+/** Why a key cannot serve a request, in the 503/502 vocabulary. */
+function unavailableState(report: KeyHealthReport): UnavailableKey['state'] {
+  if (!report.entitled) return 'not_entitled';
+  if (report.disabledByConfig) return 'disabled_by_config';
+  return 'disabled';
+}
+
 /**
  * Keys that cannot serve a request right now, with the reason and the upstream
  * message. Labels are already public; the credential is never included.
@@ -617,7 +625,7 @@ function unavailableKeyReports(state: ProxyState): UnavailableKey[] {
       return {
         label: report.label,
         provider: report.provider,
-        state: report.entitled ? 'disabled' : 'not_entitled',
+        state: unavailableState(report),
         reason: report.lastError?.reason ?? null,
         lastStatus: report.lastError?.status ?? null,
         disabledAt: report.disabledAt,
@@ -631,7 +639,7 @@ function unavailableKeyReports(state: ProxyState): UnavailableKey[] {
 export interface UnavailableKey {
   label: string;
   provider: string;
-  state: 'disabled' | 'not_entitled';
+  state: 'disabled' | 'not_entitled' | 'disabled_by_config';
   reason: KeyFailureReason | null;
   lastStatus: number | null;
   disabledAt: string | null;
@@ -670,6 +678,9 @@ export function buildKeyDiagnosis(keys: UnavailableKey[], modelId?: string): Key
   }
   if (keys.some((k) => k.state === 'not_entitled')) {
     causes.add('the account has no plan for this provider (403 entitlement)');
+  }
+  if (keys.some((k) => k.state === 'disabled_by_config')) {
+    causes.add('a key is disabled in config (enabled: false) — re-enable it to put it back in rotation');
   }
   const pinned = modelId?.includes('@') ? modelId.slice(modelId.lastIndexOf('@') + 1) : null;
   if (pinned) {

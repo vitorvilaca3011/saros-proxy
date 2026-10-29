@@ -17,6 +17,7 @@ import chalk from 'chalk';
  */
 export function formatKeyState(entry: Record<string, unknown> | undefined): string {
   if (!entry) return '';
+  if (entry.disabledByConfig === true) return chalk.dim(' — disabled in config');
   if (entry.entitled === false) return chalk.red(' — no plan for this provider');
   if (entry.enabled !== false) return '';
   const lastError = entry.lastError as { status?: number | null; reason?: string } | null | undefined;

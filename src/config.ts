@@ -100,6 +100,21 @@ function parseCliArgs(): Record<string, string> {
 }
 
 /**
+ * Normalize one key entry: resolve its provider and drop a malformed `enabled`.
+ * A non-boolean `enabled` is a config typo, not a retirement order — warning and
+ * keeping the key enabled beats silently taking a credential out of rotation.
+ */
+function normalizeKeyEntry(entry: KeyEntry): KeyEntry {
+  const provider = inferProvider(entry);
+  if (entry.enabled === undefined) return { ...entry, provider };
+  if (typeof entry.enabled !== 'boolean') {
+    logger.warn('Key "%s": "enabled" must be true or false — ignoring it', entry.label);
+    return { label: entry.label, key: entry.key, provider };
+  }
+  return { ...entry, provider };
+}
+
+/**
  * Validate and normalize a partial config object.
  * Logs warnings for invalid values that fall back to defaults.
  * Throws an error if no valid API keys are present (critical issue).
@@ -210,7 +225,7 @@ export function validateConfig(config: Partial<ProxyConfig>): ProxyConfig {
   return {
     port,
     host,
-    keys: validKeys.map((k) => ({ ...k, provider: inferProvider(k) })),
+    keys: validKeys.map(normalizeKeyEntry),
     circuitBreakerThreshold,
     circuitBreakerCooldownMs,
     upstreamBaseUrl,

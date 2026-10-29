@@ -30,6 +30,12 @@ describe('formatKeyState', () => {
     expect(text).not.toContain('retry in');
   });
 
+  it('explains a key retired in config', () => {
+    const text = formatKeyState({ enabled: false, entitled: true, disabledByConfig: true });
+    expect(text).toContain('disabled in config');
+    expect(text).not.toContain('retry in');
+  });
+
   it('says nothing about a healthy key or an unknown entry', () => {
     expect(formatKeyState({ enabled: true, entitled: true })).toBe('');
     expect(formatKeyState(undefined)).toBe('');
