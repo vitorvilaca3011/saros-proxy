@@ -24,6 +24,25 @@ export function getVersion(): string {
   return pkg.version;
 }
 
+/**
+ * Render one key's `/health` entry: why it is out of rotation and when it can
+ * return. `entry` is undefined when the daemon is not serving (or predates the
+ * per-key block), in which case there is nothing to add.
+ */
+export function formatKeyState(entry: Record<string, unknown> | undefined): string {
+  if (!entry) return '';
+  if (entry.entitled === false) return chalk.red(' — no plan for this provider');
+  if (entry.enabled !== false) return '';
+  const lastError = entry.lastError as { status?: number | null; reason?: string } | null | undefined;
+  const reason = lastError?.reason ? ` ${lastError.reason}` : '';
+  const status = typeof lastError?.status === 'number' ? ` (${lastError.status})` : '';
+  const retry =
+    typeof entry.retryAfterMs === 'number' && entry.retryAfterMs > 0
+      ? `, retry in ${Math.ceil(entry.retryAfterMs / 1000)}s`
+      : '';
+  return chalk.red(` — disabled:${reason}${status}${retry}`);
+}
+
 export async function printOverview(): Promise<void> {
   // Reporting command — silence pino (config load logs) so the output is a
   // clean report. The process exits right after, so no restore needed.
@@ -59,9 +78,13 @@ export async function printOverview(): Promise<void> {
       : '';
   const labels = keys.map((k) => k.label).join(', ');
   console.log(`API keys:  ${enabledText}${keys.length} configured${labels ? ` (${labels})` : ''}`);
+  const healthKeys = Array.isArray(health?.keys)
+    ? (health.keys as Array<Record<string, unknown>>)
+    : [];
   for (const k of keys) {
     const provider = k.provider ? chalk.dim(` [${k.provider}]`) : '';
-    console.log(`           ${k.label}: ${maskKey(k.key)}${provider}`);
+    const state = formatKeyState(healthKeys.find((entry) => entry.label === k.label));
+    console.log(`           ${k.label}: ${maskKey(k.key)}${provider}${state}`);
   }
 
   console.log(`Config:    ${getDefaultConfigPath()}`);

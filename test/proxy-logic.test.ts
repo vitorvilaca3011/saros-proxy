@@ -12,6 +12,8 @@ import {
   markKeyFailed,
   markKeySucceeded,
   classifyHttpError,
+  describeKeys,
+  keyRetryAfterMs,
   setKeyEntitlement,
   type ProxyState,
   type ErrorType,
@@ -190,6 +192,82 @@ describe('C1 – Circuit Breaker Cooldown', () => {
     markKeySucceeded(state, 'solo');
 
     expect(selectKeyForRequest(state, 'stream-c')?.label).toBe('solo');
+  });
+});
+
+describe('key failure reporting', () => {
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it('records the upstream status and reason of the last failure', () => {
+    const state = makeState(1);
+    freezeTime(1_000_000_000_000);
+
+    markKeyFailed(state, 'alpha', 'KeyFault', { status: 401, body: 'invalid key' });
+
+    expect(state.keys[0].lastError).toMatchObject({
+      status: 401,
+      reason: 'auth',
+      at: 1_000_000_000_000,
+    });
+  });
+
+  it('classifies quota, rate-limit and server failures', () => {
+    const state = makeState(1);
+
+    markKeyFailed(state, 'alpha', 'KeyFault', { status: 502, body: 'insufficient balance' });
+    markKeyFailed(state, 'beta', 'ServerFault', { status: 429 });
+    markKeyFailed(state, 'gamma', 'ServerFault', { status: 503 });
+
+    expect(state.keys[0].lastError?.reason).toBe('quota');
+    expect(state.keys[1].lastError?.reason).toBe('rate_limit');
+    expect(state.keys[2].lastError?.reason).toBe('server');
+  });
+
+  it('keeps the last error after a success but clears the disable', () => {
+    const state = makeState(1);
+    markKeyFailed(state, 'alpha', 'KeyFault', { status: 401 });
+
+    markKeySucceeded(state, 'alpha');
+
+    expect(state.keys[0].enabled).toBe(true);
+    expect(state.keys[0].lastError?.reason).toBe('auth');
+  });
+
+  it('reports retryAfterMs only while the key is cooling down', () => {
+    const state = makeState(1, 60_000);
+    freezeTime(1_000_000_000_000);
+    markKeyFailed(state, 'alpha', 'KeyFault', { status: 401 });
+
+    expect(keyRetryAfterMs(state, state.keys[0])).toBe(60_000);
+    advanceTime(45_000);
+    expect(keyRetryAfterMs(state, state.keys[0])).toBe(15_000);
+    advanceTime(15_000);
+    expect(keyRetryAfterMs(state, state.keys[0])).toBe(0);
+  });
+
+  it('returns null for a key that is enabled but over the failure threshold', () => {
+    const state = makeState(2);
+    expect(
+      keyRetryAfterMs(state, { enabled: true, consecutiveFailures: 2, disabledAt: null }),
+    ).toBeNull();
+  });
+
+  it('describes keys without exposing the credential', () => {
+    const state = makeState(1);
+    markKeyFailed(state, 'alpha', 'KeyFault', { status: 401 });
+
+    const [alpha] = describeKeys(state);
+
+    expect(alpha).toMatchObject({
+      label: 'alpha',
+      provider: 'opencode-go',
+      enabled: false,
+      entitled: true,
+    });
+    expect(alpha.lastError?.reason).toBe('auth');
+    expect(JSON.stringify(describeKeys(state))).not.toContain('sk-a1');
   });
 });
 

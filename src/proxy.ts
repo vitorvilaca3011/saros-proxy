@@ -22,8 +22,12 @@ import {
   markKeyFailed,
   markKeySucceeded,
   classifyHttpError,
+  describeKeys,
   type ProxyState,
   type KeySnapshot,
+  type ErrorType,
+  type KeyFailureInfo,
+  type KeyFailureReason,
 } from './proxy-logic.js';
 import type { ProxyConfig } from './config.js';
 import { logger, maskKey } from './logger.js';
@@ -464,7 +468,7 @@ async function executeWithRetry(opts: {
 async function executeSingleAttempt(attempt: number, ctx: RetryContext): Promise<AttemptResult> {
   const key = pickKey(ctx, attempt);
   if (!key) {
-    return { kind: 'done', response: buildNoKeysResponse(ctx.state, ctx.requestId, ctx.kind, attempt) };
+    return { kind: 'done', response: buildNoKeysResponse(ctx.state, ctx.requestId, ctx.kind, attempt, ctx.modelId) };
   }
 
   logKeyAttempt(ctx.requestId, key, attempt, ctx.kind);
@@ -497,7 +501,7 @@ async function executeSingleAttempt(attempt: number, ctx: RetryContext): Promise
   try {
     const response = await fetchWithTimeout(upstreamUrl, fetchOptions, ctx.config.requestTimeoutMs);
     if (response.ok) {
-      markKeySucceeded(ctx.state, key.label);
+      recordKeySuccess(ctx.state, key.label, ctx.requestId);
       completeRequest(ctx.state, ctx.requestId, true);
       return {
         kind: 'done',
@@ -566,7 +570,10 @@ async function handleUpstreamErrorResponse(
   }
 
   // KeyFault or ServerFault — penalise the key and retry
-  markKeyFailed(ctx.state, key.label, errorType);
+  recordKeyFailure(ctx.state, key.label, errorType, ctx.requestId, {
+    status: response.status,
+    body: errorBody,
+  });
   const lastError = ctx.kind === 'standard'
     ? new Error(`Upstream error ${response.status}: ${errorBody.slice(0, 200)}`)
     : null;
@@ -587,19 +594,139 @@ function handleNetworkError(err: unknown, ctx: RetryContext, key: KeySnapshot): 
   return { kind: 'retry', lastError };
 }
 
-function buildNoKeysResponse(state: ProxyState, requestId: string, kind: RequestKind, attempt: number): Response {
+/** Human explanation for each reason a key can be out of rotation. */
+const FAILURE_CAUSES: Record<KeyFailureReason, string> = {
+  auth: 'a key was rejected upstream (401): revoked or rotated, or it does not serve this model',
+  quota: 'the account is out of credit or quota for this provider',
+  rate_limit: 'the upstream rate-limited the key (429) — it retries after the cooldown',
+  server: 'the upstream returned 5xx or broke the stream',
+};
+
+/**
+ * Keys that cannot serve a request right now, with the reason and the upstream
+ * message. Labels are already public; the credential is never included.
+ * `enabled=false` and `consecutiveFailures >= threshold` are the same state —
+ * the circuit breaker flips `enabled` when the counter reaches it.
+ */
+function unavailableKeyReports(state: ProxyState): UnavailableKey[] {
+  const now = Date.now();
+  return describeKeys(state, now)
+    .filter((report) => !report.enabled || !report.entitled)
+    .map((report) => {
+      const lastError = state.keys.find((k) => k.label === report.label)?.lastError ?? null;
+      return {
+        label: report.label,
+        provider: report.provider,
+        state: report.entitled ? 'disabled' : 'not_entitled',
+        reason: report.lastError?.reason ?? null,
+        lastStatus: report.lastError?.status ?? null,
+        disabledAt: report.disabledAt,
+        retryAfterMs: report.retryAfterMs,
+        detail: lastError?.detail ?? null,
+      };
+    });
+}
+
+/** One key that cannot serve a request, as reported in the 503 body. */
+export interface UnavailableKey {
+  label: string;
+  provider: string;
+  state: 'disabled' | 'not_entitled';
+  reason: KeyFailureReason | null;
+  lastStatus: number | null;
+  disabledAt: string | null;
+  retryAfterMs: number | null;
+  detail: string | null;
+}
+
+export interface NoKeysBody {
+  error: string;
+  message: string;
+  requestId: string;
+  retryAfterMs: number | null;
+  keys: UnavailableKey[];
+  causes: string[];
+}
+
+export interface KeyDiagnosis {
+  retryAfterMs: number | null;
+  keys: UnavailableKey[];
+  causes: string[];
+}
+
+/**
+ * Shared diagnosis for "no key can serve this": which keys are out, why, when
+ * one may return. Pure so it can be tested without an app instance.
+ */
+export function buildKeyDiagnosis(keys: UnavailableKey[], modelId?: string): KeyDiagnosis {
+  const retryTimes = keys
+    .map((k) => k.retryAfterMs)
+    .filter((ms): ms is number => typeof ms === 'number' && ms > 0);
+  const retryAfterMs = retryTimes.length > 0 ? Math.min(...retryTimes) : null;
+
+  const causes = new Set<string>();
+  for (const key of keys) {
+    if (key.reason) causes.add(FAILURE_CAUSES[key.reason]);
+  }
+  if (keys.some((k) => k.state === 'not_entitled')) {
+    causes.add('the account has no plan for this provider (403 entitlement)');
+  }
+  const pinned = modelId?.includes('@') ? modelId.slice(modelId.lastIndexOf('@') + 1) : null;
+  if (pinned) {
+    causes.add(`the request is pinned to @${pinned} and none of its keys are usable`);
+  }
+
+  return { retryAfterMs, keys, causes: [...causes] };
+}
+
+/** Build the 503 body sent when no key can be selected at all. */
+export function buildNoKeysBody(
+  keys: UnavailableKey[],
+  requestId: string,
+  modelId?: string,
+): NoKeysBody {
+  const diagnosis = buildKeyDiagnosis(keys, modelId);
+  const pinned = modelId?.includes('@') ? modelId.slice(modelId.lastIndexOf('@') + 1) : null;
+  const retryText =
+    diagnosis.retryAfterMs === null ? '' : `; retry in ${Math.ceil(diagnosis.retryAfterMs / 1000)}s`;
+  return {
+    // Kept for clients that match on the legacy message.
+    error: 'All API keys are temporarily unavailable',
+    message: pinned
+      ? `No usable key for provider ${pinned}${retryText}.`
+      : `No usable API key${retryText}.`,
+    requestId,
+    ...diagnosis,
+  };
+}
+
+function buildNoKeysResponse(
+  state: ProxyState,
+  requestId: string,
+  kind: RequestKind,
+  attempt: number,
+  modelId?: string,
+): Response {
+  const keys = unavailableKeyReports(state);
+  const body = buildNoKeysBody(keys, requestId, modelId);
+
   logger.warn(
-    { requestId, attempt, kind },
-    kind === 'standard'
-      ? 'No API keys available on attempt %d'
-      : 'No API keys available for streaming on attempt %d',
-    attempt,
+    {
+      evt: 'request.no_keys',
+      requestId,
+      attempt,
+      kind,
+      modelId,
+      retryAfterMs: body.retryAfterMs,
+      unavailable: keys.map((k) => ({ label: k.label, reason: k.reason, status: k.lastStatus })),
+    },
+    'No API key available for this request',
   );
   completeRequest(state, requestId, false);
-  return new Response(
-    JSON.stringify({ error: 'All API keys are temporarily unavailable', requestId }),
-    { status: 503, headers: { 'content-type': 'application/json' } },
-  );
+  return new Response(JSON.stringify(body), {
+    status: 503,
+    headers: { 'content-type': 'application/json' },
+  });
 }
 
 function buildClientErrorResponse(status: number, errorBody: string, requestId: string): Response {
@@ -630,8 +757,18 @@ function handleAllRetriesFailed(ctx: RetryContext, maxRetries: number, lastError
   const message = ctx.kind === 'standard'
     ? 'Upstream service unavailable after multiple attempts'
     : 'Streaming service unavailable after multiple attempts';
+  // Status stays 502 (the upstream did answer with errors), but when every key
+  // is now out of rotation the body says which and why — otherwise the caller
+  // sees "unavailable" and has no way to tell a revoked key from a 429.
+  const unavailable = unavailableKeyReports(ctx.state);
+  const diagnosis = unavailable.length > 0 ? buildKeyDiagnosis(unavailable, ctx.modelId) : null;
   return new Response(
-    JSON.stringify({ error: 'Bad Gateway', message, requestId: ctx.requestId }),
+    JSON.stringify({
+      error: 'Bad Gateway',
+      message,
+      requestId: ctx.requestId,
+      ...(diagnosis ?? {}),
+    }),
     { status: 502, headers: { 'content-type': 'application/json' } },
   );
 }
@@ -645,6 +782,52 @@ function logKeyAttempt(requestId: string, key: KeySnapshot, attempt: number, kin
       ? 'Forwarding request to upstream using key %s'
       : 'Streaming request with key %s',
     maskKey(key.key),
+  );
+}
+
+/**
+ * Record a key failure and log the transition. The line is the `key.state`
+ * event: reason + upstream status are what make a flapping key visible without
+ * reading the source.
+ */
+function recordKeyFailure(
+  state: ProxyState,
+  keyLabel: string,
+  errorType: ErrorType,
+  requestId: string,
+  info?: KeyFailureInfo,
+): void {
+  markKeyFailed(state, keyLabel, errorType, info);
+  const key = state.keys.find((k) => k.label === keyLabel);
+  if (!key) return;
+  // Below the threshold the key keeps serving — nothing changed, no line.
+  if (key.enabled && key.consecutiveFailures < state.circuitBreakerThreshold) return;
+  logger.warn(
+    {
+      evt: 'key.state',
+      requestId,
+      keyLabel,
+      provider: key.provider,
+      enabled: key.enabled,
+      reason: key.lastError?.reason,
+      status: key.lastError?.status,
+      consecutiveFailures: key.consecutiveFailures,
+      cooldownMs: state.circuitBreakerCooldownMs,
+    },
+    'Key left rotation',
+  );
+}
+
+/** Mark a key as succeeded and log when it returns from a disable. */
+function recordKeySuccess(state: ProxyState, keyLabel: string, requestId: string): void {
+  const before = state.keys.find((k) => k.label === keyLabel);
+  if (!before) return;
+  const wasOut = !before.enabled || before.disabledAt !== null;
+  markKeySucceeded(state, keyLabel);
+  if (!wasOut) return;
+  logger.info(
+    { evt: 'key.state', requestId, keyLabel, provider: before.provider, enabled: true },
+    'Key back in rotation',
   );
 }
 
@@ -859,7 +1042,9 @@ function wrapStreamWithErrorDetection(
             const parsed = JSON.parse(dataLine.slice(5).trim());
             if (parsed && (parsed.error || parsed.type === 'error')) {
               logger.warn({ requestId, keyLabel }, 'Error detected in stream');
-              markKeyFailed(state, keyLabel, 'ServerFault');
+              recordKeyFailure(state, keyLabel, 'ServerFault', requestId, {
+                body: JSON.stringify(parsed),
+              });
               // Whatever the upstream reported before failing was consumed.
               bookUsage();
               controller.enqueue(
@@ -890,7 +1075,9 @@ function wrapStreamWithErrorDetection(
         controller.enqueue(value);
       } catch (err) {
         logger.error({ requestId, keyLabel, err }, 'Stream read error');
-        markKeyFailed(state, keyLabel, 'ServerFault');
+        recordKeyFailure(state, keyLabel, 'ServerFault', requestId, {
+          body: err instanceof Error ? err.message : String(err),
+        });
         bookUsage();
         controller.enqueue(
           encoder.encode(
@@ -992,6 +1179,9 @@ export function createProxyApp(config: ProxyConfig): Hono {
       activeRequests: activeCount,
       circuitBreakerThreshold: state.circuitBreakerThreshold,
       circuitBreakerCooldownMs: state.circuitBreakerCooldownMs,
+      // Per-key state: what is out of rotation, why, and when it may return.
+      // Never contains the credential.
+      keys: describeKeys(state),
       // Per-provider key counts (multi-provider pools)
       providers: keys.reduce<Record<string, { total: number; enabled: number }>>((acc, k) => {
         const entry = (acc[k.provider] ??= { total: 0, enabled: 0 });

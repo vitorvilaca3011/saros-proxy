@@ -13,6 +13,8 @@ import {
   isStreamingRequest,
   prepareOutboundRequest,
   createProxyApp,
+  buildNoKeysBody,
+  type UnavailableKey,
 } from '../src/proxy.js';
 import { opencodeGoProvider } from '../src/providers/opencode-go.js';
 import type { KeyProvider } from '../src/providers/index.js';
@@ -555,11 +557,29 @@ describe('createProxyApp — standard proxy pipeline', () => {
     const body = await res.json();
     expect(body.error).toBe('Bad Gateway');
     expect(body.message).toBe('Upstream service unavailable after multiple attempts');
+    // The 502 still names the keys and the causes: a caller must be able to
+    // tell a revoked key from a rate limit.
+    expect(body.keys).toHaveLength(2);
+    expect(body.keys[0]).toMatchObject({ reason: 'auth', lastStatus: 401 });
+    expect(body.causes.join(' ')).toMatch(/revoked|rotated/i);
+    expect(body.retryAfterMs).toBeGreaterThan(0);
     // KeyFault disables keys immediately → both keys disabled
     const health = await app.request('/health');
     const h = await health.json();
     expect(h.enabledCount).toBe(0);
     expect(h.disabledCount).toBe(2);
+
+    // Once the pool is empty, the next request gets the 503 diagnosis instead
+    // of burning another upstream attempt.
+    const again = await app.request('/v1/chat/completions', {
+      method: 'POST',
+      body: '{}',
+      headers: { 'content-type': 'application/json' },
+    });
+    expect(again.status).toBe(503);
+    const againBody = await again.json();
+    expect(againBody.error).toBe('All API keys are temporarily unavailable');
+    expect(againBody.keys).toHaveLength(2);
   });
 
   it('classifies 5xx quota/balance bodies as KeyFault and fails over', async () => {
@@ -626,6 +646,42 @@ describe('createProxyApp — standard proxy pipeline', () => {
     expect(body.error).toBe('All API keys are temporarily unavailable');
   });
 
+  it('explains why every key is unavailable in the 503 body', async () => {
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue(
+      new Response('{"error":"invalid key"}', { status: 401 }),
+    );
+    const app = createProxyApp(makeConfig({
+      keys: [{ label: 'cc', key: 'user_cc-key-0001', provider: 'commandcode' }],
+    }));
+
+    const res = await app.request('/v1/chat/completions', {
+      method: 'POST',
+      body: JSON.stringify({ model: 'claude-opus-5@commandcode', messages: [] }),
+      headers: { 'content-type': 'application/json' },
+    });
+
+    expect(res.status).toBe(503);
+    const body = await res.json() as {
+      error: string;
+      retryAfterMs: number;
+      causes: string[];
+      keys: Array<{ label: string; provider: string; reason: string; lastStatus: number }>;
+    };
+    // Legacy field stays for clients that match on it.
+    expect(body.error).toBe('All API keys are temporarily unavailable');
+    expect(body.keys).toHaveLength(1);
+    expect(body.keys[0]).toMatchObject({
+      label: 'cc',
+      provider: 'commandcode',
+      reason: 'auth',
+      lastStatus: 401,
+    });
+    expect(body.retryAfterMs).toBeGreaterThan(0);
+    expect(body.causes.join(' ')).toMatch(/revoked|rotated/i);
+    // Never leak the credential, not even a prefix.
+    expect(JSON.stringify(body)).not.toContain('user_cc-key-0001');
+  });
+
   it('forwards GET requests without a body', async () => {
     const fetchMock = vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response('{}', { status: 200 }));
     const app = createProxyApp(makeConfig());
@@ -634,6 +690,57 @@ describe('createProxyApp — standard proxy pipeline', () => {
     expect(String(fetchMock.mock.calls[0][0])).toBe('https://example.com/zen/go/v1/chat/completions');
     const init = fetchMock.mock.calls[0][1] as RequestInit;
     expect(init.body).toBeUndefined();
+  });
+});
+
+describe('buildNoKeysBody', () => {
+  const unavailable = (over: Partial<UnavailableKey> = {}): UnavailableKey => ({
+    label: 'cc',
+    provider: 'commandcode',
+    state: 'disabled',
+    reason: 'auth',
+    lastStatus: 401,
+    disabledAt: '2026-10-28T19:00:00.000Z',
+    retryAfterMs: 1_000,
+    detail: null,
+    ...over,
+  });
+
+  it('reports each key with its reason and the soonest retry', () => {
+    const body = buildNoKeysBody(
+      [
+        unavailable({ retryAfterMs: 5_000 }),
+        unavailable({
+          label: 'oc',
+          provider: 'opencode-go',
+          reason: 'rate_limit',
+          lastStatus: 429,
+          retryAfterMs: 0,
+        }),
+      ],
+      'req-1',
+    );
+
+    expect(body.retryAfterMs).toBe(5_000);
+    expect(body.keys).toHaveLength(2);
+    expect(body.causes.some((cause) => /revoked|rotated/.test(cause))).toBe(true);
+    expect(body.causes.some((cause) => /429/.test(cause))).toBe(true);
+    expect(body.message).toContain('retry in 5s');
+    expect(body.error).toBe('All API keys are temporarily unavailable');
+  });
+
+  it('explains an account without plan and a pinned provider', () => {
+    const body = buildNoKeysBody(
+      [unavailable({ state: 'not_entitled', reason: null, lastStatus: null, retryAfterMs: null })],
+      'req-2',
+      'claude-opus-5@opencode-go',
+    );
+
+    expect(body.causes.join(' ')).toMatch(/no plan/);
+    expect(body.causes.join(' ')).toMatch(/@opencode-go/);
+    expect(body.message).toContain('opencode-go');
+    expect(body.message).not.toContain('retry in');
+    expect(body.retryAfterMs).toBeNull();
   });
 });
 
@@ -997,6 +1104,40 @@ describe('createProxyApp — request limits, health, CORS, rate limit keys', () 
     expect(body.enabledCount).toBe(1);
     expect(body.disabledCount).toBe(0);
     expect(body.activeRequests).toBe(0);
+  });
+
+  it('exposes per-key state and the last upstream error on /health', async () => {
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue(
+      new Response('{"error":"invalid key"}', { status: 401 }),
+    );
+    const app = createProxyApp(makeConfig({
+      keys: [{ label: 'cc', key: 'user_cc-key-0001', provider: 'commandcode' }],
+    }));
+    await app.request('/v1/chat/completions', {
+      method: 'POST',
+      body: JSON.stringify({ model: 'claude-opus-5@commandcode', messages: [] }),
+      headers: { 'content-type': 'application/json' },
+    });
+
+    const body = await (await app.request('/health')).json() as {
+      keys: Array<{
+        label: string;
+        provider: string;
+        enabled: boolean;
+        retryAfterMs: number | null;
+        lastError: { status: number; reason: string; at: string } | null;
+      }>;
+    };
+
+    expect(body.keys).toHaveLength(1);
+    expect(body.keys[0]).toMatchObject({
+      label: 'cc',
+      provider: 'commandcode',
+      enabled: false,
+      lastError: { status: 401, reason: 'auth' },
+    });
+    expect(body.keys[0].retryAfterMs).toBeGreaterThan(0);
+    expect(JSON.stringify(body)).not.toContain('user_cc-key-0001');
   });
 
   it('reflects allowed origins via CORS', async () => {
