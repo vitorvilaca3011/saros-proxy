@@ -13,6 +13,7 @@ import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { getDaemonState } from './daemon.js';
 import { readHarnessSettings } from './harness-sync.js';
+import { formatKeyState } from './key-state.js';
 import { loadConfig, getDefaultConfigPath } from '../config.js';
 import { maskKey, logger } from '../logger.js';
 
@@ -22,25 +23,6 @@ export function getVersion(): string {
     version: string;
   };
   return pkg.version;
-}
-
-/**
- * Render one key's `/health` entry: why it is out of rotation and when it can
- * return. `entry` is undefined when the daemon is not serving (or predates the
- * per-key block), in which case there is nothing to add.
- */
-export function formatKeyState(entry: Record<string, unknown> | undefined): string {
-  if (!entry) return '';
-  if (entry.entitled === false) return chalk.red(' — no plan for this provider');
-  if (entry.enabled !== false) return '';
-  const lastError = entry.lastError as { status?: number | null; reason?: string } | null | undefined;
-  const reason = lastError?.reason ? ` ${lastError.reason}` : '';
-  const status = typeof lastError?.status === 'number' ? ` (${lastError.status})` : '';
-  const retry =
-    typeof entry.retryAfterMs === 'number' && entry.retryAfterMs > 0
-      ? `, retry in ${Math.ceil(entry.retryAfterMs / 1000)}s`
-      : '';
-  return chalk.red(` — disabled:${reason}${status}${retry}`);
 }
 
 export async function printOverview(): Promise<void> {

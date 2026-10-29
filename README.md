@@ -534,7 +534,7 @@ saros-proxy start --port 3000 --config /path/to/config.yaml
 
 The PID file is stored at `~/.config/saros/daemon.pid`. The child process runs with `NODE_ENV=production` (JSON logging), and its stderr is appended to `~/.config/saros/daemon.log`.
 
-`saros-proxy status` checks the PID file first, then falls back to an os-agnostic `GET /health` port probe — so it reports the truth even when the proxy was started outside the daemon (manually, via autostart, or in another session) and no PID file exists. It also prints the enabled harnesses (`configharness` selection). `saros-proxy start` refuses to start a second instance when the configured port is already serving.
+`saros-proxy status` checks the PID file first, then falls back to an os-agnostic `GET /health` port probe — so it reports the truth even when the proxy was started outside the daemon (manually, via autostart, or in another session) and no PID file exists. It also prints the enabled harnesses (`configharness` selection) and, from the daemon's `/health` payload, one line per key with its state (`Keys: 1/2 enabled`, then `work [commandcode] — disabled: auth (401), retry in 42s`). `saros-proxy start` refuses to start a second instance when the configured port is already serving.
 
 Bare `saros-proxy` (no subcommand) prints the same overview without starting anything: running state, harnesses, masked API keys, and config path. To run the proxy in the foreground (e.g. for development or in a container), use `saros-proxy serve [--port <port>] [--config <path>]` — the daemon child and the Docker entrypoint run `serve` under the hood.
 
