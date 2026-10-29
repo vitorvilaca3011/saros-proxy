@@ -526,7 +526,7 @@ Override with `--config`:
 saros-proxy start --port 3000 --config /path/to/config.yaml
 ```
 
-The PID file is stored at `~/.config/saros/daemon.pid`. The child process runs with `NODE_ENV=production` (JSON logging), and its stderr is appended to `~/.config/saros/daemon.log`.
+The PID file is stored at `~/.config/saros/daemon.pid`. The child process runs with `NODE_ENV=production` (JSON/NDJSON logging), and **both** its stdout (pino) and stderr are appended to `~/.config/saros/daemon.log`. The file rotates at start: past 10 MB it becomes `daemon.log.1` and up to five are kept. Every boot writes `evt:"boot"` — version, node, config path, port, key labels/providers, bundled model count — so an empty log now means the daemon never started, not that logging is silent.
 
 `saros-proxy status` checks the PID file first, then falls back to an os-agnostic `GET /health` port probe — so it reports the truth even when the proxy was started outside the daemon (manually, via autostart, or in another session) and no PID file exists. It also prints the enabled harnesses (`configharness` selection). `saros-proxy start` refuses to start a second instance when the configured port is already serving.
 

@@ -196,7 +196,7 @@ keys:
 | Background daemon | stop | `saros-proxy stop` |
 | Background daemon | status | `saros-proxy status` |
 
-**Note:** The daemon child runs with `NODE_ENV=production` (JSON logging). For pretty-printed logs, run in foreground mode with `NODE_ENV=development`.
+**Note:** The daemon child runs with `NODE_ENV=production` (JSON logging). Its stdout and stderr are appended to `~/.config/saros/daemon.log`, which rotates at start (10 MB → `daemon.log.1`, five kept) and opens with an `evt:"boot"` line (version, config path, port, key labels) — that is where to look when the daemon "starts" but nothing works. For pretty-printed logs, run in foreground mode with `NODE_ENV=development`.
 
 ### 2.4 Verify
 

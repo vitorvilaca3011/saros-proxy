@@ -9,7 +9,7 @@
  */
 
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
-import { existsSync, mkdirSync, writeFileSync, readFileSync, rmSync, mkdtempSync } from 'node:fs';
+import { existsSync, mkdirSync, writeFileSync, readFileSync, rmSync, mkdtempSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { createServer } from 'node:http';
@@ -293,6 +293,63 @@ describe('daemonStart', () => {
     expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining('exited shortly after starting'));
     expect(exitSpy).toHaveBeenCalledWith(1);
     expect(existsSync(join(tempHome, '.config', 'saros', 'daemon.pid'))).toBe(false);
+  });
+
+  it('runs the child stdout into daemon.log instead of discarding it', async () => {
+    stubHealthDown();
+    stubPidDead();
+    mockSpawn.mockClear();
+    mockProcessExitRecord();
+    vi.useFakeTimers();
+
+    await daemon.daemonStart();
+    await vi.advanceTimersByTimeAsync(2000);
+
+    const [, , options] = mockSpawn.mock.calls.at(-1) as unknown as [
+      string,
+      string[],
+      { stdio: unknown[] },
+    ];
+    // stdin discarded, stdout is a file descriptor (pino writes there),
+    // stderr stays piped so startup failures can still be reported.
+    expect(options.stdio[0]).toBe('ignore');
+    expect(typeof options.stdio[1]).toBe('number');
+    expect(options.stdio[2]).toBe('pipe');
+  });
+
+  it('rotates daemon.log at start when it exceeds 10 MB', async () => {
+    stubHealthDown();
+    stubPidDead();
+    mockSpawn.mockClear();
+    mockProcessExitRecord();
+    vi.useFakeTimers();
+    const logPath = join(tempHome, '.config', 'saros', 'daemon.log');
+    mkdirSync(join(tempHome, '.config', 'saros'), { recursive: true });
+    writeFileSync(logPath, Buffer.alloc(11 * 1024 * 1024, 'x'));
+
+    await daemon.daemonStart();
+    await vi.advanceTimersByTimeAsync(2000);
+
+    expect(existsSync(`${logPath}.1`)).toBe(true);
+    expect(statSync(`${logPath}.1`).size).toBeGreaterThan(10 * 1024 * 1024);
+    expect(statSync(logPath).size).toBeLessThan(1024);
+  });
+
+  it('leaves a daemon.log under the limit alone', async () => {
+    stubHealthDown();
+    stubPidDead();
+    mockSpawn.mockClear();
+    mockProcessExitRecord();
+    vi.useFakeTimers();
+    const logPath = join(tempHome, '.config', 'saros', 'daemon.log');
+    mkdirSync(join(tempHome, '.config', 'saros'), { recursive: true });
+    writeFileSync(logPath, 'previous boot\n');
+
+    await daemon.daemonStart();
+    await vi.advanceTimersByTimeAsync(2000);
+
+    expect(existsSync(`${logPath}.1`)).toBe(false);
+    expect(readFileSync(logPath, 'utf-8')).toContain('previous boot');
   });
 
   it('spawns node with dist/index.js as entry point', async () => {
