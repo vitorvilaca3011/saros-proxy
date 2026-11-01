@@ -729,6 +729,21 @@ describe('buildNoKeysBody', () => {
     expect(body.error).toBe('All API keys are temporarily unavailable');
   });
 
+  it('explains an empty pool when every usable key was already tried', () => {
+    const body = buildNoKeysBody([], 'req-3', 'claude-opus-5', ['alpha']);
+
+    expect(body.keys).toHaveLength(0);
+    expect(body.causes.join(' ')).toMatch(/already tried/i);
+    expect(body.causes.join(' ')).toContain('alpha');
+  });
+
+  it('keeps the per-key reasons when some keys are also listed as tried', () => {
+    const body = buildNoKeysBody([unavailable()], 'req-4', undefined, ['other']);
+    // keys[] is not empty, so the tried-key cause must not be added on top.
+    expect(body.causes.some((cause) => /already tried/i.test(cause))).toBe(false);
+    expect(body.causes.some((cause) => /revoked|rotated/i.test(cause))).toBe(true);
+  });
+
   it('explains an account without plan and a pinned provider', () => {
     const body = buildNoKeysBody(
       [unavailable({ state: 'not_entitled', reason: null, lastStatus: null, retryAfterMs: null })],

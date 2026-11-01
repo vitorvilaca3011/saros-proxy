@@ -608,10 +608,11 @@ const FAILURE_CAUSES: Record<KeyFailureReason, string> = {
  * `enabled=false` and `consecutiveFailures >= threshold` are the same state —
  * the circuit breaker flips `enabled` when the counter reaches it.
  */
-function unavailableKeyReports(state: ProxyState): UnavailableKey[] {
+function unavailableKeyReports(state: ProxyState, onlyLabels?: string[]): UnavailableKey[] {
   const now = Date.now();
   return describeKeys(state, now)
     .filter((report) => !report.enabled || !report.entitled)
+    .filter((report) => !onlyLabels || onlyLabels.includes(report.label))
     .map((report) => {
       const lastError = state.keys.find((k) => k.label === report.label)?.lastError ?? null;
       return {
@@ -658,7 +659,11 @@ export interface KeyDiagnosis {
  * Shared diagnosis for "no key can serve this": which keys are out, why, when
  * one may return. Pure so it can be tested without an app instance.
  */
-export function buildKeyDiagnosis(keys: UnavailableKey[], modelId?: string): KeyDiagnosis {
+export function buildKeyDiagnosis(
+  keys: UnavailableKey[],
+  modelId?: string,
+  triedLabels: string[] = [],
+): KeyDiagnosis {
   const retryTimes = keys
     .map((k) => k.retryAfterMs)
     .filter((ms): ms is number => typeof ms === 'number' && ms > 0);
@@ -675,6 +680,13 @@ export function buildKeyDiagnosis(keys: UnavailableKey[], modelId?: string): Key
   if (pinned) {
     causes.add(`the request is pinned to @${pinned} and none of its keys are usable`);
   }
+  if (keys.length === 0 && triedLabels.length > 0) {
+    // Healthy keys, but every one was already attempted for this request: the
+    // 503 used to come back with an empty keys[] and no cause at all.
+    causes.add(
+      `every usable key was already tried for this request (${triedLabels.join(', ')}); the upstream kept answering with a retryable error`,
+    );
+  }
 
   return { retryAfterMs, keys, causes: [...causes] };
 }
@@ -684,8 +696,9 @@ export function buildNoKeysBody(
   keys: UnavailableKey[],
   requestId: string,
   modelId?: string,
+  triedLabels: string[] = [],
 ): NoKeysBody {
-  const diagnosis = buildKeyDiagnosis(keys, modelId);
+  const diagnosis = buildKeyDiagnosis(keys, modelId, triedLabels);
   const pinned = modelId?.includes('@') ? modelId.slice(modelId.lastIndexOf('@') + 1) : null;
   const retryText =
     diagnosis.retryAfterMs === null ? '' : `; retry in ${Math.ceil(diagnosis.retryAfterMs / 1000)}s`;
@@ -707,8 +720,9 @@ function buildNoKeysResponse(
   attempt: number,
   modelId?: string,
 ): Response {
+  const triedLabels = [...(state.activeRequests.get(requestId)?.triedKeys ?? [])];
   const keys = unavailableKeyReports(state);
-  const body = buildNoKeysBody(keys, requestId, modelId);
+  const body = buildNoKeysBody(keys, requestId, modelId, triedLabels);
 
   logger.warn(
     {
@@ -746,6 +760,13 @@ function buildClientErrorResponse(status: number, errorBody: string, requestId: 
 }
 
 function handleAllRetriesFailed(ctx: RetryContext, maxRetries: number, lastError: Error | null): Response {
+  // Read before completeRequest deletes the context. The last attempt never
+  // goes through failoverRequest (the loop ends), so its key is only in
+  // currentKey — omitting it hides the key that failed last.
+  const active = ctx.state.activeRequests.get(ctx.requestId);
+  const triedLabels = [
+    ...new Set([...(active?.triedKeys ?? []), ...(active?.currentKey ? [active.currentKey.label] : [])]),
+  ];
   completeRequest(ctx.state, ctx.requestId, false);
   logger.error(
     { requestId: ctx.requestId, err: lastError, kind: ctx.kind },
@@ -760,14 +781,18 @@ function handleAllRetriesFailed(ctx: RetryContext, maxRetries: number, lastError
   // Status stays 502 (the upstream did answer with errors), but when every key
   // is now out of rotation the body says which and why — otherwise the caller
   // sees "unavailable" and has no way to tell a revoked key from a 429.
-  const unavailable = unavailableKeyReports(ctx.state);
-  const diagnosis = unavailable.length > 0 ? buildKeyDiagnosis(unavailable, ctx.modelId) : null;
+  // Scoped to the keys this request tried: an unrelated key retired in config
+  // must not be blamed for the failure.
+  const unavailable = unavailableKeyReports(ctx.state, triedLabels);
+  // Always present: an empty keys[] with a cause is the honest answer when the
+  // pool is healthy but every key was tried.
+  const diagnosis = buildKeyDiagnosis(unavailable, ctx.modelId, triedLabels);
   return new Response(
     JSON.stringify({
       error: 'Bad Gateway',
       message,
       requestId: ctx.requestId,
-      ...(diagnosis ?? {}),
+      ...diagnosis,
     }),
     { status: 502, headers: { 'content-type': 'application/json' } },
   );
