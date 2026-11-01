@@ -342,9 +342,14 @@ keys:
   - label: cc-console-key
     key: sk-your-console-key-here...    # ambiguous prefix → set provider explicitly
     provider: commandcode
+  - label: old-account
+    key: sk-you...0000
+    enabled: false           # retired: kept in config, never used
 ```
 
 The `provider` field is optional — it wins over prefix inference and is required only when a CommandCode `sk-` console key must be distinguished from an OpenCode-Go key. When keys are encrypted at rest (prefix hidden), the provider from setup time is persisted alongside.
+
+The `enabled` field is optional (default `true`). Setting `enabled: false` retires a key without deleting it: it never enters rotation, is never counted as a failure, and `/health` reports it as `disabledByConfig: true` (the 503 lists it as `disabled_by_config`). A revoked key is usually better retired than deleted — the credential stays for the record and comes back with a one-word edit.
 
 **Per-provider upstream override (optional):**
 

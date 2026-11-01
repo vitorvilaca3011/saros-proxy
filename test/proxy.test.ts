@@ -682,6 +682,37 @@ describe('createProxyApp — standard proxy pipeline', () => {
     expect(JSON.stringify(body)).not.toContain('user_cc-key-0001');
   });
 
+  it('reports a key retired in config as disabled_by_config', async () => {
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue(
+      new Response('{"error":"invalid key"}', { status: 401 }),
+    );
+    const app = createProxyApp(makeConfig({
+      keys: [
+        { label: 'live', key: 'user_live_key_00001', provider: 'commandcode' },
+        { label: 'retired', key: 'user_retired_key_001', provider: 'commandcode', enabled: false },
+      ],
+    }));
+
+    const res = await app.request('/v1/chat/completions', {
+      method: 'POST',
+      body: JSON.stringify({ messages: [] }),
+      headers: { 'content-type': 'application/json' },
+    });
+
+    expect(res.status).toBe(503);
+    const body = await res.json() as {
+      keys: Array<{ label: string; state: string; reason: string | null }>;
+      causes: string[];
+    };
+    const retired = body.keys.find((key) => key.label === 'retired');
+    expect(retired).toMatchObject({ state: 'disabled_by_config', reason: null });
+    expect(body.causes.join(' ')).toMatch(/disabled in config/i);
+
+    const health = await (await app.request('/health')).json() as {
+      keys: Array<{ label: string; disabledByConfig: boolean }>;
+    };
+    expect(health.keys.find((key) => key.label === 'retired')?.disabledByConfig).toBe(true);
+  });
   it('forwards GET requests without a body', async () => {
     const fetchMock = vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response('{}', { status: 200 }));
     const app = createProxyApp(makeConfig());

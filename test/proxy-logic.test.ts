@@ -295,6 +295,49 @@ describe('key failure reporting', () => {
   });
 });
 
+describe('config-disabled keys', () => {
+  it('never selects a key marked enabled: false', () => {
+    const state = createProxyState([
+      { label: 'retired', key: 'sk-retired-000001', enabled: false },
+      { label: 'live', key: 'sk-live-00000001' },
+    ]);
+
+    expect(state.keys[0].enabled).toBe(false);
+    expect(state.keys[0].disabledByConfig).toBe(true);
+
+    const picked = new Set<string>();
+    for (let i = 0; i < 4; i++) {
+      const snap = selectKeyForRequest(state, `cfg-${i}`);
+      if (snap) picked.add(snap.label);
+    }
+    expect([...picked]).toEqual(['live']);
+  });
+
+  it('returns no key when the only key is disabled by config', () => {
+    const state = createProxyState([
+      { label: 'retired', key: 'sk-retired-000001', enabled: false },
+    ]);
+    expect(selectKeyForRequest(state, 'cfg-only')).toBeNull();
+    // Never selected means never penalised.
+    expect(state.keys[0].consecutiveFailures).toBe(0);
+    expect(state.keys[0].lastError).toBeNull();
+  });
+
+  it('is not revived by a success and reports where the disable came from', () => {
+    const state = createProxyState([
+      { label: 'retired', key: 'sk-retired-000001', enabled: false },
+    ]);
+
+    markKeySucceeded(state, 'retired');
+
+    expect(state.keys[0].enabled).toBe(false);
+    expect(describeKeys(state)[0]).toMatchObject({
+      enabled: false,
+      disabledByConfig: true,
+    });
+  });
+});
+
 describe('C2 – Error Classification', () => {
   it('classifyHttpError returns KeyFault for 401', () => {
     expect(classifyHttpError(401)).toBe('KeyFault');

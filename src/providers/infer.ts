@@ -14,6 +14,11 @@ export interface KeyEntry {
   key: string;
   /** Explicit provider from config.yaml; wins over inference when present. */
   provider?: ProviderId;
+  /**
+   * false retires the key without deleting it: it never enters rotation and is
+   * never counted as a failure. Absent means enabled.
+   */
+  enabled?: boolean;
 }
 
 /**

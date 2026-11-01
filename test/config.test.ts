@@ -252,10 +252,33 @@ describe('validateConfig', () => {
     expect(result.keys).toHaveLength(1);
   });
 
+  it('ignores a malformed enabled value instead of retiring the key', () => {
+    const keys = [{ label: 'typo', key: VALID_KEY, enabled: 'false' }];
+    // A non-boolean is a config typo, not a retirement order: the key stays in
+    // the pool and the warning is the only signal.
+    const result = validateConfig(validBase({ keys: keys as never }));
+    const entry = result.keys.find((k) => k.label === 'typo');
+    expect(entry).toBeDefined();
+    expect(entry?.enabled).toBeUndefined();
+  });
+
   it('throws when key array is empty', () => {
     expect(() => validateConfig(validBase({ keys: [] }))).toThrow(
       'No valid API keys configured',
     );
+  });
+
+  it('carries enabled: false through instead of dropping the key', () => {
+    const keys = [
+      { label: 'live', key: VALID_KEY },
+      { label: 'retired', key: VALID_KEY, enabled: false },
+    ];
+    const result = validateConfig(validBase({ keys }));
+
+    expect(result.keys).toHaveLength(2);
+    expect(result.keys.find((k) => k.label === 'retired')?.enabled).toBe(false);
+    // Absent field stays absent so the default (enabled) is decided in one place.
+    expect(result.keys.find((k) => k.label === 'live')?.enabled).toBeUndefined();
   });
 
   it('throws when all keys are invalid', () => {

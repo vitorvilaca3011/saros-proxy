@@ -40,6 +40,11 @@ interface ApiKey {
   currentWeight: number;
   /** Why the key last left rotation — reported by /health and the 503 body. */
   lastError: KeyFailure | null;
+  /**
+   * True when the key was retired in config (`enabled: false`). Separate from
+   * `enabled` so a success (or a cooldown) can never put it back in rotation.
+   */
+  disabledByConfig: boolean;
 }
 
 /** Why a key is out of rotation, derived from the upstream verdict. */
@@ -67,6 +72,8 @@ export interface KeyHealthReport {
   provider: string;
   enabled: boolean;
   entitled: boolean;
+  /** True when the key is retired in config (`enabled: false`). */
+  disabledByConfig: boolean;
   consecutiveFailures: number;
   disabledAt: string | null;
   retryAfterMs: number | null;
@@ -136,7 +143,7 @@ export type ErrorType = 'KeyFault' | 'RequestFault' | 'ServerFault' | 'NetworkFa
 // ---------------------------------------------------------------------------
 
 export function createProxyState(
-  keys: Array<{ label: string; key: string; provider?: string }>,
+  keys: Array<{ label: string; key: string; provider?: string; enabled?: boolean }>,
   options?: {
     circuitBreakerThreshold?: number;
     circuitBreakerCooldownMs?: number;
@@ -147,7 +154,7 @@ export function createProxyState(
       label: k.label,
       key: k.key,
       provider: k.provider ?? 'opencode-go',
-      enabled: true,
+      enabled: k.enabled ?? true,
       consecutiveFailures: 0,
       lastUsed: null,
       disabledAt: null,
@@ -155,6 +162,7 @@ export function createProxyState(
       entitled: true,
       currentWeight: 0,
       lastError: null,
+      disabledByConfig: k.enabled === false,
     })),
     currentIndex: 0,
     circuitBreakerThreshold: options?.circuitBreakerThreshold ?? 3,
@@ -181,6 +189,9 @@ function toSnapshot(key: ApiKey): KeySnapshot {
  * (C1 — fixes dead-code cooldown).
  */
 function isKeyAvailable(state: ProxyState, key: ApiKey): boolean {
+  // Retired in config: never re-enabled by a cooldown, a success or a restart
+  // without a config change.
+  if (key.disabledByConfig) return false;
   // Entitlement is definitive, not transient: a key whose account has no
   // plan for this provider must not be retried until the usage refresh
   // clears the flag.
@@ -567,6 +578,8 @@ export function markKeyFailed(
 export function markKeySucceeded(state: ProxyState, keyLabel: string): void {
   const key = state.keys.find((k) => k.label === keyLabel);
   if (!key) return;
+  // A key retired in config stays out; only the config brings it back.
+  if (key.disabledByConfig) return;
   key.enabled = true;
   key.consecutiveFailures = 0;
   // C1: clear cooldown on success so next selection isn't penalised
@@ -607,6 +620,7 @@ export function describeKeys(state: ProxyState, now = Date.now()): KeyHealthRepo
     provider: key.provider,
     enabled: key.enabled,
     entitled: key.entitled,
+    disabledByConfig: key.disabledByConfig,
     consecutiveFailures: key.consecutiveFailures,
     disabledAt: key.disabledAt === null ? null : new Date(key.disabledAt).toISOString(),
     retryAfterMs: keyRetryAfterMs(state, key, now),
