@@ -57,8 +57,9 @@ network-reachable deployment exposes those fields to anyone who can reach the po
 `provider` is the configured provider of the key that last attempted the request (`null`
 when no key could be selected); for a pinned `model@provider` request it equals the suffix
 because the serving key belongs to that provider, not because the suffix is copied.
-`keyLabel` is the serving key, or the last key tried when the request ended in 502; it is
-`null` only when no key was ever selected.
+`keyLabel` is the serving key, or the last key tried when the proxy answers 502
+or a 503 raised after keys were tried; it is `null` only when no key was ever
+selected.
 
 `reason` on `key.state` is derived from the upstream verdict: `401 → auth`,
 `429 → rate_limit`, 5xx carrying a quota/balance hint → `quota`, anything else 5xx →

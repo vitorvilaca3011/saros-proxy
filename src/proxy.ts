@@ -783,6 +783,10 @@ export function buildNoKeysBody(
 function buildNoKeysResponse(ctx: RetryContext, attempt: number): Response {
   const { state, requestId, kind, modelId } = ctx;
   const triedLabels = [...(state.activeRequests.get(requestId)?.triedKeys ?? [])];
+  // A 503 raised between attempts still follows keys that failed: the body
+  // names them, so the access entry must too. Null stays reserved for the
+  // attempt-0 case, when no key was ever selected.
+  const lastTried = triedLabels.at(-1) ?? null;
   const keys = unavailableKeyReports(state);
   const body = buildNoKeysBody(keys, requestId, modelId, triedLabels);
 
@@ -799,7 +803,7 @@ function buildNoKeysResponse(ctx: RetryContext, attempt: number): Response {
     'No API key available for this request',
   );
   completeRequest(state, requestId, false);
-  logRequestComplete(ctx, 503, null);
+  logRequestComplete(ctx, 503, lastTried);
   return new Response(JSON.stringify(body), {
     status: 503,
     headers: { 'content-type': 'application/json' },
@@ -872,8 +876,8 @@ function handleAllRetriesFailed(ctx: RetryContext, maxRetries: number, lastError
  *
  * The same entry is pushed to the in-memory buffer served by `GET /debug/recent`
  * (when enabled), so the two views cannot drift. `keyLabel` is the key that
- * served the request, the last key tried when it ended in 502, and null only
- * when no key was ever selected (503).
+ * served the request, or the last key tried when the proxy answers 502 or a 503
+ * raised after keys were tried; null only when no key was ever selected.
  */
 function logRequestComplete(
   ctx: RetryContext,

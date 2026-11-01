@@ -1190,11 +1190,12 @@ describe('createProxyApp — request limits, health, CORS, rate limit keys', () 
     const app = createProxyApp(makeConfig({ allowedOrigins: ['https://*.example.com'] }));
     const res = await app.request('/health', { headers: { origin: 'https://app.example.com' } });
     expect(res.headers.get('access-control-allow-origin')).toBe('https://app.example.com');
-    // Browser JS can only read these annotations if they are exposed.
-    const exposed = res.headers.get('access-control-expose-headers') ?? '';
-    for (const header of ['X-Proxy-Key-Label', 'X-Proxy-Request-Id', 'X-Proxy-Provider']) {
-      expect(exposed).toContain(header);
-    }
+    // Browser JS can only read these annotations if they are exposed. Exact
+    // value: an accidental extra header would widen the browser-visible
+    // surface without a test noticing.
+    expect(res.headers.get('access-control-expose-headers')).toBe(
+      'X-Proxy-Key-Label,X-Proxy-Request-Id,X-Proxy-Provider',
+    );
   });
 
   it('does not send CORS headers for disallowed origins', async () => {
@@ -1528,10 +1529,11 @@ describe('createProxyApp — X-Proxy-Provider header', () => {
     });
   }
 
-  // The header must come from the key that served. This test pins the provider
-  // via the model suffix, so suffix and serving key agree by construction — it
-  // would pass even if the header merely re-parsed the model id. The proof of
-  // provenance is the unpinned and prefix-contradiction tests below.
+  // This test pins the provider via the model suffix, so suffix and serving
+  // key agree by construction — it would pass even if the header merely
+  // re-parsed the model id. Provenance is proven by the unpinned test below
+  // (its key prefixes contradict the configured providers, so prefix inference
+  // would report the opposite provider) and by the prefix-contradiction test.
   it('reports the provider of the key that served the request', async () => {
     vi.spyOn(globalThis, 'fetch').mockImplementation(async () =>
       new Response('{"ok":true}', { status: 200 }),
@@ -1580,13 +1582,21 @@ describe('createProxyApp — X-Proxy-Provider header', () => {
     vi.spyOn(globalThis, 'fetch').mockImplementation(async () =>
       new Response('{"ok":true}', { status: 200 }),
     );
-    const app = createProxyApp(mixedPool());
+    // Prefixes deliberately contradict the configured providers: a header
+    // built by re-inferring from the credential would report opencode-go for
+    // the sk-… key and commandcode for the user_… key — the opposite values.
+    const app = createProxyApp(makeConfig({
+      keys: [
+        { label: 'sk-cc', key: 'sk-commandcode-key-000001', provider: 'commandcode' },
+        { label: 'user-oc', key: 'user_opencode-key-000001', provider: 'opencode-go' },
+      ],
+    }));
 
-    // Round-robin: oc then cc. The model carries no @provider hint, so the
-    // only source of truth is the selected key's configured provider.
+    // Round-robin: sk-cc then user-oc. The model carries no @provider hint, so
+    // the only source of truth is the selected key's configured provider.
     for (const expected of [
-      { keyLabel: 'oc', provider: 'opencode-go' },
-      { keyLabel: 'cc', provider: 'commandcode' },
+      { keyLabel: 'sk-cc', provider: 'commandcode' },
+      { keyLabel: 'user-oc', provider: 'opencode-go' },
     ]) {
       const res = await app.request('/v1/chat/completions', {
         method: 'POST',
@@ -1765,6 +1775,51 @@ describe('createProxyApp — GET /debug/recent', () => {
       provider: null,
       keyLabel: null,
       status: 503,
+    });
+  });
+
+  it('records the last key tried on a 503 raised after a failed attempt', async () => {
+    mockUpstream(() => new Response('{"error":"boom"}', { status: 500 }));
+    const app = createProxyApp(makeConfig({
+      keys: [{ label: 'only', key: 'sk-only-key-0000000000001' }],
+    }));
+
+    const res = await postChat(app, { model: 'model-one', messages: [] });
+    const failure = await res.json() as { causes: string[] };
+    expect(res.status).toBe(503);
+    // The proxy's own 503 advertises no key headers; the entry carries the label.
+    expect(res.headers.get('X-Proxy-Key-Label')).toBeNull();
+    expect(res.headers.get('X-Proxy-Provider')).toBeNull();
+    // The body names the key it tried — the entry must not contradict it.
+    expect(failure.causes.join(' ')).toContain('only');
+
+    const body = await recent(app);
+    expect(body.count).toBe(1);
+    expect(body.entries[0]).toMatchObject({
+      status: 503,
+      provider: 'opencode-go',
+      keyLabel: 'only',
+      attempt: 2,
+    });
+  });
+
+  it('keeps the second key as the last tried when a two-key pool fails both attempts', async () => {
+    mockUpstream(() => new Response('{"error":"boom"}', { status: 500 }));
+    const app = createProxyApp(makeConfig());
+
+    const res = await postChat(app, { model: 'model-one', messages: [] });
+    await res.text();
+    // Both attempts consumed a key, so the loop is exhausted before another
+    // selection: the terminal answer is 502, attributed to the second key.
+    expect(res.status).toBe(502);
+
+    const body = await recent(app);
+    expect(body.count).toBe(1);
+    expect(body.entries[0]).toMatchObject({
+      status: 502,
+      provider: 'opencode-go',
+      keyLabel: 'beta',
+      attempt: 2,
     });
   });
 

@@ -37,8 +37,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `provider: commandcode` with an `sk-…` credential was forwarded to the
   OpenCode-Go URL and reported as `opencode-go`; it now goes to CommandCode and
   the response header says `commandcode`.
-- **The retries-exhausted (502) access entry carries the last key tried**
-  instead of `keyLabel: null`; null now means no key was ever selected (503).
+- **The proxy's own error entries carry the last key tried** instead of
+  `keyLabel: null` — both the retries-exhausted 502 and a 503 raised after keys
+  were tried; null now means no key was ever selected.
 
 ## [0.10.2] - 2026-10-27
 

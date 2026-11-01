@@ -27,7 +27,8 @@ export interface RecentRequestEntry {
   provider: string | null;
   /**
    * Public key label — never the credential. The serving key, or the last key
-   * tried when the request ended in 502; null only when none was selected.
+   * tried when the proxy answers 502 or a 503 raised after keys were tried;
+   * null only when no key was ever selected.
    */
   keyLabel: string | null;
   status: number;
