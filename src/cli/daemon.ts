@@ -19,7 +19,7 @@
 
 import { spawn, execFileSync } from 'node:child_process';
 import chalk from 'chalk';
-import { existsSync, writeFileSync, readFileSync, rmSync, mkdirSync, copyFileSync, createWriteStream, statSync, renameSync, openSync, closeSync, chmodSync } from 'node:fs';
+import { existsSync, writeFileSync, writeSync, readFileSync, rmSync, mkdirSync, copyFileSync, statSync, renameSync, openSync, closeSync, chmodSync } from 'node:fs';
 import { resolve as pathResolve, join as pathJoin } from 'node:path';
 import { homedir } from 'node:os';
 import { fileURLToPath } from 'node:url';
@@ -140,9 +140,10 @@ function rotateDaemonLog(): void {
 }
 
 /**
- * Open daemon.log as the child's stdout (0600 — it carries upstream error
- * bodies). Returns null when the file cannot be opened, so the caller falls
- * back to discarding stdout. Exported so the wiring can be asserted in tests.
+ * Open daemon.log for append (0600 — it carries upstream error bodies).
+ * Returns null when the file cannot be opened, so callers fall back to
+ * discarding output. Used for the child's stdout and for the parent's stderr
+ * mirror. Exported so the wiring can be asserted in tests.
  */
 export function openDaemonLog(): number | null {
   try {
@@ -318,18 +319,24 @@ export async function daemonStart(port?: number, configPath?: string): Promise<v
 
   // Capture child stderr (also appended to daemon.log) so startup failures
   // can be diagnosed instead of swallowed by stdio ignore.
-  // Best-effort: an unopenable log (dir deleted under us, permissions) must
-  // not crash the starter — the stream open is async and can lose the race
-  // with cleanup in tests.
   rotateDaemonLog();
-  // 0600: the file now carries pino output, including upstream error bodies.
-  const logStream = createWriteStream(DAEMON_LOG, { flags: 'a', mode: 0o600 });
-  try {
-    chmodSync(DAEMON_LOG, 0o600);
-  } catch {
-    // best effort
-  }
-  logStream.on('error', () => { /* daemon.log is diagnostic only */ });
+  // A synchronous append descriptor, not createWriteStream: a stream opens
+  // asynchronously and its handle outlived startup verification, so cleanup
+  // that removes the directory raced with the pending open (ENOTEMPTY) and a
+  // restart left a writer on the old log. openDaemonLog chmods to 0600 (the
+  // log carries upstream error bodies) and returns null when the file cannot
+  // be opened — logging is diagnostic only.
+  const stderrFd = openDaemonLog();
+  let stderrFdClosed = false;
+  const closeStderrLog = (): void => {
+    if (stderrFd === null || stderrFdClosed) return;
+    stderrFdClosed = true;
+    try {
+      closeSync(stderrFd);
+    } catch {
+      // best effort
+    }
+  };
   let stderrBuf = '';
 
   // stdout carries pino. It used to be 'ignore', which is why daemon.log stayed
@@ -356,7 +363,13 @@ export async function daemonStart(port?: number, configPath?: string): Promise<v
 
   child.stderr?.on('data', (chunk: Buffer) => {
     stderrBuf += chunk.toString();
-    logStream.write(chunk);
+    if (stderrFd !== null && !stderrFdClosed) {
+      try {
+        writeSync(stderrFd, chunk);
+      } catch {
+        // diagnostics only
+      }
+    }
   });
 
   // Allow parent to exit independently while child continues
@@ -368,6 +381,9 @@ export async function daemonStart(port?: number, configPath?: string): Promise<v
   // Wait briefly then verify the process is alive
   setTimeout(async () => {
     if (isProcessAlive(pid)) {
+      // Startup is verified: the parent must not keep daemon.log open while it
+      // syncs models and checks for updates before exiting.
+      closeStderrLog();
       console.log(chalk.green(`✓ Proxy started (PID ${pid}) on port ${effectivePort}.`));
 
       // Sync models to all enabled harnesses — await with timeout before exit
@@ -405,6 +421,7 @@ export async function daemonStart(port?: number, configPath?: string): Promise<v
       } else {
         console.error(chalk.red('✗ Proxy exited shortly after starting. Check your config.'));
       }
+      closeStderrLog();
       deletePid();
       process.exit(1);
     }
