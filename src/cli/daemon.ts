@@ -24,6 +24,7 @@ import { resolve as pathResolve, join as pathJoin } from 'node:path';
 import { homedir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { getModelsJsonPath } from './opencode-config.js';
+import { formatKeyBlock } from './key-state.js';
 import { checkForUpdate } from './update-check.js';
 import { loadConfig } from '../config.js';
 import { DAEMON_SYNC_TIMEOUT_MS } from '../constants.js';
@@ -497,6 +498,9 @@ export async function daemonStatus(): Promise<void> {
         ),
       );
     }
+    // Per-key state from the daemon's own report: which key is out, why, and
+    // when it retries. Skipped silently when the payload has no keys block.
+    for (const line of formatKeyBlock(state.health)) console.log(line);
     printHarnesses();
     process.exit(0);
   }

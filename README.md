@@ -44,7 +44,7 @@ Manage multiple API keys behind a single endpoint — OpenCode-Go **and** Comman
 - **Graceful shutdown** — Drains active requests before exiting (no dropped connections).
 - **Security hardening** — API key masking in logs, SSRF prevention (HTTPS-only upstream), configurable CORS, host binding validation.
 - **Config validation** — CLI args, YAML file, or environment variables with sensible defaults.
-- **Health endpoint** — `GET /health` shows key status, active requests, and circuit-breaker state.
+- **Health endpoint** — `GET /health` shows key status per key (enabled, why it is out of rotation, when it retries), active requests, and circuit-breaker state.
 - **No database** — Stateless proxy, zero external dependencies beyond Node.js.
 
 ---
@@ -285,6 +285,11 @@ Test that it's alive:
 ```bash
 curl http://127.0.0.1:3000/health
 
+# Why is a key out of rotation? The `keys` block says it (never the key itself):
+#   "keys": [{"label":"work","provider":"commandcode","enabled":false,
+#             "reason":"auth","lastError":{"status":401},
+#             "retryAfterMs":43876}]
+
 # Query models
 curl http://127.0.0.1:3000/zen/go/v1/models
 
@@ -360,7 +365,8 @@ OPENCODE_GO_KEYS="account1:sk-xxx,cc:user_yyy"
 - When a request is served by a CommandCode key, Saros remaps the route to CommandCode's OpenAI-compatible surface (`/provider/v1/...`) and injects the provider's identity headers — transparent to the client.
 - Models uniquely named by a provider (e.g. `claude-*` or vendor-prefixed ids on CommandCode) are routed to a key of that provider first; other providers remain as fallback.
 - Synced harness configs may list provider-specific models as `model@commandcode`; the suffix selects the provider and is stripped before forwarding. The pin is authoritative: key selection is restricted to that provider, so a pin whose provider cannot serve the model still reaches that upstream and surfaces its error instead of a local 503.
-- The `/health` endpoint reports per-provider key counts under `providers`.
+- The `/health` endpoint reports per-provider key counts under `providers`, and a `keys` array with each key's state: `enabled`, `entitled`, `consecutiveFailures`, `disabledAt`, `retryAfterMs`, and `lastError` (`status` + `reason`: `auth`, `quota`, `rate_limit`, `server`). The credential is never part of the response.
+- When no key can serve a request, the `503` body says which keys are out and why — `keys[]` with `reason`/`lastStatus`/`retryAfterMs`, plus a `causes[]` list (revoked key, exhausted quota, rate limit, missing plan, or a `@provider` pin with no usable key). The legacy `error` field (`All API keys are temporarily unavailable`) is still present.
 - OpenCode-Go requires a stable per-conversation session id (`x-opencode-session`, used for routing and prompt caching). Saros forwards a client-supplied value untouched and derives one from the conversation (model + first user turn) when the client sends none — harnesses that only attach the header on some request paths would otherwise get `400 MissingSessionID`.
 - Usage-based weighted rotation applies to providers with a queryable usage API (OpenCode-Go). CommandCode keys participate in rotation without usage data, but their token consumption is tracked per key and shown by `saros-proxy usage` (see [Token Accounting](#token-accounting)).
 
@@ -530,7 +536,7 @@ saros-proxy start --port 3000 --config /path/to/config.yaml
 
 The PID file is stored at `~/.config/saros/daemon.pid`. The child process runs with `NODE_ENV=production` (JSON/NDJSON logging), and **both** its stdout (pino) and stderr are appended to `~/.config/saros/daemon.log`. The file rotates at start: past 10 MB it becomes `daemon.log.1` and up to five are kept. Every boot writes an `evt:"boot"` line — version, node, config path, port, key labels/providers, bundled model count — so an empty log now means the daemon never started, not that logging is silent.
 
-`saros-proxy status` checks the PID file first, then falls back to an os-agnostic `GET /health` port probe — so it reports the truth even when the proxy was started outside the daemon (manually, via autostart, or in another session) and no PID file exists. It also prints the enabled harnesses (`configharness` selection). `saros-proxy start` refuses to start a second instance when the configured port is already serving.
+`saros-proxy status` checks the PID file first, then falls back to an os-agnostic `GET /health` port probe — so it reports the truth even when the proxy was started outside the daemon (manually, via autostart, or in another session) and no PID file exists. It also prints the enabled harnesses (`configharness` selection) and, from the daemon's `/health` payload, one line per key with its state (`Keys: 1/2 enabled`, then `work [commandcode] — disabled: auth (401), retry in 42s`). `saros-proxy start` refuses to start a second instance when the configured port is already serving.
 
 Bare `saros-proxy` (no subcommand) prints the same overview without starting anything: running state, harnesses, masked API keys, and config path. To run the proxy in the foreground (e.g. for development or in a container), use `saros-proxy serve [--port <port>] [--config <path>]` — the daemon child and the Docker entrypoint run `serve` under the hood.
 

@@ -11,6 +11,7 @@
  */
 
 import { DEFAULT_CIRCUIT_BREAKER_COOLDOWN_MS } from './constants.js';
+import { redactSecrets } from './log-redact.js';
 
 // ---------------------------------------------------------------------------
 // Interfaces & Types
@@ -37,6 +38,47 @@ interface ApiKey {
   entitled: boolean;
   /** Smooth weighted round-robin state (nginx-style). */
   currentWeight: number;
+  /** Why the key last left rotation — reported by /health and the 503 body. */
+  lastError: KeyFailure | null;
+}
+
+/** Why a key is out of rotation, derived from the upstream verdict. */
+export type KeyFailureReason = 'auth' | 'quota' | 'rate_limit' | 'server';
+
+export interface KeyFailure {
+  /** Upstream HTTP status, when the failure came from a response. */
+  status: number | null;
+  reason: KeyFailureReason;
+  /** Epoch ms. */
+  at: number;
+  /** Short upstream message (≤200 chars). Never contains the credential. */
+  detail: string | null;
+}
+
+/** Upstream context for a failure, passed by the caller that saw it. */
+export interface KeyFailureInfo {
+  status?: number;
+  body?: string;
+}
+
+/** Public projection of one key's state — never contains the credential. */
+export interface KeyHealthReport {
+  label: string;
+  provider: string;
+  enabled: boolean;
+  entitled: boolean;
+  consecutiveFailures: number;
+  disabledAt: string | null;
+  retryAfterMs: number | null;
+  lastError: { status: number | null; reason: KeyFailureReason; at: string } | null;
+  usagePercent: number | null;
+}
+
+/** Fields needed to answer "can this key be used right now?". */
+export interface KeyAvailability {
+  enabled: boolean;
+  consecutiveFailures: number;
+  disabledAt: number | null;
 }
 
 /** Read-only projection returned to callers — cannot mutate internal state. */
@@ -112,6 +154,7 @@ export function createProxyState(
       usagePercent: null,
       entitled: true,
       currentWeight: 0,
+      lastError: null,
     })),
     currentIndex: 0,
     circuitBreakerThreshold: options?.circuitBreakerThreshold ?? 3,
@@ -452,7 +495,26 @@ export function completeRequest(
 // ---------------------------------------------------------------------------
 
 /**
- * Mark a key as failed according to the error type (C2).
+ * Map an upstream verdict onto the reason shown by /health and the 503 body.
+ * classifyHttpError already narrowed the class: KeyFault is a 401 or a 5xx
+ * carrying a quota/balance hint, ServerFault is 429 or any other 5xx.
+ */
+function deriveKeyFailureReason(
+  errorType: ErrorType,
+  status?: number,
+  body?: string,
+): KeyFailureReason {
+  if (status === 401) return 'auth';
+  if (status === 429) return 'rate_limit';
+  // classifyHttpError treats any 5xx mentioning "limit" as KeyFault, so a
+  // rate-limited 5xx would otherwise be reported as a quota wall.
+  if (body && /rate.?limit/i.test(body)) return 'rate_limit';
+  if (errorType === 'KeyFault') return 'quota';
+  return 'server';
+}
+
+/**
+ * Mark a key as failed according to the error type (C2) and record why.
  * - KeyFault / ServerFault: penalise the key (KeyFault disables immediately)
  * - RequestFault / NetworkFault: no penalisation (bad request, or network
  *   trouble that is not the key's fault)
@@ -461,11 +523,23 @@ export function markKeyFailed(
   state: ProxyState,
   keyLabel: string,
   errorType: ErrorType,
+  info?: KeyFailureInfo,
 ): void {
   if (errorType === 'RequestFault' || errorType === 'NetworkFault') return;
 
   const key = state.keys.find((k) => k.label === keyLabel);
   if (!key) return;
+
+  // Recorded even when the key stays in rotation (ServerFault below the
+  // threshold): this is what explains the state after a later disable.
+  key.lastError = {
+    status: info?.status ?? null,
+    reason: deriveKeyFailureReason(errorType, info?.status, info?.body),
+    at: Date.now(),
+    // The raw body travels to clients in the 503/502 diagnosis; a provider that
+    // echoes the submitted bearer must not leak a working key.
+    detail: info?.body ? redactSecrets(info.body.slice(0, 200)) : null,
+  };
 
   if (errorType === 'KeyFault') {
     // Disable immediately — the key is compromised / rate-limited
@@ -502,6 +576,50 @@ export function markKeySucceeded(state: ProxyState, keyLabel: string): void {
 // ---------------------------------------------------------------------------
 // Status Queries
 // ---------------------------------------------------------------------------
+
+/**
+ * Milliseconds until the key becomes selectable again, or null when nothing
+ * will bring it back (healthy, retired in config, or no cooldown recorded).
+ * A key past its cooldown but not yet lazily revived reports 0 — it is
+ * selectable on the next request, which is not "already selectable" here.
+ * Pure: unlike isKeyAvailable this never revives the key.
+ */
+export function keyRetryAfterMs(
+  state: Pick<ProxyState, 'circuitBreakerThreshold' | 'circuitBreakerCooldownMs'>,
+  key: KeyAvailability,
+  now = Date.now(),
+): number | null {
+  const usable = key.enabled && key.consecutiveFailures < state.circuitBreakerThreshold;
+  if (usable) return null;
+  if (!key.enabled && key.disabledAt !== null) {
+    return Math.max(0, key.disabledAt + state.circuitBreakerCooldownMs - now);
+  }
+  return null;
+}
+
+/**
+ * Per-key state for /health. Labels are already public (X-Proxy-Key-Label);
+ * the credential and the upstream message are not part of this projection.
+ */
+export function describeKeys(state: ProxyState, now = Date.now()): KeyHealthReport[] {
+  return state.keys.map((key) => ({
+    label: key.label,
+    provider: key.provider,
+    enabled: key.enabled,
+    entitled: key.entitled,
+    consecutiveFailures: key.consecutiveFailures,
+    disabledAt: key.disabledAt === null ? null : new Date(key.disabledAt).toISOString(),
+    retryAfterMs: keyRetryAfterMs(state, key, now),
+    lastError: key.lastError
+      ? {
+          status: key.lastError.status,
+          reason: key.lastError.reason,
+          at: new Date(key.lastError.at).toISOString(),
+        }
+      : null,
+    usagePercent: key.usagePercent,
+  }));
+}
 
 // ---------------------------------------------------------------------------
 // Error Classification (C2)
