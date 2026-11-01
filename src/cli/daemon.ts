@@ -19,7 +19,7 @@
 
 import { spawn, execFileSync } from 'node:child_process';
 import chalk from 'chalk';
-import { existsSync, writeFileSync, readFileSync, rmSync, mkdirSync, copyFileSync, createWriteStream, statSync, renameSync, openSync, closeSync } from 'node:fs';
+import { existsSync, writeFileSync, readFileSync, rmSync, mkdirSync, copyFileSync, createWriteStream, statSync, renameSync, openSync, closeSync, chmodSync } from 'node:fs';
 import { resolve as pathResolve, join as pathJoin } from 'node:path';
 import { homedir } from 'node:os';
 import { fileURLToPath } from 'node:url';
@@ -146,7 +146,11 @@ function rotateDaemonLog(): void {
 export function openDaemonLog(): number | null {
   try {
     ensurePidDir();
-    return openSync(DAEMON_LOG, 'a', 0o600);
+    // mode only applies on create; an existing 0644 log from an older version
+    // keeps pino output world-readable unless we chmod it explicitly.
+    const fd = openSync(DAEMON_LOG, 'a', 0o600);
+    chmodSync(DAEMON_LOG, 0o600);
+    return fd;
   } catch {
     return null;
   }
@@ -319,6 +323,11 @@ export async function daemonStart(port?: number, configPath?: string): Promise<v
   rotateDaemonLog();
   // 0600: the file now carries pino output, including upstream error bodies.
   const logStream = createWriteStream(DAEMON_LOG, { flags: 'a', mode: 0o600 });
+  try {
+    chmodSync(DAEMON_LOG, 0o600);
+  } catch {
+    // best effort
+  }
   logStream.on('error', () => { /* daemon.log is diagnostic only */ });
   let stderrBuf = '';
 

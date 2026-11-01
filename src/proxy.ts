@@ -661,7 +661,9 @@ function logUpstreamError(
     logger.warn(
       { requestId, keyLabel: key.label, status, errorType, kind },
       'Upstream returned error: %s',
-      errorBody.slice(0, 200),
+      // Redact before truncating: a 401 that echoes the bearer must not write a
+      // working key into daemon.log.
+      redactSecrets(errorBody).slice(0, 200),
     );
   } else {
     logger.warn(

@@ -9,7 +9,7 @@
  */
 
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
-import { existsSync, mkdirSync, writeFileSync, readFileSync, rmSync, mkdtempSync, statSync, readlinkSync, closeSync } from 'node:fs';
+import { existsSync, mkdirSync, writeFileSync, readFileSync, rmSync, mkdtempSync, statSync, readlinkSync, closeSync, chmodSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { createServer } from 'node:http';
@@ -355,6 +355,20 @@ describe('daemonStart', () => {
     expect(readFileSync(`${logPath}.5`, 'utf-8')).toBe('gen-4');
     expect(existsSync(`${logPath}.6`)).toBe(false);
     expect(statSync(`${logPath}.1`).size).toBeGreaterThan(10 * 1024 * 1024);
+  });
+
+  it('tightens an existing world-readable daemon.log to 0600', async () => {
+    if (process.platform === 'win32') return; // POSIX modes only
+    const dir = join(tempHome, '.config', 'saros');
+    mkdirSync(dir, { recursive: true });
+    const logPath = join(dir, 'daemon.log');
+    writeFileSync(logPath, 'old boot\n');
+    chmodSync(logPath, 0o644);
+
+    const fd = daemon.openDaemonLog();
+    expect(fd).not.toBeNull();
+    expect(statSync(logPath).mode & 0o777).toBe(0o600);
+    closeSync(fd as number);
   });
 
   it('opens daemon.log, 0600, as the child stdout', async () => {
