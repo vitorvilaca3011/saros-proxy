@@ -645,8 +645,8 @@ const FAILURE_CAUSES: Record<KeyFailureReason, string> = {
 
 /** Why a key cannot serve a request, in the 503/502 vocabulary. */
 function unavailableState(report: KeyHealthReport): UnavailableKey['state'] {
-  if (!report.entitled) return 'not_entitled';
   if (report.disabledByConfig) return 'disabled_by_config';
+  if (!report.entitled) return 'not_entitled';
   return 'disabled';
 }
 

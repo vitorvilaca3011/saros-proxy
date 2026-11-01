@@ -713,7 +713,6 @@ describe('createProxyApp — standard proxy pipeline', () => {
     };
     expect(health.keys.find((key) => key.label === 'retired')?.disabledByConfig).toBe(true);
   });
-
   it('forwards GET requests without a body', async () => {
     const fetchMock = vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response('{}', { status: 200 }));
     const app = createProxyApp(makeConfig());
@@ -1347,6 +1346,36 @@ describe('createProxyApp — provider mapping & extra headers', () => {
     // The @commandcode routing suffix is stripped before upstream.
     const body = JSON.parse(String(init.body)) as { model: string };
     expect(body.model).toBe('claude-opus-5');
+  });
+
+  it('never sends a key from another provider when a pin names the provider', async () => {
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockResolvedValue(
+      new Response('{"ok":true}', { status: 200 }),
+    );
+    const app = createProxyApp(makeConfig({
+      keys: [
+        { label: 'cc', key: 'user_cc-key-0001', provider: 'commandcode' },
+        { label: 'oc', key: 'sk-oc-key-0002', provider: 'opencode-go' },
+      ],
+    }));
+
+    const res = await app.request('/zen/go/v1/chat/completions', {
+      method: 'POST',
+      body: JSON.stringify({ model: 'glm-5@opencode-go', messages: [] }),
+      headers: { 'content-type': 'application/json' },
+    });
+
+    expect(res.status).toBe(200);
+    const chatCall = fetchMock.mock.calls.find(([url]) =>
+      String(url).endsWith('/zen/go/v1/chat/completions'),
+    );
+    const init = chatCall?.[1] as RequestInit | undefined;
+    const headers = init?.headers as Headers;
+    // The bearer must belong to the pinned provider — the opencode-go URL with
+    // a commandcode key is a 401 that disables a healthy key.
+    expect(headers.get('authorization')).toBe('Bearer sk-oc-key-0002');
+    const body = JSON.parse(String(init?.body)) as { model: string };
+    expect(body.model).toBe('glm-5');
   });
 
   it('strips the provider suffix and asks for usage in one pass', async () => {

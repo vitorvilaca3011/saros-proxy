@@ -30,7 +30,7 @@ without reading the source.
 | `upstream.timeout` | warn | request timed out | requestId, keyLabel, kind, timeoutMs |
 | `upstream.network_error` | error | connection error | requestId, keyLabel, kind, err |
 | `key.state` | info/warn | a key leaving or re-entering rotation | requestId, keyLabel, provider, enabled, reason (`auth`/`quota`/`rate_limit`/`server`), status, consecutiveFailures/cooldownMs |
-| `request.no_keys` | warn | no key could be selected | requestId, attempt, kind, model, unavailable[{label,reason,status}] |
+| `request.no_keys` | warn | no key could be selected | requestId, attempt, kind, modelId, retryAfterMs, unavailable[{label,reason,status}] |
 | `request.retries_exhausted` | error | every attempt failed | requestId, kind, err |
 | `request.complete` | info | **once per proxied request** (not `/health`, `/v1/models`, 413 or a middleware 429) | requestId, method, path, model, provider, keyLabel, status, durationMs, stream, attempt |
 
