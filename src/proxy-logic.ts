@@ -318,12 +318,20 @@ export function setKeyEntitlement(state: ProxyState, keyLabel: string, entitled:
 // Request-Scoped Key Tracking (C4)
 // ---------------------------------------------------------------------------
 
+/**
+ * Split a model id into its model and its optional `@provider` pin.
+ * `'a@b@c'` → `{ model: 'a@b', provider: 'c' }`; no pin → `provider: null`.
+ */
+function splitModelSuffix(modelId: string): { model: string; provider: string | null } {
+  const at = modelId.lastIndexOf('@');
+  if (at <= 0 || at === modelId.length - 1) return { model: modelId, provider: null };
+  return { model: modelId.slice(0, at), provider: modelId.slice(at + 1) };
+}
+
 /** Parse a trailing '@provider' suffix from a model id ('x@cc' → 'cc'). */
 function parseModelSuffix(modelId: string | undefined): string | null {
   if (!modelId) return null;
-  const at = modelId.lastIndexOf('@');
-  if (at <= 0 || at === modelId.length - 1) return null;
-  return modelId.slice(at + 1);
+  return splitModelSuffix(modelId).provider;
 }
 
 /**
@@ -340,12 +348,20 @@ function makeProviderFilter(
   modelId?: string,
 ): ((provider: string) => boolean) | undefined {
   if (!modelId) return undefined;
+  const { model, provider: pinned } = splitModelSuffix(modelId);
+  // A pin is an explicit user instruction, and providerForKey always routes the
+  // request to the pinned upstream. Selection must therefore stay inside that
+  // provider: the old code handed the raw id (`deepseek@commandcode`) to the
+  // catalogs, every provider answered 'no', the whole pool got excluded and
+  // every pinned request returned 503. Whether the provider can serve the model
+  // is the upstream's call — its error beats a generic 503.
+  if (pinned) return (provider) => provider === pinned;
   const resolver = state.affinityResolver;
   if (!resolver) return undefined;
   const excluded = new Set<string>();
   for (const key of state.keys) {
     if (excluded.has(key.provider)) continue;
-    if (resolver(key.provider, modelId) === 'no') {
+    if (resolver(key.provider, model) === 'no') {
       excluded.add(key.provider);
     }
   }

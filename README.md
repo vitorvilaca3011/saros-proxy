@@ -125,7 +125,9 @@ queryable quota API (CommandCode): their keys report no percentages, but
 #### Circuit Breaker
 
 Keys that return auth/quota errors (`401`, quota `4xx/5xx`) enter a cooldown
-and are lazily re-enabled after it expires. Timeouts and connection errors do
+and are lazily re-enabled after it expires — or immediately by a successful
+response through the same key, which happens when tier 2 shares one key between
+concurrent requests and only one of them fails. Timeouts and connection errors do
 **not** disable keys — they are shared-upstream failures, so Saros keeps
 cycling instead of locking up with "all keys unavailable".
 
@@ -362,7 +364,7 @@ OPENCODE_GO_KEYS="account1:sk-xxx,cc:user_yyy"
 - Clients always speak the canonical OpenCode-Go shapes (`/zen/go/v1/...` or the `/v1/...` alias).
 - When a request is served by a CommandCode key, Saros remaps the route to CommandCode's OpenAI-compatible surface (`/provider/v1/...`) and injects the provider's identity headers — transparent to the client.
 - Models uniquely named by a provider (e.g. `claude-*` or vendor-prefixed ids on CommandCode) are routed to a key of that provider first; other providers remain as fallback.
-- Synced harness configs may list provider-specific models as `model@commandcode`; the suffix selects the provider and is stripped before forwarding.
+- Synced harness configs may list provider-specific models as `model@commandcode`; the suffix selects the provider and is stripped before forwarding. The pin is authoritative: key selection is restricted to that provider, so a pin whose provider cannot serve the model still reaches that upstream and surfaces its error instead of a local 503.
 - The `/health` endpoint reports per-provider key counts under `providers`, and a `keys` array with each key's state: `enabled`, `entitled`, `consecutiveFailures`, `disabledAt`, `retryAfterMs`, and `lastError` (`status` + `reason`: `auth`, `quota`, `rate_limit`, `server`). The credential is never part of the response.
 - When no key can serve a request, the `503` body says which keys are out and why — `keys[]` with `reason`/`lastStatus`/`retryAfterMs`, plus a `causes[]` list (revoked key, exhausted quota, rate limit, missing plan, or a `@provider` pin with no usable key). The legacy `error` field (`All API keys are temporarily unavailable`) is still present.
 - OpenCode-Go requires a stable per-conversation session id (`x-opencode-session`, used for routing and prompt caching). Saros forwards a client-supplied value untouched and derives one from the conversation (model + first user turn) when the client sends none — harnesses that only attach the header on some request paths would otherwise get `400 MissingSessionID`.
@@ -532,7 +534,7 @@ Override with `--config`:
 saros-proxy start --port 3000 --config /path/to/config.yaml
 ```
 
-The PID file is stored at `~/.config/saros/daemon.pid`. The child process runs with `NODE_ENV=production` (JSON logging), and its stderr is appended to `~/.config/saros/daemon.log`.
+The PID file is stored at `~/.config/saros/daemon.pid`. The child process runs with `NODE_ENV=production` (JSON/NDJSON logging), and **both** its stdout (pino) and stderr are appended to `~/.config/saros/daemon.log`. The file rotates at start: past 10 MB it becomes `daemon.log.1` and up to five are kept. Every boot writes an `evt:"boot"` line — version, node, config path, port, key labels/providers, bundled model count — so an empty log now means the daemon never started, not that logging is silent.
 
 `saros-proxy status` checks the PID file first, then falls back to an os-agnostic `GET /health` port probe — so it reports the truth even when the proxy was started outside the daemon (manually, via autostart, or in another session) and no PID file exists. It also prints the enabled harnesses (`configharness` selection) and, from the daemon's `/health` payload, one line per key with its state (`Keys: 1/2 enabled`, then `work [commandcode] — disabled: auth (401), retry in 42s`). `saros-proxy start` refuses to start a second instance when the configured port is already serving.
 

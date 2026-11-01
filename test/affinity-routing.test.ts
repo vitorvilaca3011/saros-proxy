@@ -3,7 +3,7 @@
  * (mixed-provider key pools) and the @provider suffix routing shim.
  */
 import { describe, it, expect } from 'vitest';
-import { createProxyState, selectKeyForRequest, type ProxyState } from '../src/proxy-logic.js';
+import { createProxyState, selectKeyForRequest, failoverRequest, markKeyFailed, type ProxyState } from '../src/proxy-logic.js';
 import {
   parseProviderSuffix,
   stripProviderSuffix,
@@ -100,6 +100,80 @@ describe('affinity-aware key selection', () => {
     const state = makeMixedState(() => 'no');
     const snap = selectKeyForRequest(state, 'r1', 'glm-5');
     expect(snap).not.toBeNull();
+  });
+});
+
+describe('provider pin (@provider) key selection', () => {
+  /**
+   * Mirrors the live catalogs: the resolver sees the raw id, suffix included,
+   * so no catalog recognises it. Before the fix every provider answered 'no'
+   * for a pinned bare id and the filter excluded the whole pool (503).
+   */
+  const catalogLike = (provider: string, modelId: string): 'yes' | 'no' | 'maybe' => {
+    if (modelId.includes('@')) return 'no';
+    const bare = modelId.split('/').pop() ?? modelId;
+    if (bare === 'claude-opus-5') return provider === 'commandcode' ? 'yes' : 'no';
+    return 'yes';
+  };
+
+  it('pins a bare model id to the named provider', () => {
+    const state = makeMixedState(catalogLike);
+    const snap = selectKeyForRequest(state, 'pin-cc', 'deepseek-v4.1-flash@commandcode');
+    expect(snap?.provider).toBe('commandcode');
+  });
+
+  it('pins the inverse provider on a bare id', () => {
+    const state = makeMixedState(catalogLike);
+    const snap = selectKeyForRequest(state, 'pin-oc', 'deepseek-v4.1-flash@opencode-go');
+    expect(snap?.provider).toBe('opencode-go');
+  });
+
+  it('keeps slash-carrying ids working under a pin', () => {
+    const state = makeMixedState(catalogLike);
+    const snap = selectKeyForRequest(state, 'pin-slash', 'deepseek/deepseek-v4-flash-fast@opencode-go');
+    expect(snap?.provider).toBe('opencode-go');
+  });
+
+  it('honours the pin even when the catalog rejects the model', () => {
+    // The pin is an explicit user instruction and providerForKey routes to the
+    // pinned upstream unconditionally, so selection must match it. Whether the
+    // provider can actually serve the model is the upstream's call — and its
+    // error is far more useful than a generic 503.
+    const state = makeMixedState(catalogLike);
+    const snap = selectKeyForRequest(state, 'pin-exclusive', 'claude-opus-5@opencode-go');
+    expect(snap?.provider).toBe('opencode-go');
+  });
+
+  it('returns null when the pinned provider has no key in the pool', () => {
+    const state = makeMixedState(catalogLike);
+    expect(selectKeyForRequest(state, 'pin-unknown', 'deepseek-v4.1-flash@other-provider')).toBeNull();
+  });
+
+  it('keeps the pin during failover instead of crossing providers', () => {
+    const state = makeMixedState(catalogLike);
+    const first = selectKeyForRequest(state, 'fo-1', 'glm-5@opencode-go');
+    expect(first?.provider).toBe('opencode-go');
+
+    // The pinned provider only has one key here; failing over must not reach
+    // for the commandcode key that cannot serve the pinned upstream.
+    expect(failoverRequest(state, 'fo-1')).toBeNull();
+  });
+
+  it('returns null, not a fallback, when every pinned key is out', () => {
+    const state = makeMixedState(catalogLike);
+    markKeyFailed(state, 'oc', 'KeyFault');
+
+    expect(selectKeyForRequest(state, 'pin-out', 'glm-5@opencode-go')).toBeNull();
+  });
+
+  it('keeps cross-provider rotation when no pin is given', () => {
+    const state = makeMixedState(catalogLike);
+    const seen = new Set<string>();
+    for (let i = 0; i < 4; i++) {
+      const snap = selectKeyForRequest(state, `free-${i}`, 'deepseek-v4.1-flash');
+      if (snap) seen.add(snap.provider);
+    }
+    expect(seen.size).toBe(2);
   });
 });
 
