@@ -3,7 +3,7 @@
  * (mixed-provider key pools) and the @provider suffix routing shim.
  */
 import { describe, it, expect } from 'vitest';
-import { createProxyState, selectKeyForRequest, type ProxyState } from '../src/proxy-logic.js';
+import { createProxyState, selectKeyForRequest, failoverRequest, markKeyFailed, type ProxyState } from '../src/proxy-logic.js';
 import {
   parseProviderSuffix,
   stripProviderSuffix,
@@ -147,6 +147,23 @@ describe('provider pin (@provider) key selection', () => {
   it('returns null when the pinned provider has no key in the pool', () => {
     const state = makeMixedState(catalogLike);
     expect(selectKeyForRequest(state, 'pin-unknown', 'deepseek-v4.1-flash@other-provider')).toBeNull();
+  });
+
+  it('keeps the pin during failover instead of crossing providers', () => {
+    const state = makeMixedState(catalogLike);
+    const first = selectKeyForRequest(state, 'fo-1', 'glm-5@opencode-go');
+    expect(first?.provider).toBe('opencode-go');
+
+    // The pinned provider only has one key here; failing over must not reach
+    // for the commandcode key that cannot serve the pinned upstream.
+    expect(failoverRequest(state, 'fo-1')).toBeNull();
+  });
+
+  it('returns null, not a fallback, when every pinned key is out', () => {
+    const state = makeMixedState(catalogLike);
+    markKeyFailed(state, 'oc', 'KeyFault');
+
+    expect(selectKeyForRequest(state, 'pin-out', 'glm-5@opencode-go')).toBeNull();
   });
 
   it('keeps cross-provider rotation when no pin is given', () => {

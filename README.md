@@ -357,7 +357,7 @@ OPENCODE_GO_KEYS="account1:sk-xxx,cc:user_yyy"
 - Clients always speak the canonical OpenCode-Go shapes (`/zen/go/v1/...` or the `/v1/...` alias).
 - When a request is served by a CommandCode key, Saros remaps the route to CommandCode's OpenAI-compatible surface (`/provider/v1/...`) and injects the provider's identity headers — transparent to the client.
 - Models uniquely named by a provider (e.g. `claude-*` or vendor-prefixed ids on CommandCode) are routed to a key of that provider first; other providers remain as fallback.
-- Synced harness configs may list provider-specific models as `model@commandcode`; the suffix selects the provider and is stripped before forwarding.
+- Synced harness configs may list provider-specific models as `model@commandcode`; the suffix selects the provider and is stripped before forwarding. The pin is authoritative: key selection is restricted to that provider, so a pin whose provider cannot serve the model still reaches that upstream and surfaces its error instead of a local 503.
 - The `/health` endpoint reports per-provider key counts under `providers`.
 - OpenCode-Go requires a stable per-conversation session id (`x-opencode-session`, used for routing and prompt caching). Saros forwards a client-supplied value untouched and derives one from the conversation (model + first user turn) when the client sends none — harnesses that only attach the header on some request paths would otherwise get `400 MissingSessionID`.
 - Usage-based weighted rotation applies to providers with a queryable usage API (OpenCode-Go). CommandCode keys participate in rotation without usage data, but their token consumption is tracked per key and shown by `saros-proxy usage` (see [Token Accounting](#token-accounting)).
