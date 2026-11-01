@@ -48,7 +48,8 @@ export function formatKeyBlock(health: Record<string, unknown> | undefined): str
     `Keys: ${summary}`,
     ...entries.map((entry) => {
       const provider = typeof entry.provider === 'string' ? chalk.dim(` [${entry.provider}]`) : '';
-      return `  ${String(entry.label)}${provider}${formatKeyState(entry)}`;
+      const encrypted = entry.encrypted === true ? chalk.dim(' [encrypted]') : '';
+      return `  ${String(entry.label)}${provider}${encrypted}${formatKeyState(entry)}`;
     }),
   ];
 }

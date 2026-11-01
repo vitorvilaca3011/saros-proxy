@@ -19,6 +19,12 @@ export interface KeyEntry {
    * never counted as a failure. Absent means enabled.
    */
   enabled?: boolean;
+  /**
+   * Set in memory by config loading when the value was an `enc:` envelope.
+   * Never written by `keys encrypt` (the envelope itself is the on-disk mark);
+   * reported by /health so operators can see which keys are encrypted.
+   */
+  encrypted?: boolean;
 }
 
 /**

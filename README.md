@@ -386,33 +386,77 @@ CC_KEY=user_your-token npx tsx scripts/live-identify-check.ts
 
 ### API Key Encryption
 
-Keys can be encrypted at rest using AES-256-GCM with scrypt key derivation. Encrypted keys look like `enc:scrypt:...` in `config.yaml` and get decrypted at startup using the `OPENCODE_GO_ENCRYPTION_KEY` environment variable.
+Keys can be stored as `enc:v1:` envelopes instead of plaintext. An envelope is
+`enc:v1:<salt>.<nonce>.<tag>.<ciphertext>`: scrypt (N=2^15, r=8, p=1, 32 B)
+derives an AES-256-GCM key, and the AAD binds the envelope version and the key
+label, so a ciphertext copied onto another key entry fails authentication.
 
-**Setup with encryption:**
+**Encrypt existing plaintext keys** (the old file is copied to
+`config.yaml.backup` once; a second run is a no-op; providers are inferred and
+persisted so encrypted keys still route correctly):
+
 ```bash
-npm run setup
-# Choose to encrypt keys and enter a master key (min 16 chars)
+saros-proxy keys encrypt
+# or: saros-proxy keys encrypt --config /etc/saros/config.yaml
 ```
 
-**Running with encrypted keys:**
+**Passphrase sources, first match wins:**
+
+1. `SAROS_PASSPHRASE` — for systemd, Docker and CI.
+2. The OS secret store, accessed only through the platform CLI:
+   - Linux: `secret-tool lookup service saros-proxy account "$USER"`
+   - macOS: `security find-generic-password -s saros-proxy -a "$USER" -w`
+   - Windows: PowerShell DPAPI (`CurrentUser`) over
+     `%APPDATA%\saros\secret.dpapi`
+3. A hidden TTY prompt — foreground `saros-proxy serve` only, never the daemon
+   child and never when stdin is not a TTY.
+
 ```bash
-export OPENCODE_GO_ENCRYPTION_KEY="your-master-key"
-npx tsx src/index.ts
+saros-proxy secret set      # store the passphrase through the OS CLI
+saros-proxy secret status   # which source would win + whether the store is populated
+saros-proxy serve           # foreground; may prompt if no source is available
 ```
 
-**Docker with encrypted keys:**
-```yaml
-# docker-compose.yml
-environment:
-  - OPENCODE_GO_ENCRYPTION_KEY=your-master-key
+`secret set` never writes the passphrase to a file and never prints it. On
+Linux it is stored with `secret-tool store --label="saros-proxy passphrase"
+service saros-proxy account "$USER"`; on macOS with `security
+add-generic-password -U -s saros-proxy -a "$USER" -w`; on Windows PowerShell
+`ProtectedData.Protect(..., 'CurrentUser')` writes the blob.
+
+**systemd-creds recipe** (keeps the passphrase out of the unit file and the
+environment of the shell):
+
+```bash
+# One-time: encrypt stdin into a host+user-bound credential.
+systemd-creds encrypt --name=saros-passphrase --with-key=host+user \
+  /dev/stdin /etc/saros/passphrase.cred
 ```
 
-**Notes:**
-- Encrypted keys use AES-256-GCM with scrypt KDF (N=16384, r=8, p=1)
-- Each key has its own random salt and IV
-- Plaintext keys (`sk-...`) still work — backward compatible
-- `OPENCODE_GO_KEYS` env var is always plaintext (for CI/CD)
-- If keys are encrypted but no `OPENCODE_GO_ENCRYPTION_KEY` is set, startup fails with a clear error
+```ini
+# /etc/systemd/system/saros-proxy.service
+[Service]
+LoadCredentialEncrypted=saros-passphrase:/etc/saros/passphrase.cred
+ExecStart=/bin/sh -c 'SAROS_PASSPHRASE="$(cat "$CREDENTIALS_DIRECTORY/saros-passphrase")" exec /usr/bin/saros-proxy serve'
+```
+
+**Behaviour and compatibility:**
+
+- Plaintext keys keep working; startup logs a loud warning and
+  `keys encrypt` fixes them.
+- A config with `enc:v1:` values and no available source exits `1` with a
+  message naming the three options. A wrong passphrase also exits `1` and
+  names the key label — never the key or the passphrase.
+- `GET /health` reports `"encrypted": true` per key; it never returns the
+  ciphertext or the plaintext.
+- Legacy `enc:scrypt:` keys still decrypt with `OPENCODE_GO_ENCRYPTION_KEY`
+  (with a warning); `keys encrypt` leaves them untouched.
+- `OPENCODE_GO_KEYS` is always plaintext (CI use) and is not covered by the
+  warning.
+- Docker can pass `SAROS_PASSPHRASE` or mount a config whose passphrase comes
+  from a Docker secret; the container has no OS keyring of its own.
+
+The honest threat model — what each option protects and what it does not — is
+in [Security](#security).
 
 ### CLI Flags
 
@@ -806,6 +850,45 @@ test/
 ## Security
 
 For vulnerability reporting, see [SECURITY.md](SECURITY.md).
+
+### Threat model for API keys at rest
+
+The envelope protects the key **file**. It does not make a credential
+unreachable by code running as the same user — every option below ultimately
+hands the plaintext to the proxy process, which that code can inspect.
+
+| Scenario | Plaintext config | `enc:v1` + `SAROS_PASSPHRASE` | `enc:v1` + OS store | `enc:v1` + TTY prompt |
+|---|---|---|---|---|
+| Config file copied to another machine/user | No protection | Protected (passphrase not in the file) | Protected (DPAPI/Keychain is user-bound) | Protected |
+| Dotfile sync / cloud backup / git accident | Leaks | Protected | Protected | Protected |
+| Backup of the config directory only | Leaks | Protected | Protected | Protected |
+| Shoulder surfing the config file | Leaks | Protected | Protected | Protected |
+| Another local process **running as the same user** | Reads the file | Can read the env (`/proc/<pid>/environ`) | Can call the same OS CLI / read the same DPAPI blob | Can read the terminal or memory |
+| Malware running as the same user | Reads the file | No protection | No protection | No protection |
+| Root / Administrator | Reads the file | No protection | No protection (may impersonate the user) | No protection |
+| Offline brute force of a stolen config | N/A | scrypt N=2^15 slows guessing; strength = passphrase entropy | Same | Same |
+| Passphrase visible in `ps`/shell history | N/A | Avoid `SAROS_PASSPHRASE=… command`; export it or use systemd-creds | `secret set` on macOS passes `-w` on the command line briefly | Typed hidden, not echoed |
+
+Practical guidance:
+
+- Use the OS store for an interactive workstation; it avoids the passphrase
+  being present in every child process environment.
+- Use `SAROS_PASSPHRASE` for containers/systemd; prefer `systemd-creds` (recipe
+  above) over a unit-file `Environment=` line.
+- The passphrase must be high entropy and independent from the API keys; the
+  envelope only makes an offline attack expensive, not impossible.
+- `saros-proxy secret status` shows which source would win and never prints a
+  value.
+
+### Other controls
+
+- HTTPS-only upstream (SSRF prevention)
+- API key masking in logs, plus envelope/passphrase redaction patterns and
+  pino redact paths for `passphrase`, `secret`, `secretValue`, `masterKey`,
+  `encryptionKey` and `SAROS_PASSPHRASE`
+- CORS origin validation
+- Rate limiting: 100 req/min per IP (hardcoded)
+- Non-root Docker container
 
 ---
 

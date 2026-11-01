@@ -54,7 +54,7 @@ describe('formatKeyBlock', () => {
           retryAfterMs: 42_000,
           lastError: { status: 401, reason: 'auth' },
         },
-        { label: 'home', provider: 'opencode-go', enabled: true, entitled: true },
+        { label: 'home', provider: 'opencode-go', enabled: true, entitled: true, encrypted: true },
       ],
     });
 
@@ -62,8 +62,10 @@ describe('formatKeyBlock', () => {
     expect(lines[0]).toContain('1/2 enabled');
     expect(lines[1]).toContain('work');
     expect(lines[1]).toContain('[commandcode]');
+    expect(lines[1]).not.toContain('[encrypted]');
     expect(lines[1]).toContain('401');
     expect(lines[2]).toContain('home');
+    expect(lines[2]).toContain('[encrypted]');
     expect(lines[2]).not.toContain('disabled');
   });
 

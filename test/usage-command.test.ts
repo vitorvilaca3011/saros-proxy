@@ -37,6 +37,7 @@ vi.mock('../src/token-usage.js', async (importOriginal) => {
 });
 
 import { runUsageCommand } from '../src/cli/usage.js';
+import { SecretSourceError } from '../src/secrets/source.js';
 import { loadConfig } from '../src/config.js';
 import type { ProxyConfig } from '../src/config.js';
 
@@ -415,5 +416,23 @@ describe('runUsageCommand', () => {
     const err = vi.spyOn(console, 'error').mockImplementation(() => {});
     expect(await runUsageCommand()).toBe(1);
     expect(err).toHaveBeenCalledWith(expect.stringContaining('Failed to load config'), 'nope');
+  });
+
+  it('falls back to local totals when encrypted keys have no passphrase', async () => {
+    vi.mocked(loadConfig).mockImplementation(() => {
+      throw new SecretSourceError('Encrypted API keys found, but no passphrase source is available.');
+    });
+    mkdirSync(tmpDir, { recursive: true });
+    writeFileSync(
+      join(tmpDir, 'model-stats.json'),
+      JSON.stringify({ since: Date.now(), counts: { 'gpt-test': 3 } }),
+      'utf-8',
+    );
+    const log = vi.spyOn(console, 'log').mockImplementation(() => {});
+    expect(await runUsageCommand()).toBe(0);
+    const out = log.mock.calls.map((c) => String(c[0])).join('\n');
+    expect(out).toContain('local token totals only');
+    expect(out).toContain('SAROS_PASSPHRASE');
+    expect(out).toContain('Most used models');
   });
 });

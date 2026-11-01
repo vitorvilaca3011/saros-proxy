@@ -9,6 +9,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`enc:v1:` key envelopes with a real secret source (#85).** API keys can
+  now live in `config.yaml` as
+  `enc:v1:<b64salt>.<b64nonce>.<b64tag>.<b64ciphertext>` (scrypt N=2^15, r=8,
+  p=1 → AES-256-GCM, AAD bound to the version and key label). The passphrase
+  is resolved from `SAROS_PASSPHRASE`, then the OS secret store through the
+  platform CLI (`secret-tool` on Linux, `security` on macOS, PowerShell DPAPI
+  over `%APPDATA%\saros\secret.dpapi` on Windows), then a hidden TTY prompt in
+  foreground `serve` only. No runtime dependency and no native module.
+- **`saros-proxy secret set|status` and `saros-proxy keys encrypt`.**
+  `keys encrypt` rewrites plaintext keys as envelopes, infers/persists each
+  key's `provider`, backs the old file up to `config.yaml.backup` (0600) once,
+  and is idempotent. `secret status` reports the winning source without ever
+  printing a value.
+- **`/health` reports `encrypted: true` per key**, and the status block prints
+  `[encrypted]`; neither the ciphertext nor the plaintext is exposed.
+- **Loud plaintext-key warning at boot** (`evt:"security.plaintext-keys"`).
+- **Redaction for envelopes and passphrases**: `enc:v1:` / `enc:scrypt:`
+  patterns plus `passphrase`, `secret`, `secretValue`, `masterKey`,
+  `encryptionKey` and `SAROS_PASSPHRASE` pino paths.
+- README threat-model table, per-OS store commands and a `systemd-creds`
+  recipe; LLM_INSTRUCTIONS mirrored.
 - **`X-Proxy-Provider` response header** on 2xx responses served by an
   upstream key: `opencode-go` or `commandcode`, taken from the key's normalized
   `provider` (an explicit `provider:` in config wins over the credential

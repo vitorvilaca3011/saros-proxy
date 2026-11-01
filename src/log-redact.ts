@@ -13,6 +13,13 @@ const SECRET_PATTERNS: Array<[RegExp, string]> = [
   [/\bBearer\s+[A-Za-z0-9._~+/=-]{4,}/gi, 'Bearer [redacted]'],
   // Provider key shapes used by saros: sk-…, oc_sk_…, user_… .
   [/\b(?:sk-|oc_sk_|user_)[A-Za-z0-9._-]{4,}/g, '[redacted-key]'],
+  // Envelopes must never reach a log line, even when a caller includes the
+  // config entry verbatim.
+  [/\benc:v1:[A-Za-z0-9+/=._-]+/g, '[redacted-envelope]'],
+  [/\benc:scrypt:[A-Za-z0-9+/=:]+/g, '[redacted-envelope]'],
+  // Passphrase-shaped assignments pasted into an error body or command line.
+  [/\bSAROS_PASSPHRASE\s*=\s*\S+/g, 'SAROS_PASSPHRASE=[redacted]'],
+  [/\bOPENCODE_GO_ENCRYPTION_KEY\s*=\s*\S+/g, 'OPENCODE_GO_ENCRYPTION_KEY=[redacted]'],
 ];
 
 /** Mask credential-looking substrings in a free-form string. */

@@ -14,6 +14,7 @@ import { fetchKeyUsage } from '../usage-client.js';
 import { getProvider, inferProvider } from '../providers/index.js';
 import { getModelStatsPath } from '../model-stats.js';
 import { getTokenUsagePath, type KeyTokenUsage } from '../token-usage.js';
+import { SecretSourceError } from '../secrets/source.js';
 
 interface ModelStatsFile {
   since?: number;
@@ -133,6 +134,20 @@ export async function runUsageCommand(): Promise<number> {
   try {
     config = loadConfig();
   } catch (err) {
+    if (err instanceof SecretSourceError) {
+      console.log(
+        chalk.yellow(
+          '· Encrypted keys need a passphrase; showing local token totals only.',
+        ),
+      );
+      console.log(
+        chalk.dim(
+          '  Set SAROS_PASSPHRASE, run `saros-proxy secret set`, or run `saros-proxy serve` in a terminal.',
+        ),
+      );
+      printModelStats();
+      return 0;
+    }
     console.error('Failed to load config:', err instanceof Error ? err.message : String(err));
     return 1;
   }
