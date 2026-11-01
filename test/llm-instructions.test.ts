@@ -25,6 +25,7 @@ import { testProxy } from '../src/cli/setup.js';
 import { encryptKey, isEncryptedKey } from '../src/key-encryption.js';
 import { updateOpencodeConfig } from '../src/cli/opencode-config.js';
 import { validateConfig } from '../src/config.js';
+import { printHelp } from '../src/cli/help.js';
 
 // ---------------------------------------------------------------------------
 // Read LLM_INSTRUCTIONS.md once at module scope
@@ -409,6 +410,30 @@ describe('LLM Instructions Smoke Test', () => {
   // -----------------------------------------------------------------------
   // Reference: Config Options
   // -----------------------------------------------------------------------
+
+  describe('Reference: CLI commands named in the doc', () => {
+    it('only names subcommands that printHelp lists', () => {
+      const lines: string[] = [];
+      const spy = vi.spyOn(console, 'log').mockImplementation((...args: unknown[]) => {
+        lines.push(args.map((arg) => String(arg)).join(' '));
+      });
+      printHelp();
+      spy.mockRestore();
+      const help = lines.join('\n');
+
+      const mentioned = new Set(
+        [...LLM_INSTRUCTIONS.matchAll(/saros-proxy ([a-z][a-z-]*)/g)].map((match) => match[1]),
+      );
+      expect(mentioned.size).toBeGreaterThan(0);
+      for (const sub of mentioned) {
+        // A documented command that does not exist silently falls through to
+        // the overview and exits 0 — the drift this test exists to catch.
+        expect(help, `documented but missing from printHelp: saros-proxy ${sub}`).toMatch(
+          new RegExp(`\\n\\s+${sub}\\b`),
+        );
+      }
+    });
+  });
 
   describe('Reference: Config Options', () => {
     it('documents all required config option names in LLM_INSTRUCTIONS.md', () => {
