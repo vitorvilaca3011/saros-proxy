@@ -14,11 +14,12 @@ import { serve } from '@hono/node-server';
 import type { ServerType } from '@hono/node-server';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { loadConfig, getDefaultConfigPath, type ProxyConfig } from './config.js';
+import { loadConfig, resolveConfigPath, type ProxyConfig } from './config.js';
 import { createProxyApp } from './proxy.js';
 import { flushModelStats } from './model-stats.js';
 import { flushTokenUsage } from './token-usage.js';
 import { logger, maskKey } from './logger.js';
+import { redactSecrets } from './log-redact.js';
 import { FORCE_SHUTDOWN_TIMEOUT_MS } from './constants.js';
 import { daemonStart, daemonStop, daemonStatus, daemonRestart } from './cli/daemon.js';
 import { runUsageCommand } from './cli/usage.js';
@@ -37,6 +38,9 @@ import { getCachedProbe, setCachedProbe } from './probe-cache.js';
 import type { ModelProbe } from './probe-cache.js';
 import { loadModelsCatalog } from './models-catalog.js';
 import { getVersion } from './cli/overview.js';
+import { runSecretCommand } from './cli/secret.js';
+import { runKeysCommand } from './cli/keys.js';
+import { buildBootLog, prepareBootPassphrase } from './secrets/boot.js';
 import chalk from 'chalk';
 import { printHelp } from './cli/help.js';
 import { readFileSync } from 'node:fs';
@@ -281,6 +285,10 @@ if (subcommand === 'start') {
   process.exit(0);
 } else if (subcommand === 'usage') {
   process.exit(await runUsageCommand());
+} else if (subcommand === 'secret') {
+  process.exit(await runSecretCommand(process.argv.slice(3)));
+} else if (subcommand === 'keys') {
+  process.exit(await runKeysCommand(process.argv.slice(3)));
 } else if (subcommand === 'serve') {
   // -----------------------------------------------------------------------
   // --port/--config are picked up by loadConfig()'s CLI-arg parsing.
@@ -288,9 +296,14 @@ if (subcommand === 'start') {
 
   let config: ProxyConfig;
   try {
-    config = loadConfig();
+    const passphrase = await prepareBootPassphrase();
+    config = loadConfig(undefined, { passphrase });
   } catch (err) {
-    logger.error({ err }, 'Failed to load configuration');
+    // Keep the multi-line guidance (env/store/TTY options) but mask any
+    // credential-shaped substring before it reaches a terminal or the log.
+    const message = redactSecrets(err instanceof Error ? err.message : String(err));
+    console.error(chalk.red(`✗ ${message}`));
+    logger.error({ evt: 'boot.failed' }, 'Failed to load configuration: %s', message);
     process.exit(1);
   }
 
@@ -301,24 +314,14 @@ if (subcommand === 'start') {
 
   // One structured boot line, so daemon.log answers "did it start, from which
   // config, with which keys?" without any traffic. Never carries the key.
-  const configArgIndex = process.argv.indexOf('--config');
-  const configPath =
-    configArgIndex !== -1 && process.argv[configArgIndex + 1]
-      ? process.argv[configArgIndex + 1]
-      : getDefaultConfigPath();
   logger.info(
-    {
-      evt: 'boot',
+    buildBootLog(config, resolveConfigPath(), {
       version: getVersion(),
       node: process.version,
       platform: process.platform,
-      configPath,
-      port: config.port,
-      host: config.host,
-      keys: config.keys.map((k) => ({ label: k.label, provider: k.provider })),
       bundledModels: Object.keys(loadModelsCatalog()).length,
       logLevel: process.env.LOG_LEVEL ?? 'info',
-    },
+    }),
     'saros-proxy %s starting on %s:%d',
     getVersion(),
     config.host,

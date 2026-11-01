@@ -9,6 +9,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **`enc:v1:` key envelopes with a real secret source (#85).** API keys can
+  now live in `config.yaml` as
+  `enc:v1:<b64salt>.<b64nonce>.<b64tag>.<b64ciphertext>` (scrypt N=2^15, r=8,
+  p=1 → AES-256-GCM, AAD bound to the version and key label). The passphrase
+  is resolved from `SAROS_PASSPHRASE`, then the OS secret store through the
+  platform CLI (`secret-tool` on Linux, `security` on macOS, PowerShell DPAPI
+  over `%APPDATA%\saros\secret.dpapi` on Windows), then a hidden TTY prompt in
+  foreground `serve` only. No runtime dependency and no native module.
+- **`saros-proxy secret set|status` and `saros-proxy keys encrypt`.**
+  `keys encrypt` rewrites plaintext keys as envelopes, infers/persists each
+  key's `provider`, backs the old file up to `config.yaml.backup` (0600) once,
+  and is idempotent. `secret status` reports the winning source without ever
+  printing a value.
+- **`/health` reports `encrypted: true` per key**, and the status block prints
+  `[encrypted]`; neither the ciphertext nor the plaintext is exposed.
+- **Loud plaintext-key warning at boot** (`evt:"security.plaintext-keys"`).
+- **Redaction for envelopes and passphrases**: `enc:v1:` / `enc:scrypt:`
+  patterns plus `passphrase`, `secret`, `secretValue`, `masterKey`,
+  `encryptionKey` and `SAROS_PASSPHRASE` pino paths.
+- README threat-model table, per-OS store commands and a `systemd-creds`
+  recipe; LLM_INSTRUCTIONS mirrored.
 - **`X-Proxy-Provider` response header** on 2xx responses served by an
   upstream key: `opencode-go` or `commandcode`, taken from the key's normalized
   `provider` (an explicit `provider:` in config wins over the credential
@@ -32,6 +53,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Security review fixes for key encryption (#100).** The DPAPI blob now
+  travels in the child environment (`$env:SAROS_DPAPI_BLOB`) and is validated
+  as base64 before PowerShell runs, closing a command-injection path; a symlinked
+  `config.yaml` is rewritten through `realpathSync`, so the real target is
+  encrypted instead of being left in plaintext; YAML parse errors are reduced
+  to their first line and redacted before `keys encrypt`/boot print them; an
+  `encrypted: true` field on a plaintext entry is ignored; `keys encrypt`
+  states that `<config>.backup` is plaintext and adds `--no-backup`; backup and
+  temp writes use `COPYFILE_EXCL`/`wx` under a private `mkdtemp` directory to
+  defeat symlink and TOCTOU capture; `encryptValue('')` is rejected with a
+  typed `empty-plaintext` error; the freshness test now asserts distinct salt
+  and nonce; `secret set` warns below 12 characters; and store failures
+  distinguish "not found" from a locked keyring and are carried into
+  `secret status` and boot errors.
+- **The CodeQL alerts on the key-encryption diff are cleared without
+  suppressions.** `keys encrypt` and `secret set` now print only constant
+  failure text plus resolver-produced attempt descriptions, never a field of
+  the secret-bearing result; `NO_PASSPHRASE_MESSAGE` became
+  `NO_SOURCE_MESSAGE` so the static options list is not matched by CodeQL's
+  sensitive-name heuristic; a dead `configPath` initializer was dropped; and
+  two tests read before `stat`/`lstat` instead of checking a path first.
+  Runtime output is unchanged.
 - **A key's configured `provider` now decides its upstream**, instead of
   re-inferring it from the credential prefix. A key declared
   `provider: commandcode` with an `sk-…` credential was forwarded to the

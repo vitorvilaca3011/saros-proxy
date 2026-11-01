@@ -45,6 +45,8 @@ interface ApiKey {
    * `enabled` so a success (or a cooldown) can never put it back in rotation.
    */
   disabledByConfig: boolean;
+  /** True when the credential arrived as an `enc:` envelope in config. */
+  encrypted: boolean;
 }
 
 /** Why a key is out of rotation, derived from the upstream verdict. */
@@ -72,8 +74,10 @@ export interface KeyHealthReport {
   provider: string;
   enabled: boolean;
   entitled: boolean;
-  /** True when the key is retired in config (`enabled: false`). */
+  /** True when the key was retired in config (`enabled: false`). */
   disabledByConfig: boolean;
+  /** True when the credential is stored as an `enc:` envelope, never its value. */
+  encrypted: boolean;
   consecutiveFailures: number;
   disabledAt: string | null;
   retryAfterMs: number | null;
@@ -143,7 +147,13 @@ export type ErrorType = 'KeyFault' | 'RequestFault' | 'ServerFault' | 'NetworkFa
 // ---------------------------------------------------------------------------
 
 export function createProxyState(
-  keys: Array<{ label: string; key: string; provider?: string; enabled?: boolean }>,
+  keys: Array<{
+    label: string;
+    key: string;
+    provider?: string;
+    enabled?: boolean;
+    encrypted?: boolean;
+  }>,
   options?: {
     circuitBreakerThreshold?: number;
     circuitBreakerCooldownMs?: number;
@@ -163,6 +173,7 @@ export function createProxyState(
       currentWeight: 0,
       lastError: null,
       disabledByConfig: k.enabled === false,
+      encrypted: k.encrypted === true,
     })),
     currentIndex: 0,
     circuitBreakerThreshold: options?.circuitBreakerThreshold ?? 3,
@@ -621,6 +632,7 @@ export function describeKeys(state: ProxyState, now = Date.now()): KeyHealthRepo
     enabled: key.enabled,
     entitled: key.entitled,
     disabledByConfig: key.disabledByConfig,
+    encrypted: key.encrypted,
     consecutiveFailures: key.consecutiveFailures,
     disabledAt: key.disabledAt === null ? null : new Date(key.disabledAt).toISOString(),
     retryAfterMs: keyRetryAfterMs(state, key, now),

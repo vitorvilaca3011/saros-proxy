@@ -313,7 +313,12 @@ export async function daemonStart(port?: number, configPath?: string): Promise<v
 
   // Spawn detached child (no console window on Windows)
   // Read env vars from registry if not in process.env (Windows User-scope fix)
-  const env: Record<string, string | undefined> = { ...process.env, NODE_ENV: 'production' };
+  const env: Record<string, string | undefined> = {
+    ...process.env,
+    NODE_ENV: 'production',
+    // The child has no terminal: never try the TTY passphrase prompt there.
+    SAROS_DAEMON: '1',
+  };
   const encKey = getEnv('OPENCODE_GO_ENCRYPTION_KEY');
   if (encKey) env.OPENCODE_GO_ENCRYPTION_KEY = encKey;
 

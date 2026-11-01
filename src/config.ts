@@ -7,7 +7,16 @@ import { homedir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { parse as parseYaml } from 'yaml';
 import { logger, maskKey } from './logger.js';
+import { redactErrorMessage } from './log-redact.js';
 import { decryptKey, isEncryptedKey } from './key-encryption.js';
+import { decryptValue, isEnvelope } from './secrets/envelope.js';
+import {
+  NO_SOURCE_MESSAGE,
+  SecretSourceError,
+  decryptFailureMessage,
+  readEnvPassphrase,
+  readStorePassphrase,
+} from './secrets/source.js';
 import {
   DEFAULT_PORT,
   DEFAULT_HOST,
@@ -45,6 +54,15 @@ interface YamlConfig {
   requestTimeoutMs?: number;
   allowedOrigins?: string[];
   keys?: KeyEntry[];
+}
+
+export interface LoadConfigOptions {
+  /**
+   * Passphrase already resolved by a foreground `serve` (which may have used
+   * the TTY prompt). When absent, loading uses SAROS_PASSPHRASE, then the OS
+   * store; it never prompts, so reporting commands cannot hang.
+   */
+  passphrase?: string;
 }
 
 /**
@@ -109,7 +127,7 @@ function normalizeKeyEntry(entry: KeyEntry): KeyEntry {
   if (entry.enabled === undefined) return { ...entry, provider };
   if (typeof entry.enabled !== 'boolean') {
     logger.warn('Key "%s": "enabled" must be true or false — ignoring it', entry.label);
-    return { label: entry.label, key: entry.key, provider };
+    return { ...entry, enabled: undefined, provider };
   }
   return { ...entry, provider };
 }
@@ -244,22 +262,20 @@ export function validateConfig(config: Partial<ProxyConfig>): ProxyConfig {
  *   3. Environment variables
  *   4. Hardcoded defaults
  */
-export function loadConfig(configPath?: string): ProxyConfig {
+export function loadConfig(configPath?: string, options: LoadConfigOptions = {}): ProxyConfig {
   const cliArgs = parseCliArgs();
   const config = getBaseConfig();
 
   applyEnvConfig(config);
 
-  const yamlPath = resolveYamlPath(cliArgs.config, configPath);
+  const yamlPath = resolveConfigPath(configPath);
   const yaml = loadYamlOverrides(yamlPath);
-  if (yaml) applyYamlConfig(config, yaml);
-
-  const encryptionKey = process.env.OPENCODE_GO_ENCRYPTION_KEY;
-  if (encryptionKey) {
-    decryptConfigSecrets(config, encryptionKey);
-  } else {
-    assertNoEncryptedSecrets(config);
+  if (yaml) {
+    applyYamlConfig(config, yaml);
+    warnPlaintextKeys(yaml, yamlPath);
   }
+
+  resolveEncryptedKeys(config, options.passphrase);
 
   applyCliOverrides(config, cliArgs);
 
@@ -320,6 +336,15 @@ function resolveYamlPath(cliConfigArg: string | undefined, explicitPath: string 
   return defaultPath;
 }
 
+/**
+ * The path `loadConfig` would read, honouring `--config` and falling back to
+ * the OS config directory (or ./config.yaml when that is all that exists).
+ * Exported so `keys encrypt` rewrites the same file the proxy reads.
+ */
+export function resolveConfigPath(explicitPath?: string): string {
+  return resolveYamlPath(parseCliArgs().config, explicitPath);
+}
+
 function loadYamlOverrides(yamlPath: string): YamlConfig | null {
   if (!existsSync(yamlPath)) {
     logger.info('No config file found at %s, using env/defaults', yamlPath);
@@ -331,7 +356,8 @@ function loadYamlOverrides(yamlPath: string): YamlConfig | null {
     logger.info('Loaded config from %s', yamlPath);
     return yaml;
   } catch (err) {
-    logger.error({ err }, 'Failed to parse config file %s', yamlPath);
+    // YAMLParseError.message embeds the offending line — possibly a key.
+    logger.error('Failed to parse config file %s: %s', yamlPath, redactErrorMessage(err));
     return null;
   }
 }
@@ -348,33 +374,88 @@ function applyYamlConfig(config: ProxyConfig, yaml: YamlConfig): void {
   if (yaml.keys && yaml.keys.length > 0) config.keys = yaml.keys;
 }
 
-function decryptConfigSecrets(config: ProxyConfig, encryptionKey: string): void {
-  config.keys = config.keys.map((k) => decryptApiKeyIfNeeded(k, encryptionKey));
+/**
+ * Warn once at load time when the YAML file still holds plaintext credentials.
+ * Env-provided keys (`OPENCODE_GO_KEYS`) are plaintext by design and are not
+ * part of this warning.
+ */
+function warnPlaintextKeys(yaml: YamlConfig, yamlPath: string): void {
+  if (!Array.isArray(yaml.keys)) return;
+  const hasPlaintext = yaml.keys.some(
+    (entry) =>
+      typeof entry?.key === 'string' && !isEnvelope(entry.key) && !isEncryptedKey(entry.key),
+  );
+  if (!hasPlaintext) return;
+  logger.warn(
+    { evt: 'security.plaintext-keys' },
+    'API keys are stored in plaintext in %s — run `saros-proxy keys encrypt` to encrypt them',
+    yamlPath,
+  );
 }
 
-function decryptApiKeyIfNeeded(
-  entry: { label: string; key: string },
-  encryptionKey: string,
-): { label: string; key: string } {
-  if (!isEncryptedKey(entry.key)) return entry;
-  try {
-    return { ...entry, key: decryptKey(entry.key, encryptionKey) };
-  } catch (err) {
-    logger.error(
-      'Failed to decrypt key "%s": %s',
-      entry.label,
-      err instanceof Error ? err.message : String(err),
-    );
-    throw new Error(`Failed to decrypt API key "${entry.label}" — check OPENCODE_GO_ENCRYPTION_KEY`);
+/** Plaintext entries must not be able to claim `encrypted: true` in YAML. */
+function withoutEncryptedFlag(entry: KeyEntry): KeyEntry {
+  const copy = { ...entry };
+  delete copy.encrypted;
+  return copy;
+}
+
+/** Resolve every `enc:` entry before validation; a failure aborts boot. */
+function resolveEncryptedKeys(config: ProxyConfig, explicitPassphrase: string | undefined): void {
+  const hasEnvelopes = config.keys.some((key) => isEnvelope(key.key));
+  const passphrase = hasEnvelopes ? resolveEnvelopePassphrase(explicitPassphrase) : '';
+  config.keys = config.keys.map((entry) => {
+    if (isEnvelope(entry.key)) return decryptEnvelopeEntry(entry, passphrase);
+    if (typeof entry.key === 'string' && isEncryptedKey(entry.key)) {
+      return { ...entry, key: decryptLegacyEntry(entry), encrypted: true };
+    }
+    return withoutEncryptedFlag(entry);
+  });
+}
+
+/**
+ * Envelope passphrase: the value already resolved by `serve`, then the env
+ * var, then the OS store. Deliberately never prompts — reporting commands and
+ * the daemon child must not block on a terminal that is not there.
+ */
+function resolveEnvelopePassphrase(explicitPassphrase: string | undefined): string {
+  if (explicitPassphrase !== undefined && explicitPassphrase.length > 0) return explicitPassphrase;
+
+  const env = readEnvPassphrase();
+  if (env.ok) return env.value;
+
+  const store = readStorePassphrase();
+  if (store.ok) return store.value;
+
+  throw new SecretSourceError(`${NO_SOURCE_MESSAGE}\nStore: ${store.reason}`);
+}
+
+function decryptEnvelopeEntry(entry: KeyEntry, passphrase: string): KeyEntry {
+  const result = decryptValue(entry.key, passphrase, entry.label);
+  if (!result.ok) {
+    throw new SecretSourceError(decryptFailureMessage(entry.label, result.error.message));
   }
+  return { ...entry, key: result.value, encrypted: true };
 }
 
-function assertNoEncryptedSecrets(config: ProxyConfig): void {
-  const encryptedKeys = config.keys.filter((k) => isEncryptedKey(k.key));
-  if (encryptedKeys.length > 0) {
+/** `enc:scrypt:` values predate the v1 envelope; keep them readable. */
+function decryptLegacyEntry(entry: KeyEntry): string {
+  const legacyKey = process.env.OPENCODE_GO_ENCRYPTION_KEY;
+  if (!legacyKey) {
     throw new Error(
-      `Found ${encryptedKeys.length} encrypted API key(s) but OPENCODE_GO_ENCRYPTION_KEY environment variable is not set`,
+      'Found encrypted API key(s) but OPENCODE_GO_ENCRYPTION_KEY environment variable is not set',
     );
+  }
+  try {
+    const plaintext = decryptKey(entry.key, legacyKey);
+    logger.warn(
+      { evt: 'security.legacy-encryption' },
+      'Key "%s" uses legacy enc:scrypt encryption with OPENCODE_GO_ENCRYPTION_KEY — replace it with plaintext and run `saros-proxy keys encrypt` to migrate',
+      entry.label,
+    );
+    return plaintext;
+  } catch {
+    throw new Error(`Failed to decrypt API key "${entry.label}" — check OPENCODE_GO_ENCRYPTION_KEY`);
   }
 }
 

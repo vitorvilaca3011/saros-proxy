@@ -168,6 +168,23 @@ $env:OPENCODE_GO_ENCRYPTION_KEY = Get-Content /tmp/encryption-key.txt
 
 **Important:** Never use `--encryption-key` on the command line — it appears in `ps` output and shell history. Always use `--encryption-key-file`.
 
+**Preferred after setup (enc:v1 envelope + OS store):**
+
+```bash
+saros-proxy keys encrypt    # rewrite plaintext keys as enc:v1:…; the .backup is plaintext (--no-backup skips it)
+saros-proxy secret set      # store the passphrase in the OS store (Keychain/DPAPI/secret-tool)
+saros-proxy secret status   # confirm which source wins; never prints the value
+saros-proxy serve           # foreground fallback: prompts once if no source exists
+```
+
+Passphrase sources, first match wins: `SAROS_PASSPHRASE`, then the OS store
+(`secret-tool` on Linux, `security` on macOS, DPAPI on Windows), then a hidden
+TTY prompt in foreground `serve` only. A config with `enc:v1:` keys and no
+source exits `1` with a message naming all three; a wrong passphrase also exits
+`1` and never prints the key. For systemd use `systemd-creds` (see README
+"API Key Encryption"). The legacy `enc:scrypt:…` + `OPENCODE_GO_ENCRYPTION_KEY`
+path still decrypts with a warning.
+
 If encryption was NOT chosen:
 ```yaml
 port: {port}
@@ -338,7 +355,7 @@ rm {keys-file-path}
 | requestTimeoutMs | 30000 | 1000–300000 | `REQUEST_TIMEOUT_MS` |
 | allowedOrigins | localhost only | — | — |
 | keys | — | `sk-` or `user_` prefix, min 20 chars | `OPENCODE_GO_KEYS` (comma-separated label:key) |
-| encryption | — | AES-256-GCM | `OPENCODE_GO_ENCRYPTION_KEY` |
+| encryption | — | `enc:v1` envelope (scrypt N=2^15 + AES-256-GCM) | `SAROS_PASSPHRASE`, OS store, TTY prompt; `OPENCODE_GO_ENCRYPTION_KEY` for legacy `enc:scrypt` |
 
 ---
 
@@ -355,7 +372,7 @@ Behavior worth telling the user:
 
 - Mixed pools work transparently: requests always use the OpenCode-Go URL shapes; CommandCode-routed requests are remapped internally (`/zen/go/v1/…` → `/provider/v1/…`).
 - CommandCode-only models (e.g. `claude-*`, vendor-prefixed ids) can appear in synced harness configs as `model@commandcode`.
-- `GET /health` reports per-provider key counts (`providers`) and a per-key `keys` array: `label`, `provider`, `enabled`, `entitled`, `consecutiveFailures`, `disabledAt`, `retryAfterMs`, `lastError` (`{status, reason, at}`), `usagePercent`. Reasons are `auth` (401), `quota`, `rate_limit` (429) and `server`. Never contains the credential.
+- `GET /health` reports per-provider key counts (`providers`) and a per-key `keys` array: `label`, `provider`, `enabled`, `entitled`, `disabledByConfig`, `encrypted`, `consecutiveFailures`, `disabledAt`, `retryAfterMs`, `lastError` (`{status, reason, at}`), `usagePercent`. `encrypted: true` means the credential arrived as an `enc:v1:` envelope; the ciphertext is never returned. Reasons are `auth` (401), `quota`, `rate_limit` (429) and `server`. Never contains the credential.
 - When every key is unusable the proxy answers `503` with the diagnosis instead of a bare message: `keys[]` (`reason`, `lastStatus`, `retryAfterMs`, `detail`), `retryAfterMs`, and `causes[]` — so the client can tell a revoked key from a quota wall or a bad `@provider` pin. The legacy `error` field is unchanged for compatibility.
 - A key that leaves rotation is logged as `evt=key.state` (label, provider, reason, upstream status, cooldown) and comes back on the next success (`evt=key.state`, "Key back in rotation").
 - `saros-proxy` (bare) prints each configured key with its state, e.g. `work: user…**** [commandcode] — disabled: auth (401), retry in 42s`; `saros-proxy status` prints the same block (`Keys: 1/2 enabled` plus one line per key) from the daemon's own `/health` report.
@@ -375,7 +392,7 @@ environment:
   - PROXY_PORT=3000
   - PROXY_HOST=0.0.0.0
   - OPENCODE_GO_KEYS=label1:sk-xxx,label2:sk-yyy
-  - OPENCODE_GO_ENCRYPTION_KEY=your-master-key
+  - SAROS_PASSPHRASE=your-passphrase   # for enc:v1 envelopes; no OS store in the container
 ```
 
 Volume: `./config.yaml:/app/config.yaml:ro`
@@ -393,15 +410,18 @@ Runs as non-root `appuser`
 | `504 Gateway Timeout` | Increase `requestTimeoutMs` |
 | All keys unavailable | Wait for circuit breaker cooldown |
 | CORS error | Add origin to `allowedOrigins` |
-| Encrypted keys but no key env | Set `OPENCODE_GO_ENCRYPTION_KEY` |
+| Encrypted keys but no passphrase | `saros-proxy secret set`, or set `SAROS_PASSPHRASE`, or run `saros-proxy serve` in a terminal; `saros-proxy secret status` shows which source is missing |
+| Legacy `enc:scrypt` keys | Set `OPENCODE_GO_ENCRYPTION_KEY` (legacy) or replace with plaintext and run `saros-proxy keys encrypt` |
 
 ---
 
 ## Reference: Security
 
 - HTTPS-only upstream (SSRF prevention)
-- API key masking in logs
+- API key masking in logs; envelopes and passphrase fields redacted
+- `enc:v1` envelopes at rest: scrypt (N=2^15) + AES-256-GCM, AAD-bound to the key label
+- Passphrase from `SAROS_PASSPHRASE`, the OS store (`secret-tool`/`security`/DPAPI) or a foreground TTY prompt
+- Honest limit: none of these stop malware running as the same user; they protect the file, backups and synced dotfiles (README "Threat model")
 - CORS origin validation
 - Rate limiting: 100 req/min per IP (hardcoded)
-- AES-256-GCM encryption for keys at rest
 - Non-root Docker container
