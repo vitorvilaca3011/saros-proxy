@@ -43,8 +43,14 @@ import { getModelsList } from './models-fetcher.js';
 import { maybeRefreshUsage } from './usage-client.js';
 import { recordModelRequest } from './model-stats.js';
 import { recordKeyTokens } from './token-usage.js';
-import { getProvider, inferProvider } from './providers/index.js';
+import { getProvider } from './providers/index.js';
 import type { KeyProvider, ProviderId } from './providers/index.js';
+import {
+  createRecentRequestBuffer,
+  isDebugBufferEnabled,
+  type RecentRequestBuffer,
+  type RecentRequestEntry,
+} from './debug-buffer.js';
 
 /** Canonical client-facing chat route prefix (the opencode-go shape). */
 const CANONICAL_CHAT_BASE = '/zen/go/v1';
@@ -220,17 +226,20 @@ export function prepareOutboundRequest(
 
 /**
  * Provider for a key snapshot. Suffix-routed requests (​@provider model ids)
- * pin the provider; otherwise structural inference from the key itself.
+ * pin the provider; otherwise the key's configured provider decides.
+ *
+ * The credential prefix is deliberately not re-inferred here: `key.provider`
+ * is normalized from config (an explicit `provider:` wins over the prefix) and
+ * it is what selection filters on. Routing on a different signal sent a key
+ * declared `provider: commandcode` through the OpenCode-Go URL.
  */
-function providerForKey(key: KeySnapshot, config: ProxyConfig, modelId?: string): KeyProvider {
+function providerForKey(key: KeySnapshot, modelId?: string): KeyProvider {
   const suffixProvider = parseProviderSuffix(modelId);
   if (suffixProvider) {
     const pinned = getProvider(suffixProvider as ProviderId);
     if (pinned) return pinned;
   }
-  const inferred = inferProvider({ label: key.label, key: key.key });
-  void config;
-  return getProvider(inferred) ?? getProvider('opencode-go')!;
+  return getProvider(key.provider as ProviderId) ?? getProvider('opencode-go')!;
 }
 
 // Augment Hono's ContextVariableMap for @hono/node-server remote address
@@ -405,6 +414,8 @@ type SuccessHandler = (
   state: ProxyState,
   requestId: string,
   keyLabel: string,
+  /** Provider that actually served the request (routed key, not model suffix). */
+  provider: ProviderId,
 ) => Promise<Response>;
 
 interface RetryContext {
@@ -425,6 +436,8 @@ interface RetryContext {
   lastProvider?: string;
   /** Zero-based attempt currently running. */
   attempt: number;
+  /** In-memory access buffer; absent when SAROS_DEBUG_BUFFER=0. */
+  recentRequests?: RecentRequestBuffer;
 }
 
 type AttemptResult =
@@ -448,6 +461,7 @@ async function executeWithRetry(opts: {
   modelId?: string;
   onSuccess: SuccessHandler;
   maxRetries: number;
+  recentRequests?: RecentRequestBuffer;
 }): Promise<Response> {
   const ctx: RetryContext = {
     state: opts.state,
@@ -462,6 +476,7 @@ async function executeWithRetry(opts: {
     onSuccess: opts.onSuccess,
     startedAt: Date.now(),
     attempt: 0,
+    recentRequests: opts.recentRequests,
   };
 
   let lastError: Error | null = null;
@@ -486,7 +501,7 @@ async function executeSingleAttempt(attempt: number, ctx: RetryContext): Promise
   // Per-attempt upstream: keys may be mixed-provider within one failover chain.
   // Suffix-routed models (@provider) pin the provider and lose the suffix
   // in the forwarded body; the upstream never sees saros's routing shim.
-  const provider = providerForKey(key, ctx.config, ctx.modelId);
+  const provider = providerForKey(key, ctx.modelId);
   ctx.lastProvider = provider.id;
   logger.debug(
     {
@@ -539,7 +554,7 @@ async function executeSingleAttempt(attempt: number, ctx: RetryContext): Promise
       );
       recordKeySuccess(ctx.state, key.label, ctx.requestId);
       completeRequest(ctx.state, ctx.requestId, true);
-      const downstream = await ctx.onSuccess(response, ctx.state, ctx.requestId, key.label);
+      const downstream = await ctx.onSuccess(response, ctx.state, ctx.requestId, key.label, provider.id);
       // Logged after the success handler: if it throws, the request retries and
       // this is not a completed request (the retry path logs its own outcome).
       // The downstream status is what the client saw — the streaming handler
@@ -768,6 +783,10 @@ export function buildNoKeysBody(
 function buildNoKeysResponse(ctx: RetryContext, attempt: number): Response {
   const { state, requestId, kind, modelId } = ctx;
   const triedLabels = [...(state.activeRequests.get(requestId)?.triedKeys ?? [])];
+  // A 503 raised between attempts still follows keys that failed: the body
+  // names them, so the access entry must too. Null stays reserved for the
+  // attempt-0 case, when no key was ever selected.
+  const lastTried = triedLabels.at(-1) ?? null;
   const keys = unavailableKeyReports(state);
   const body = buildNoKeysBody(keys, requestId, modelId, triedLabels);
 
@@ -784,7 +803,7 @@ function buildNoKeysResponse(ctx: RetryContext, attempt: number): Response {
     'No API key available for this request',
   );
   completeRequest(state, requestId, false);
-  logRequestComplete(ctx, 503, null);
+  logRequestComplete(ctx, 503, lastTried);
   return new Response(JSON.stringify(body), {
     status: 503,
     headers: { 'content-type': 'application/json' },
@@ -812,6 +831,7 @@ function handleAllRetriesFailed(ctx: RetryContext, maxRetries: number, lastError
   // goes through failoverRequest (the loop ends), so its key is only in
   // currentKey — omitting it hides the key that failed last.
   const active = ctx.state.activeRequests.get(ctx.requestId);
+  const lastKeyLabel = active?.currentKey?.label ?? null;
   const triedLabels = [
     ...new Set([...(active?.triedKeys ?? []), ...(active?.currentKey ? [active.currentKey.label] : [])]),
   ];
@@ -823,7 +843,7 @@ function handleAllRetriesFailed(ctx: RetryContext, maxRetries: number, lastError
       : 'Streaming failed after %d attempts',
     maxRetries,
   );
-  logRequestComplete(ctx, 502, null);
+  logRequestComplete(ctx, 502, lastKeyLabel);
   const message = ctx.kind === 'standard'
     ? 'Upstream service unavailable after multiple attempts'
     : 'Streaming service unavailable after multiple attempts';
@@ -853,28 +873,32 @@ function handleAllRetriesFailed(ctx: RetryContext, maxRetries: number, lastError
  * One line per finished request — the access log. Exactly one per request:
  * success, upstream client error, no usable key (503) and retries exhausted
  * (502) are mutually exclusive paths.
+ *
+ * The same entry is pushed to the in-memory buffer served by `GET /debug/recent`
+ * (when enabled), so the two views cannot drift. `keyLabel` is the key that
+ * served the request, or the last key tried when the proxy answers 502 or a 503
+ * raised after keys were tried; null only when no key was ever selected.
  */
 function logRequestComplete(
   ctx: RetryContext,
   status: number,
   keyLabel: string | null,
 ): void {
-  logger.info(
-    {
-      evt: 'request.complete',
-      requestId: ctx.requestId,
-      method: ctx.method,
-      path: ctx.path,
-      model: ctx.modelId ?? null,
-      provider: ctx.lastProvider ?? null,
-      keyLabel,
-      status,
-      durationMs: Date.now() - ctx.startedAt,
-      stream: ctx.kind === 'streaming',
-      attempt: ctx.attempt + 1,
-    },
-    'request complete',
-  );
+  const entry: RecentRequestEntry = {
+    requestId: ctx.requestId,
+    at: new Date().toISOString(),
+    method: ctx.method,
+    path: ctx.path,
+    model: ctx.modelId ?? null,
+    provider: ctx.lastProvider ?? null,
+    keyLabel,
+    status,
+    durationMs: Date.now() - ctx.startedAt,
+    stream: ctx.kind === 'streaming',
+    attempt: ctx.attempt + 1,
+  };
+  logger.info({ evt: 'request.complete', ...entry }, 'request complete');
+  ctx.recentRequests?.push(entry);
 }
 
 function logKeyAttempt(requestId: string, key: KeySnapshot, attempt: number, kind: RequestKind): void {
@@ -988,7 +1012,7 @@ function logNetworkError(requestId: string, key: KeySnapshot, err: unknown, kind
 // Success handlers
 // ---------------------------------------------------------------------------
 
-const standardSuccessHandler: SuccessHandler = async (response, state, requestId, keyLabel) => {
+const standardSuccessHandler: SuccessHandler = async (response, state, requestId, keyLabel, provider) => {
   logger.info(
     { requestId, keyLabel, status: response.status },
     'Upstream request succeeded',
@@ -1001,13 +1025,14 @@ const standardSuccessHandler: SuccessHandler = async (response, state, requestId
   const downstreamHeaders = buildDownstreamHeaders(response.headers);
   downstreamHeaders.set('X-Proxy-Key-Label', keyLabel);
   downstreamHeaders.set('X-Proxy-Request-Id', requestId);
+  downstreamHeaders.set('X-Proxy-Provider', provider);
   return new Response(responseBody, {
     status: response.status,
     headers: downstreamHeaders,
   });
 };
 
-const streamingSuccessHandler: SuccessHandler = async (response, state, requestId, keyLabel) => {
+const streamingSuccessHandler: SuccessHandler = async (response, state, requestId, keyLabel, provider) => {
   if (!response.body) {
     logger.error({ requestId, keyLabel }, 'Streaming response missing body');
     return new Response(
@@ -1022,6 +1047,7 @@ const streamingSuccessHandler: SuccessHandler = async (response, state, requestI
   responseHeaders.set('connection', 'keep-alive');
   responseHeaders.set('X-Proxy-Key-Label', keyLabel);
   responseHeaders.set('X-Proxy-Request-Id', requestId);
+  responseHeaders.set('X-Proxy-Provider', provider);
   return new Response(wrappedStream, { status: 200, headers: responseHeaders });
 };
 
@@ -1036,6 +1062,8 @@ interface HandleRequestOptions {
   /** Model id from the request body — drives provider-affinity routing. */
   modelId?: string;
   maxRetries?: number;
+  /** In-memory access buffer; absent when SAROS_DEBUG_BUFFER=0. */
+  recentRequests?: RecentRequestBuffer;
 }
 
 /**
@@ -1055,6 +1083,7 @@ async function handleWithFailover(opts: HandleRequestOptions): Promise<Response>
     modelId: opts.modelId,
     onSuccess: standardSuccessHandler,
     maxRetries: opts.maxRetries ?? MAX_RETRIES,
+    recentRequests: opts.recentRequests,
   });
 }
 
@@ -1076,6 +1105,7 @@ async function handleStreamingRequest(opts: HandleRequestOptions): Promise<Respo
     modelId: opts.modelId,
     onSuccess: streamingSuccessHandler,
     maxRetries: opts.maxRetries ?? MAX_RETRIES,
+    recentRequests: opts.recentRequests,
   });
 }
 
@@ -1217,6 +1247,9 @@ export function createProxyApp(config: ProxyConfig): Hono {
     circuitBreakerThreshold: config.circuitBreakerThreshold,
     circuitBreakerCooldownMs: config.circuitBreakerCooldownMs,
   });
+  // Last proxied requests, in memory only. `SAROS_DEBUG_BUFFER=0` removes the
+  // instance entirely: `/debug/recent` answers 404 and nothing is stored.
+  const recentRequests = isDebugBufferEnabled() ? createRecentRequestBuffer() : undefined;
   // Model→provider affinity: requests naming a provider-specific model
   // (e.g. commandcode's vendor-prefixed ids) are routed to a matching key
   // first; 'maybe' providers remain as fallback. Bare-name matching lets
@@ -1257,6 +1290,9 @@ export function createProxyApp(config: ProxyConfig): Hono {
   app.use(
     '*',
     cors({
+      // Browser JS cannot read a response header unless it is exposed: without
+      // this the X-Proxy-* annotations are visible to curl but not to fetch().
+      exposeHeaders: ['X-Proxy-Key-Label', 'X-Proxy-Request-Id', 'X-Proxy-Provider'],
       origin: (origin: string) => {
         if (!origin) return null; // Non-browser requests (no Origin header) — skip CORS
         const allowed = config.allowedOrigins.some((pattern) => {
@@ -1302,6 +1338,14 @@ export function createProxyApp(config: ProxyConfig): Hono {
         return acc;
       }, {}),
     });
+  });
+
+  // --- Recent proxied requests (in-memory, opt-out) ---
+  // Same entries as the `request.complete` access lines: requestId, provider,
+  // key label and outcome — never credentials, headers or bodies.
+  app.get('/debug/recent', (c: Context) => {
+    if (!recentRequests) return c.json({ error: 'Not Found' }, 404);
+    return c.json(recentRequests.snapshot());
   });
 
   // --- Models discovery endpoint (OpenAI-compatible) ---
@@ -1355,6 +1399,7 @@ export function createProxyApp(config: ProxyConfig): Hono {
         incomingHeaders,
         bodyText,
         modelId: typeof parsedBody.model === 'string' ? parsedBody.model : undefined,
+        recentRequests,
       });
     }
 
@@ -1368,6 +1413,7 @@ export function createProxyApp(config: ProxyConfig): Hono {
       incomingHeaders,
       bodyText,
       modelId: typeof parsedBody?.model === 'string' ? parsedBody.model : undefined,
+      recentRequests,
     });
   }
 

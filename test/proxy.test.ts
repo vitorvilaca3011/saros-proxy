@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeAll, beforeEach, vi } from 'vitest';
+import { describe, it, expect, beforeAll, beforeEach, afterEach, vi } from 'vitest';
 
 // Isolate persisted counters (model-stats, token-usage) from the user's real
 // ~/.config/saros/ — these tests forward requests through real proxy apps and
@@ -1190,6 +1190,12 @@ describe('createProxyApp — request limits, health, CORS, rate limit keys', () 
     const app = createProxyApp(makeConfig({ allowedOrigins: ['https://*.example.com'] }));
     const res = await app.request('/health', { headers: { origin: 'https://app.example.com' } });
     expect(res.headers.get('access-control-allow-origin')).toBe('https://app.example.com');
+    // Browser JS can only read these annotations if they are exposed. Exact
+    // value: an accidental extra header would widen the browser-visible
+    // surface without a test noticing.
+    expect(res.headers.get('access-control-expose-headers')).toBe(
+      'X-Proxy-Key-Label,X-Proxy-Request-Id,X-Proxy-Provider',
+    );
   });
 
   it('does not send CORS headers for disallowed origins', async () => {
@@ -1505,3 +1511,423 @@ describe('createProxyApp — session header', () => {
   });
 });
 
+
+describe('createProxyApp — X-Proxy-Provider header', () => {
+  beforeEach(() => {
+    vi.restoreAllMocks();
+    resetModelsFetcherState();
+  });
+
+  // Mixed pool: one key per provider. The model suffix pins the provider, so
+  // the response header can be checked against a known serving key.
+  function mixedPool(): ProxyConfig {
+    return makeConfig({
+      keys: [
+        { label: 'oc', key: 'oc_sk_oc-key-0000000001', provider: 'opencode-go' },
+        { label: 'cc', key: 'user_cc-key-0000000001', provider: 'commandcode' },
+      ],
+    });
+  }
+
+  // This test pins the provider via the model suffix, so suffix and serving
+  // key agree by construction — it would pass even if the header merely
+  // re-parsed the model id. Provenance is proven by the unpinned test below
+  // (its key prefixes contradict the configured providers, so prefix inference
+  // would report the opposite provider) and by the prefix-contradiction test.
+  it('reports the provider of the key that served the request', async () => {
+    vi.spyOn(globalThis, 'fetch').mockImplementation(async () =>
+      new Response('{"ok":true}', { status: 200 }),
+    );
+    const app = createProxyApp(mixedPool());
+
+    const oc = await app.request('/v1/chat/completions', {
+      method: 'POST',
+      body: JSON.stringify({ model: 'model-x@opencode-go', messages: [] }),
+      headers: { 'content-type': 'application/json' },
+    });
+    await oc.text();
+    expect(oc.headers.get('X-Proxy-Provider')).toBe('opencode-go');
+    expect(oc.headers.get('X-Proxy-Key-Label')).toBe('oc');
+
+    const cc = await app.request('/v1/chat/completions', {
+      method: 'POST',
+      body: JSON.stringify({ model: 'model-x@commandcode', messages: [] }),
+      headers: { 'content-type': 'application/json' },
+    });
+    await cc.text();
+    expect(cc.headers.get('X-Proxy-Provider')).toBe('commandcode');
+    expect(cc.headers.get('X-Proxy-Key-Label')).toBe('cc');
+  });
+
+  it('sets the provider header on streaming responses too', async () => {
+    // One Response per fetch: the usage/models warm-up consumes bodies, and a
+    // shared instance would be drained before the chat call in a clean process.
+    vi.spyOn(globalThis, 'fetch').mockImplementation(async () =>
+      new Response(sseStream('data: {"choices":[]}\n\n'), { status: 200 }),
+    );
+    const app = createProxyApp(mixedPool());
+
+    const res = await app.request('/v1/chat/completions', {
+      method: 'POST',
+      body: JSON.stringify({ model: 'model-x@commandcode', stream: true, messages: [] }),
+      headers: { 'content-type': 'application/json' },
+    });
+    expect(res.status).toBe(200);
+    expect(res.headers.get('X-Proxy-Provider')).toBe('commandcode');
+    expect(res.headers.get('X-Proxy-Key-Label')).toBe('cc');
+    await res.text();
+  });
+
+  it('derives the header from the serving key when no suffix pins the model', async () => {
+    vi.spyOn(globalThis, 'fetch').mockImplementation(async () =>
+      new Response('{"ok":true}', { status: 200 }),
+    );
+    // Prefixes deliberately contradict the configured providers: a header
+    // built by re-inferring from the credential would report opencode-go for
+    // the sk-… key and commandcode for the user_… key — the opposite values.
+    const app = createProxyApp(makeConfig({
+      keys: [
+        { label: 'sk-cc', key: 'sk-commandcode-key-000001', provider: 'commandcode' },
+        { label: 'user-oc', key: 'user_opencode-key-000001', provider: 'opencode-go' },
+      ],
+    }));
+
+    // Round-robin: sk-cc then user-oc. The model carries no @provider hint, so
+    // the only source of truth is the selected key's configured provider.
+    for (const expected of [
+      { keyLabel: 'sk-cc', provider: 'commandcode' },
+      { keyLabel: 'user-oc', provider: 'opencode-go' },
+    ]) {
+      const res = await app.request('/v1/chat/completions', {
+        method: 'POST',
+        body: JSON.stringify({ model: 'model-x', messages: [] }),
+        headers: { 'content-type': 'application/json' },
+      });
+      await res.text();
+      expect(res.headers.get('X-Proxy-Key-Label')).toBe(expected.keyLabel);
+      expect(res.headers.get('X-Proxy-Provider')).toBe(expected.provider);
+    }
+  });
+
+  it('routes by the configured provider even when it contradicts the key prefix', async () => {
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockImplementation(async () =>
+      new Response('{"ok":true}', { status: 200 }),
+    );
+    const app = createProxyApp(makeConfig({
+      keys: [{ label: 'cc-sk', key: 'sk-commandcode-key-0001', provider: 'commandcode' }],
+    }));
+
+    const res = await app.request('/v1/chat/completions', {
+      method: 'POST',
+      body: JSON.stringify({ model: 'model-x', messages: [] }),
+      headers: { 'content-type': 'application/json' },
+    });
+    await res.text();
+
+    expect(res.headers.get('X-Proxy-Key-Label')).toBe('cc-sk');
+    expect(res.headers.get('X-Proxy-Provider')).toBe('commandcode');
+    // The URL proves the route itself: re-inferring from the sk- prefix used to
+    // send this key to opencode-go's upstream.
+    const chatUrls = fetchMock.mock.calls
+      .map(([url]) => String(url))
+      .filter((url) => url.endsWith('/chat/completions'));
+    expect(chatUrls).toEqual(['https://api.commandcode.ai/provider/v1/chat/completions']);
+  });
+
+  it('follows the serving key across a cross-provider failover', async () => {
+    vi.spyOn(globalThis, 'fetch').mockImplementation(async (input) => {
+      const url = String(input);
+      if (!url.endsWith('/chat/completions')) return new Response('{}', { status: 200 });
+      return url.includes('commandcode')
+        ? new Response('{"ok":true}', { status: 200 })
+        : new Response('{"error":"boom"}', { status: 500 });
+    });
+    const app = createProxyApp(mixedPool());
+
+    const res = await app.request('/v1/chat/completions', {
+      method: 'POST',
+      body: JSON.stringify({ model: 'model-x', messages: [] }),
+      headers: { 'content-type': 'application/json' },
+    });
+    await res.text();
+
+    expect(res.status).toBe(200);
+    expect(res.headers.get('X-Proxy-Key-Label')).toBe('cc');
+    expect(res.headers.get('X-Proxy-Provider')).toBe('commandcode');
+  });
+});
+
+describe('createProxyApp — GET /debug/recent', () => {
+  beforeEach(() => {
+    vi.restoreAllMocks();
+    resetModelsFetcherState();
+    // A shell that exports SAROS_DEBUG_BUFFER must not flip this suite.
+    delete process.env.SAROS_DEBUG_BUFFER;
+  });
+
+  afterEach(() => {
+    delete process.env.SAROS_DEBUG_BUFFER;
+  });
+
+  /** One fresh Response per fetch; chat calls answer through `chat`. */
+  function mockUpstream(chat: (url: string) => Response) {
+    return vi.spyOn(globalThis, 'fetch').mockImplementation(async (input) => {
+      const url = String(input);
+      if (!url.endsWith('/chat/completions')) return new Response('{}', { status: 200 });
+      return chat(url);
+    });
+  }
+
+  function postChat(app: AppLike, payload: Record<string, unknown>): Promise<Response> {
+    return app.request('/v1/chat/completions', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+      headers: { 'content-type': 'application/json' },
+    });
+  }
+
+  async function recent(app: AppLike): Promise<{
+    count: number;
+    entries: Array<Record<string, unknown>>;
+  }> {
+    return (await (await app.request('/debug/recent')).json()) as {
+      count: number;
+      entries: Array<Record<string, unknown>>;
+    };
+  }
+
+  it('mirrors request.complete entries in order, without credential material', async () => {
+    vi.spyOn(globalThis, 'fetch').mockImplementation(async () =>
+      new Response('{"choices":[]}', { status: 200 }),
+    );
+    const secret = 'sk-alpha-secret-000000000001';
+    const app = createProxyApp(makeConfig({ keys: [{ label: 'alpha', key: secret }] }));
+
+    const first = await app.request('/v1/chat/completions', {
+      method: 'POST',
+      body: JSON.stringify({ model: 'model-one', messages: [] }),
+      headers: { 'content-type': 'application/json' },
+    });
+    const firstId = first.headers.get('X-Proxy-Request-Id');
+    await first.text();
+
+    const second = await app.request('/v1/chat/completions', {
+      method: 'POST',
+      body: JSON.stringify({ model: 'model-two', stream: true, messages: [] }),
+      headers: { 'content-type': 'application/json' },
+    });
+    await second.text();
+
+    const res = await app.request('/debug/recent');
+    expect(res.status).toBe(200);
+    const body = await res.json() as {
+      capacity: number;
+      count: number;
+      entries: Array<Record<string, unknown>>;
+    };
+
+    expect(body.capacity).toBe(200);
+    expect(body.count).toBe(2);
+    expect(body.entries[0]).toMatchObject({
+      requestId: firstId,
+      method: 'POST',
+      path: '/zen/go/v1/chat/completions',
+      model: 'model-one',
+      provider: 'opencode-go',
+      keyLabel: 'alpha',
+      status: 200,
+      stream: false,
+      attempt: 1,
+    });
+    expect(body.entries[1]).toMatchObject({
+      model: 'model-two',
+      provider: 'opencode-go',
+      keyLabel: 'alpha',
+      status: 200,
+      stream: true,
+      attempt: 1,
+    });
+    expect(typeof body.entries[0].at).toBe('string');
+    expect(Date.parse(body.entries[0].at as string)).not.toBeNaN();
+    expect(body.entries[0].durationMs).toBeTypeOf('number');
+
+    // Only the public label travels: neither the credential nor a header dump.
+    const serialized = JSON.stringify(body);
+    expect(serialized).not.toContain(secret);
+    expect(serialized).not.toContain('authorization');
+  });
+
+  it('records a request that never reached a key (503) with a null provider', async () => {
+    mockUpstream(() => new Response('{}', { status: 200 }));
+    const app = createProxyApp(makeConfig({
+      keys: [{ label: 'retired', key: 'sk-retired-key-000000001', enabled: false }],
+    }));
+
+    const proxied = await postChat(app, { model: 'model-one', messages: [] });
+    expect(proxied.status).toBe(503);
+    expect(proxied.headers.get('X-Proxy-Key-Label')).toBeNull();
+    expect(proxied.headers.get('X-Proxy-Provider')).toBeNull();
+    await proxied.text();
+
+    const body = await recent(app);
+    expect(body.count).toBe(1);
+    expect(body.entries[0]).toMatchObject({
+      provider: null,
+      keyLabel: null,
+      status: 503,
+    });
+  });
+
+  it('records the last key tried on a 503 raised after a failed attempt', async () => {
+    mockUpstream(() => new Response('{"error":"boom"}', { status: 500 }));
+    const app = createProxyApp(makeConfig({
+      keys: [{ label: 'only', key: 'sk-only-key-0000000000001' }],
+    }));
+
+    const res = await postChat(app, { model: 'model-one', messages: [] });
+    const failure = await res.json() as { causes: string[] };
+    expect(res.status).toBe(503);
+    // The proxy's own 503 advertises no key headers; the entry carries the label.
+    expect(res.headers.get('X-Proxy-Key-Label')).toBeNull();
+    expect(res.headers.get('X-Proxy-Provider')).toBeNull();
+    // The body names the key it tried — the entry must not contradict it.
+    expect(failure.causes.join(' ')).toContain('only');
+
+    const body = await recent(app);
+    expect(body.count).toBe(1);
+    expect(body.entries[0]).toMatchObject({
+      status: 503,
+      provider: 'opencode-go',
+      keyLabel: 'only',
+      attempt: 2,
+    });
+  });
+
+  it('keeps the second key as the last tried when a two-key pool fails both attempts', async () => {
+    mockUpstream(() => new Response('{"error":"boom"}', { status: 500 }));
+    const app = createProxyApp(makeConfig());
+
+    const res = await postChat(app, { model: 'model-one', messages: [] });
+    await res.text();
+    // Both attempts consumed a key, so the loop is exhausted before another
+    // selection: the terminal answer is 502, attributed to the second key.
+    expect(res.status).toBe(502);
+
+    const body = await recent(app);
+    expect(body.count).toBe(1);
+    expect(body.entries[0]).toMatchObject({
+      status: 502,
+      provider: 'opencode-go',
+      keyLabel: 'beta',
+      attempt: 2,
+    });
+  });
+
+  it('returns 404 and records nothing when SAROS_DEBUG_BUFFER=0', async () => {
+    process.env.SAROS_DEBUG_BUFFER = '0';
+    // One Response per fetch: the warm-up calls would drain a shared instance.
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockImplementation(async () =>
+      new Response('{"choices":[]}', { status: 200 }),
+    );
+    const app = createProxyApp(makeConfig());
+
+    const proxied = await postChat(app, { model: 'model-one', messages: [] });
+    expect(proxied.status).toBe(200);
+    await proxied.text();
+    // Scoped to the chat URL: usage/models warm-up fetches share globalThis.fetch.
+    const chatCalls = fetchMock.mock.calls
+      .map(([url]) => String(url))
+      .filter((url) => url.endsWith('/chat/completions'));
+    expect(chatCalls).toHaveLength(1);
+
+    const res = await app.request('/debug/recent');
+    expect(res.status).toBe(404);
+    expect(await res.json()).toEqual({ error: 'Not Found' });
+  });
+
+  it('records a forwarded 4xx once, with its key label and no debug headers', async () => {
+    mockUpstream(() => new Response('{"error":{"message":"bad model"}}', { status: 400 }));
+    const app = createProxyApp(makeConfig());
+
+    const res = await postChat(app, { model: 'model-one', messages: [] });
+    await res.text();
+    expect(res.status).toBe(400);
+    expect(res.headers.get('X-Proxy-Key-Label')).toBeNull();
+    expect(res.headers.get('X-Proxy-Provider')).toBeNull();
+
+    const body = await recent(app);
+    expect(body.count).toBe(1);
+    expect(body.entries[0]).toMatchObject({
+      status: 400,
+      provider: 'opencode-go',
+      keyLabel: 'alpha',
+      attempt: 1,
+    });
+  });
+
+  it('records a retries-exhausted 502 once, with the last key tried', async () => {
+    mockUpstream(() => new Response('{"error":"boom"}', { status: 500 }));
+    const app = createProxyApp(makeConfig());
+
+    const res = await postChat(app, { model: 'model-one', messages: [] });
+    await res.text();
+    expect(res.status).toBe(502);
+    expect(res.headers.get('X-Proxy-Key-Label')).toBeNull();
+    expect(res.headers.get('X-Proxy-Provider')).toBeNull();
+
+    const body = await recent(app);
+    expect(body.count).toBe(1);
+    expect(body.entries[0]).toMatchObject({
+      status: 502,
+      provider: 'opencode-go',
+      keyLabel: 'beta',
+      attempt: 2,
+    });
+  });
+
+  it('records the bodyless-stream 502 once, after the upstream 2xx', async () => {
+    mockUpstream(() => new Response(null, { status: 200 }));
+    const app = createProxyApp(makeConfig());
+
+    const res = await postChat(app, { model: 'model-one', stream: true, messages: [] });
+    await res.text();
+    expect(res.status).toBe(502);
+    expect(res.headers.get('X-Proxy-Key-Label')).toBeNull();
+    expect(res.headers.get('X-Proxy-Provider')).toBeNull();
+
+    const body = await recent(app);
+    expect(body.count).toBe(1);
+    expect(body.entries[0]).toMatchObject({
+      status: 502,
+      provider: 'opencode-go',
+      keyLabel: 'alpha',
+      stream: true,
+    });
+  });
+
+  it('records one entry across a retry, on the attempt that succeeded', async () => {
+    let chatCalls = 0;
+    mockUpstream(() => {
+      chatCalls++;
+      return chatCalls === 1
+        ? new Response('{"error":"boom"}', { status: 500 })
+        : new Response('{"choices":[]}', { status: 200 });
+    });
+    const app = createProxyApp(makeConfig());
+
+    const res = await postChat(app, { model: 'model-one', messages: [] });
+    await res.text();
+    expect(res.status).toBe(200);
+    expect(res.headers.get('X-Proxy-Key-Label')).toBe('beta');
+    expect(res.headers.get('X-Proxy-Provider')).toBe('opencode-go');
+
+    // The failed attempt logs no access entry: one request, one entry.
+    const body = await recent(app);
+    expect(body.count).toBe(1);
+    expect(body.entries[0]).toMatchObject({
+      status: 200,
+      attempt: 2,
+      keyLabel: 'beta',
+    });
+  });
+});

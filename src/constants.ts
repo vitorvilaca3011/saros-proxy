@@ -24,6 +24,8 @@ export const RATE_LIMIT_WINDOW_MS = 60_000;
 export const RATE_LIMIT_MAX = 100;
 export const FORCE_SHUTDOWN_TIMEOUT_MS = 5_000;
 export const MAX_STREAMING_BUFFER = 10_000;
+/** `GET /debug/recent` keeps this many proxied requests in memory. */
+export const RECENT_REQUESTS_CAPACITY = 200;
 export const MODELS_FETCH_TIMEOUT_MS = 5_000;
 export const MODELS_WARM_BUFFER_MS = 60_000;
 
