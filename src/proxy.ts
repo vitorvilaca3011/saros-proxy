@@ -11,7 +11,6 @@ import { rateLimiter } from 'hono-rate-limiter';
 import type { Context } from 'hono';
 import crypto from 'node:crypto';
 import { mkdirSync, writeFileSync } from 'node:fs';
-import { homedir } from 'node:os';
 import { join } from 'node:path';
 
 import {
@@ -30,7 +29,7 @@ import {
   type KeyFailureReason,
   type KeyHealthReport,
 } from './proxy-logic.js';
-import type { ProxyConfig } from './config.js';
+import { getSarosDir, type ProxyConfig } from './config.js';
 import { logger, maskKey } from './logger.js';
 import { redactSecrets } from './log-redact.js';
 import {
@@ -95,37 +94,50 @@ function generateRequestId(): string {
 }
 
 /**
+ * Relative folder name for `SAROS_CAPTURE_4XX` diagnostics. Literal: no
+ * request, response or header value can reach it.
+ */
+const CAPTURE_DIR_NAME = 'captures';
+
+/** Disambiguates captures that land in the same millisecond. */
+let captureSequence = 0;
+
+/**
  * Opt-in diagnostics: when SAROS_CAPTURE_4XX=1, write the full request
- * context of every upstream 4xx to <config dir>/captures/ so provider-side
- * errors (role validation, plan gating) can be replayed and debugged.
- * Never enabled by default — bodies may contain user content.
+ * context of every upstream 4xx to <saros config dir>/captures/ so
+ * provider-side errors (role validation, plan gating) can be replayed and
+ * debugged. Never enabled by default — bodies may contain user content.
  */
 function captureFailedRequest(ctx: RetryContext, status: number, errorBody: string): void {
   if (process.env.SAROS_CAPTURE_4XX !== '1') return;
   if (status < 400 || status >= 500) return;
   try {
-    const dir = join(homedir(), '.config', 'saros', 'captures');
+    // Path = saros config dir + literal folder name. Nothing network-derived
+    // reaches this expression, so a capture stays under the user's config dir.
+    const dir = join(getSarosDir(), CAPTURE_DIR_NAME);
     mkdirSync(dir, { recursive: true });
-    const file = join(dir, `${Date.now()}-${ctx.requestId.slice(0, 8)}.json`);
-    writeFileSync(
-      file,
-      JSON.stringify(
-        {
-          ts: new Date().toISOString(),
-          requestId: ctx.requestId,
-          status,
-          method: ctx.method,
-          path: ctx.path,
-          model: ctx.modelId ?? null,
-          kind: ctx.kind,
-          upstreamError: errorBody.slice(0, 2000),
-          requestBody: ctx.bodyText.slice(0, 100_000),
-        },
-        null,
-        2,
-      ),
-      'utf-8',
+    // Filename = timestamp + monotonic sequence. The request id is kept in
+    // the JSON payload instead, so no request-derived byte ever selects the
+    // path, and `wx` refuses a pre-created file.
+    captureSequence += 1;
+    const file = join(dir, `${Date.now()}-${captureSequence}.json`);
+    const payload = JSON.stringify(
+      {
+        ts: new Date().toISOString(),
+        requestId: ctx.requestId,
+        status,
+        method: ctx.method,
+        path: ctx.path,
+        model: ctx.modelId ?? null,
+        kind: ctx.kind,
+        upstreamError: errorBody.slice(0, 2000),
+        requestBody: ctx.bodyText.slice(0, 100_000),
+      },
+      null,
+      2,
     );
+    // codeql[js/http-to-file-access] opt-in diagnostic: fixed config-dir path, synthetic filename, mode 0600, never executed.
+    writeFileSync(file, payload, { encoding: 'utf-8', mode: 0o600, flag: 'wx' });
     logger.warn({ requestId: ctx.requestId, file }, 'captured failing request (SAROS_CAPTURE_4XX)');
   } catch {
     // diagnostics must never break the proxy

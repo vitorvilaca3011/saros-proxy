@@ -4,7 +4,7 @@ import { describe, it, expect, beforeAll, beforeEach, afterEach, vi } from 'vite
 // ~/.config/saros/ — these tests forward requests through real proxy apps and
 // would otherwise book their fake keys/models into the live stats files.
 process.env.XDG_CONFIG_HOME = mkdtempSync(join(tmpdir(), 'saros-proxy-test-'));
-import { mkdtempSync } from 'node:fs';
+import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import {
@@ -721,6 +721,101 @@ describe('createProxyApp — standard proxy pipeline', () => {
     expect(String(fetchMock.mock.calls[0][0])).toBe('https://example.com/zen/go/v1/chat/completions');
     const init = fetchMock.mock.calls[0][1] as RequestInit;
     expect(init.body).toBeUndefined();
+  });
+});
+
+describe('createProxyApp — SAROS_CAPTURE_4XX diagnostics', () => {
+  const captureDir = (): string =>
+    join(process.env.XDG_CONFIG_HOME as string, 'saros', 'captures');
+
+  const postChat = (app: AppLike, body: string): Promise<Response> =>
+    app.request('/v1/chat/completions', {
+      method: 'POST',
+      body,
+      headers: { 'content-type': 'application/json' },
+    });
+
+  beforeEach(() => {
+    rmSync(captureDir(), { recursive: true, force: true });
+  });
+
+  afterEach(() => {
+    delete process.env.SAROS_CAPTURE_4XX;
+    rmSync(captureDir(), { recursive: true, force: true });
+    vi.restoreAllMocks();
+  });
+
+  it('writes one 0600 capture per 4xx under the config dir with data-free names', async () => {
+    process.env.SAROS_CAPTURE_4XX = '1';
+    const upstreamError = JSON.stringify({ error: { message: 'bad role ../../etc/passwd' } });
+    vi.spyOn(globalThis, 'fetch').mockImplementation(() =>
+      Promise.resolve(new Response(upstreamError, { status: 400 })),
+    );
+    const app = createProxyApp(makeConfig());
+    const body = JSON.stringify({ model: 'm', messages: [{ role: 'user', content: 'payload-marker' }] });
+
+    expect((await postChat(app, body)).status).toBe(400);
+    expect((await postChat(app, body)).status).toBe(400);
+
+    const files = readdirSync(captureDir());
+    expect(files).toHaveLength(2);
+    for (const name of files) {
+      // timestamp + monotonic sequence only: no request id, no separators
+      // outside '-', no JSON punctuation, no '..'.
+      expect(name).toMatch(/^\d+-\d+\.json$/);
+      expect(name).not.toContain('..');
+      const filePath = join(captureDir(), name);
+      if (process.platform !== 'win32') {
+        expect(statSync(filePath).mode & 0o777).toBe(0o600);
+      }
+    }
+    expect(new Set(files).size).toBe(2);
+
+    const capture = JSON.parse(readFileSync(join(captureDir(), files[0]), 'utf-8')) as Record<string, unknown>;
+    expect(capture).toMatchObject({
+      status: 400,
+      method: 'POST',
+      path: '/zen/go/v1/chat/completions',
+      requestBody: body,
+      upstreamError,
+    });
+    expect(capture.requestId).toBeTruthy();
+    expect(capture.ts).toBeTruthy();
+  });
+
+  it('truncates the captured upstream error and request body', async () => {
+    process.env.SAROS_CAPTURE_4XX = '1';
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response('e'.repeat(3_000), { status: 400 }));
+    const app = createProxyApp(makeConfig());
+    const body = JSON.stringify({ model: 'm', messages: [], filler: 'x'.repeat(120_000) });
+
+    await (await postChat(app, body)).text();
+
+    const [name] = readdirSync(captureDir());
+    const capture = JSON.parse(readFileSync(join(captureDir(), name), 'utf-8')) as Record<string, unknown>;
+    expect((capture.upstreamError as string)).toHaveLength(2_000);
+    expect((capture.requestBody as string)).toHaveLength(100_000);
+  });
+
+  it('writes nothing when the flag is off', async () => {
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response('{"error":"nope"}', { status: 400 }));
+    const app = createProxyApp(makeConfig());
+
+    await (await postChat(app, '{}')).text();
+
+    expect(existsSync(captureDir())).toBe(false);
+  });
+
+  it('only captures 4xx, never 5xx', async () => {
+    process.env.SAROS_CAPTURE_4XX = '1';
+    vi.spyOn(globalThis, 'fetch').mockImplementation(() =>
+      Promise.resolve(new Response('upstream down', { status: 503 })),
+    );
+    const app = createProxyApp(makeConfig());
+
+    expect((await postChat(app, '{}')).status).toBe(502);
+
+    expect(existsSync(captureDir())).toBe(false);
   });
 });
 
