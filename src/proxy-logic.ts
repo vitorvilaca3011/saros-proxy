@@ -11,6 +11,7 @@
  */
 
 import { DEFAULT_CIRCUIT_BREAKER_COOLDOWN_MS } from './constants.js';
+import { redactSecrets } from './log-redact.js';
 
 // ---------------------------------------------------------------------------
 // Interfaces & Types
@@ -493,9 +494,16 @@ export function completeRequest(
  * classifyHttpError already narrowed the class: KeyFault is a 401 or a 5xx
  * carrying a quota/balance hint, ServerFault is 429 or any other 5xx.
  */
-function deriveKeyFailureReason(errorType: ErrorType, status?: number): KeyFailureReason {
+function deriveKeyFailureReason(
+  errorType: ErrorType,
+  status?: number,
+  body?: string,
+): KeyFailureReason {
   if (status === 401) return 'auth';
   if (status === 429) return 'rate_limit';
+  // classifyHttpError treats any 5xx mentioning "limit" as KeyFault, so a
+  // rate-limited 5xx would otherwise be reported as a quota wall.
+  if (body && /rate.?limit/i.test(body)) return 'rate_limit';
   if (errorType === 'KeyFault') return 'quota';
   return 'server';
 }
@@ -521,9 +529,11 @@ export function markKeyFailed(
   // threshold): this is what explains the state after a later disable.
   key.lastError = {
     status: info?.status ?? null,
-    reason: deriveKeyFailureReason(errorType, info?.status),
+    reason: deriveKeyFailureReason(errorType, info?.status, info?.body),
     at: Date.now(),
-    detail: info?.body ? info.body.slice(0, 200) : null,
+    // The raw body travels to clients in the 503/502 diagnosis; a provider that
+    // echoes the submitted bearer must not leak a working key.
+    detail: info?.body ? redactSecrets(info.body.slice(0, 200)) : null,
   };
 
   if (errorType === 'KeyFault') {
@@ -565,8 +575,11 @@ export function markKeySucceeded(state: ProxyState, keyLabel: string): void {
 // ---------------------------------------------------------------------------
 
 /**
- * Milliseconds until the key becomes selectable again, or null when it already
- * is. Pure: unlike isKeyAvailable this never revives the key.
+ * Milliseconds until the key becomes selectable again, or null when nothing
+ * will bring it back (healthy, retired in config, or no cooldown recorded).
+ * A key past its cooldown but not yet lazily revived reports 0 — it is
+ * selectable on the next request, which is not "already selectable" here.
+ * Pure: unlike isKeyAvailable this never revives the key.
  */
 export function keyRetryAfterMs(
   state: Pick<ProxyState, 'circuitBreakerThreshold' | 'circuitBreakerCooldownMs'>,
