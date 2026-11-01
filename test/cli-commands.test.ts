@@ -413,6 +413,50 @@ describe('CLI: bare invocation (overview)', () => {
     expect(output).toContain('[commandcode]');
     expect(output).toContain('1 configured');
   });
+  it('shows why a key is out of rotation', async () => {
+    process.argv = ['node', 'saros-proxy'];
+    vi.resetModules();
+    mockGetDaemonState.mockResolvedValue({
+      running: true,
+      pid: '1234',
+      port: 3000,
+      stalePid: false,
+      health: {
+        status: 'ok',
+        enabledCount: 1,
+        keyCount: 2,
+        keys: [
+          {
+            label: 'cc',
+            provider: 'commandcode',
+            enabled: false,
+            entitled: true,
+            consecutiveFailures: 1,
+            disabledAt: '2026-10-28T19:00:00.000Z',
+            retryAfterMs: 42_000,
+            lastError: { status: 401, reason: 'auth', at: '2026-10-28T19:00:00.000Z' },
+          },
+        ],
+      },
+    });
+    mockLoadConfig.mockReturnValue({
+      keys: [
+        { label: 'cc', key: 'user_abc', provider: 'commandcode' },
+        { label: 'oc', key: 'sk-abcdef...', provider: 'opencode-go' },
+      ],
+    } as any);
+    mockReadHarnessSettings.mockReturnValue([]);
+    mockProcessExit();
+    const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+
+    await expect(import('../src/index.js')).rejects.toThrow('process.exit(0)');
+    const output = logSpy.mock.calls.map((c) => c[0] as string).join('\n');
+    expect(output).toContain('disabled');
+    expect(output).toContain('401');
+    expect(output).toContain('auth');
+    expect(output).toContain('retry in 42s');
+  });
+
   it('shows not running when the probe finds nothing', async () => {
     process.argv = ['node', 'saros-proxy'];
     vi.resetModules();

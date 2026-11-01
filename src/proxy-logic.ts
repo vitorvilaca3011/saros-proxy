@@ -37,6 +37,54 @@ interface ApiKey {
   entitled: boolean;
   /** Smooth weighted round-robin state (nginx-style). */
   currentWeight: number;
+  /** Why the key last left rotation — reported by /health and the 503 body. */
+  lastError: KeyFailure | null;
+  /**
+   * True when the key was retired in config (`enabled: false`). Separate from
+   * `enabled` so a success (or a cooldown) can never put it back in rotation.
+   */
+  disabledByConfig: boolean;
+}
+
+/** Why a key is out of rotation, derived from the upstream verdict. */
+export type KeyFailureReason = 'auth' | 'quota' | 'rate_limit' | 'server';
+
+export interface KeyFailure {
+  /** Upstream HTTP status, when the failure came from a response. */
+  status: number | null;
+  reason: KeyFailureReason;
+  /** Epoch ms. */
+  at: number;
+  /** Short upstream message (≤200 chars). Never contains the credential. */
+  detail: string | null;
+}
+
+/** Upstream context for a failure, passed by the caller that saw it. */
+export interface KeyFailureInfo {
+  status?: number;
+  body?: string;
+}
+
+/** Public projection of one key's state — never contains the credential. */
+export interface KeyHealthReport {
+  label: string;
+  provider: string;
+  enabled: boolean;
+  entitled: boolean;
+  /** True when the key is retired in config (`enabled: false`). */
+  disabledByConfig: boolean;
+  consecutiveFailures: number;
+  disabledAt: string | null;
+  retryAfterMs: number | null;
+  lastError: { status: number | null; reason: KeyFailureReason; at: string } | null;
+  usagePercent: number | null;
+}
+
+/** Fields needed to answer "can this key be used right now?". */
+export interface KeyAvailability {
+  enabled: boolean;
+  consecutiveFailures: number;
+  disabledAt: number | null;
 }
 
 /** Read-only projection returned to callers — cannot mutate internal state. */
@@ -94,7 +142,7 @@ export type ErrorType = 'KeyFault' | 'RequestFault' | 'ServerFault' | 'NetworkFa
 // ---------------------------------------------------------------------------
 
 export function createProxyState(
-  keys: Array<{ label: string; key: string; provider?: string }>,
+  keys: Array<{ label: string; key: string; provider?: string; enabled?: boolean }>,
   options?: {
     circuitBreakerThreshold?: number;
     circuitBreakerCooldownMs?: number;
@@ -105,13 +153,15 @@ export function createProxyState(
       label: k.label,
       key: k.key,
       provider: k.provider ?? 'opencode-go',
-      enabled: true,
+      enabled: k.enabled ?? true,
       consecutiveFailures: 0,
       lastUsed: null,
       disabledAt: null,
       usagePercent: null,
       entitled: true,
       currentWeight: 0,
+      lastError: null,
+      disabledByConfig: k.enabled === false,
     })),
     currentIndex: 0,
     circuitBreakerThreshold: options?.circuitBreakerThreshold ?? 3,
@@ -138,6 +188,9 @@ function toSnapshot(key: ApiKey): KeySnapshot {
  * (C1 — fixes dead-code cooldown).
  */
 function isKeyAvailable(state: ProxyState, key: ApiKey): boolean {
+  // Retired in config: never re-enabled by a cooldown, a success or a restart
+  // without a config change.
+  if (key.disabledByConfig) return false;
   // Entitlement is definitive, not transient: a key whose account has no
   // plan for this provider must not be retried until the usage refresh
   // clears the flag.
@@ -436,7 +489,19 @@ export function completeRequest(
 // ---------------------------------------------------------------------------
 
 /**
- * Mark a key as failed according to the error type (C2).
+ * Map an upstream verdict onto the reason shown by /health and the 503 body.
+ * classifyHttpError already narrowed the class: KeyFault is a 401 or a 5xx
+ * carrying a quota/balance hint, ServerFault is 429 or any other 5xx.
+ */
+function deriveKeyFailureReason(errorType: ErrorType, status?: number): KeyFailureReason {
+  if (status === 401) return 'auth';
+  if (status === 429) return 'rate_limit';
+  if (errorType === 'KeyFault') return 'quota';
+  return 'server';
+}
+
+/**
+ * Mark a key as failed according to the error type (C2) and record why.
  * - KeyFault / ServerFault: penalise the key (KeyFault disables immediately)
  * - RequestFault / NetworkFault: no penalisation (bad request, or network
  *   trouble that is not the key's fault)
@@ -445,11 +510,21 @@ export function markKeyFailed(
   state: ProxyState,
   keyLabel: string,
   errorType: ErrorType,
+  info?: KeyFailureInfo,
 ): void {
   if (errorType === 'RequestFault' || errorType === 'NetworkFault') return;
 
   const key = state.keys.find((k) => k.label === keyLabel);
   if (!key) return;
+
+  // Recorded even when the key stays in rotation (ServerFault below the
+  // threshold): this is what explains the state after a later disable.
+  key.lastError = {
+    status: info?.status ?? null,
+    reason: deriveKeyFailureReason(errorType, info?.status),
+    at: Date.now(),
+    detail: info?.body ? info.body.slice(0, 200) : null,
+  };
 
   if (errorType === 'KeyFault') {
     // Disable immediately — the key is compromised / rate-limited
@@ -467,11 +542,19 @@ export function markKeyFailed(
 }
 
 /**
- * Mark a key as succeeded — resets consecutive failures.
+ * Mark a key as succeeded — resets consecutive failures and clears any
+ * cooldown. `enabled` must come back too: a success can arrive after the key
+ * was disabled (tier 2 shares a key between concurrent requests, and a stream
+ * that fails after completeRequest(…, true) marks failure late). Leaving
+ * `enabled=false` with `disabledAt=null` made the key unselectable forever,
+ * because isKeyAvailable only revives keys that still carry a disabledAt.
  */
 export function markKeySucceeded(state: ProxyState, keyLabel: string): void {
   const key = state.keys.find((k) => k.label === keyLabel);
   if (!key) return;
+  // A key retired in config stays out; only the config brings it back.
+  if (key.disabledByConfig) return;
+  key.enabled = true;
   key.consecutiveFailures = 0;
   // C1: clear cooldown on success so next selection isn't penalised
   key.disabledAt = null;
@@ -480,6 +563,48 @@ export function markKeySucceeded(state: ProxyState, keyLabel: string): void {
 // ---------------------------------------------------------------------------
 // Status Queries
 // ---------------------------------------------------------------------------
+
+/**
+ * Milliseconds until the key becomes selectable again, or null when it already
+ * is. Pure: unlike isKeyAvailable this never revives the key.
+ */
+export function keyRetryAfterMs(
+  state: Pick<ProxyState, 'circuitBreakerThreshold' | 'circuitBreakerCooldownMs'>,
+  key: KeyAvailability,
+  now = Date.now(),
+): number | null {
+  const usable = key.enabled && key.consecutiveFailures < state.circuitBreakerThreshold;
+  if (usable) return null;
+  if (!key.enabled && key.disabledAt !== null) {
+    return Math.max(0, key.disabledAt + state.circuitBreakerCooldownMs - now);
+  }
+  return null;
+}
+
+/**
+ * Per-key state for /health. Labels are already public (X-Proxy-Key-Label);
+ * the credential and the upstream message are not part of this projection.
+ */
+export function describeKeys(state: ProxyState, now = Date.now()): KeyHealthReport[] {
+  return state.keys.map((key) => ({
+    label: key.label,
+    provider: key.provider,
+    enabled: key.enabled,
+    entitled: key.entitled,
+    disabledByConfig: key.disabledByConfig,
+    consecutiveFailures: key.consecutiveFailures,
+    disabledAt: key.disabledAt === null ? null : new Date(key.disabledAt).toISOString(),
+    retryAfterMs: keyRetryAfterMs(state, key, now),
+    lastError: key.lastError
+      ? {
+          status: key.lastError.status,
+          reason: key.lastError.reason,
+          at: new Date(key.lastError.at).toISOString(),
+        }
+      : null,
+    usagePercent: key.usagePercent,
+  }));
+}
 
 // ---------------------------------------------------------------------------
 // Error Classification (C2)

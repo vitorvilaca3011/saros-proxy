@@ -258,6 +258,19 @@ describe('validateConfig', () => {
     );
   });
 
+  it('carries enabled: false through instead of dropping the key', () => {
+    const keys = [
+      { label: 'live', key: VALID_KEY },
+      { label: 'retired', key: VALID_KEY, enabled: false },
+    ];
+    const result = validateConfig(validBase({ keys }));
+
+    expect(result.keys).toHaveLength(2);
+    expect(result.keys.find((k) => k.label === 'retired')?.enabled).toBe(false);
+    // Absent field stays absent so the default (enabled) is decided in one place.
+    expect(result.keys.find((k) => k.label === 'live')?.enabled).toBeUndefined();
+  });
+
   it('throws when all keys are invalid', () => {
     const keys = [
       { label: 'a', key: 'sk-short' },

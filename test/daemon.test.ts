@@ -369,4 +369,41 @@ describe('daemon PID lifecycle', () => {
     const daemon = await import('../src/cli/daemon.js');
     expect(daemon.daemonStatus).toBeDefined();
   });
+
+  it('daemon status explains why a key is out of rotation', async () => {
+    mockHomeRef.current = tempHome;
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue(
+      new Response(
+        JSON.stringify({
+          status: 'ok',
+          keyCount: 2,
+          enabledCount: 1,
+          keys: [
+            {
+              label: 'work',
+              provider: 'commandcode',
+              enabled: false,
+              entitled: true,
+              retryAfterMs: 42_000,
+              lastError: { status: 401, reason: 'auth' },
+            },
+            { label: 'home', provider: 'opencode-go', enabled: true, entitled: true },
+          ],
+        }),
+        { status: 200 },
+      ),
+    );
+    mockProcessExitThrow();
+    const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+    const daemon = await importDaemon();
+
+    await expect(daemon.daemonStatus()).rejects.toThrow('process.exit(0)');
+
+    const output = logSpy.mock.calls.map((call) => String(call[0])).join('\n');
+    expect(output).toContain('Keys: 1/2 enabled');
+    expect(output).toContain('work');
+    expect(output).toContain('auth');
+    expect(output).toContain('(401)');
+    expect(output).toContain('retry in 42s');
+  });
 });

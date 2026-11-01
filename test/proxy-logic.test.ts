@@ -12,6 +12,8 @@ import {
   markKeyFailed,
   markKeySucceeded,
   classifyHttpError,
+  describeKeys,
+  keyRetryAfterMs,
   setKeyEntitlement,
   type ProxyState,
   type ErrorType,
@@ -161,6 +163,154 @@ describe('C1 – Circuit Breaker Cooldown', () => {
     markKeySucceeded(state, 'alpha');
     expect(state.keys[0].disabledAt).toBeNull();
     expect(state.keys[0].consecutiveFailures).toBe(0);
+  });
+
+  it('re-enables a key that succeeded after being disabled', () => {
+    const state = makeState(1);
+    markKeyFailed(state, 'alpha', 'KeyFault');
+    expect(state.keys[0].enabled).toBe(false);
+
+    markKeySucceeded(state, 'alpha');
+
+    expect(state.keys[0].enabled).toBe(true);
+    expect(state.keys[0].disabledAt).toBeNull();
+    expect(selectKeyForRequest(state, 'req-after-success')!.label).toBe('alpha');
+  });
+
+  it('does not strand a shared key when one request fails and another succeeds', () => {
+    // Tier 2 shares the only key between concurrent requests; one 401s while
+    // the other gets a 200. Before the fix the success left
+    // enabled=false / disabledAt=null, so the key was never selectable again.
+    const state = createProxyState([{ label: 'solo', key: 'sk-solo-000001' }], {
+      circuitBreakerThreshold: 1,
+      circuitBreakerCooldownMs: 60_000,
+    });
+    expect(selectKeyForRequest(state, 'stream-a')!.label).toBe('solo');
+    expect(selectKeyForRequest(state, 'stream-b')!.label).toBe('solo');
+
+    markKeyFailed(state, 'solo', 'KeyFault');
+    markKeySucceeded(state, 'solo');
+
+    expect(selectKeyForRequest(state, 'stream-c')?.label).toBe('solo');
+  });
+});
+
+describe('key failure reporting', () => {
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it('records the upstream status and reason of the last failure', () => {
+    const state = makeState(1);
+    freezeTime(1_000_000_000_000);
+
+    markKeyFailed(state, 'alpha', 'KeyFault', { status: 401, body: 'invalid key' });
+
+    expect(state.keys[0].lastError).toMatchObject({
+      status: 401,
+      reason: 'auth',
+      at: 1_000_000_000_000,
+    });
+  });
+
+  it('classifies quota, rate-limit and server failures', () => {
+    const state = makeState(1);
+
+    markKeyFailed(state, 'alpha', 'KeyFault', { status: 502, body: 'insufficient balance' });
+    markKeyFailed(state, 'beta', 'ServerFault', { status: 429 });
+    markKeyFailed(state, 'gamma', 'ServerFault', { status: 503 });
+
+    expect(state.keys[0].lastError?.reason).toBe('quota');
+    expect(state.keys[1].lastError?.reason).toBe('rate_limit');
+    expect(state.keys[2].lastError?.reason).toBe('server');
+  });
+
+  it('keeps the last error after a success but clears the disable', () => {
+    const state = makeState(1);
+    markKeyFailed(state, 'alpha', 'KeyFault', { status: 401 });
+
+    markKeySucceeded(state, 'alpha');
+
+    expect(state.keys[0].enabled).toBe(true);
+    expect(state.keys[0].lastError?.reason).toBe('auth');
+  });
+
+  it('reports retryAfterMs only while the key is cooling down', () => {
+    const state = makeState(1, 60_000);
+    freezeTime(1_000_000_000_000);
+    markKeyFailed(state, 'alpha', 'KeyFault', { status: 401 });
+
+    expect(keyRetryAfterMs(state, state.keys[0])).toBe(60_000);
+    advanceTime(45_000);
+    expect(keyRetryAfterMs(state, state.keys[0])).toBe(15_000);
+    advanceTime(15_000);
+    expect(keyRetryAfterMs(state, state.keys[0])).toBe(0);
+  });
+
+  it('returns null for a key that is enabled but over the failure threshold', () => {
+    const state = makeState(2);
+    expect(
+      keyRetryAfterMs(state, { enabled: true, consecutiveFailures: 2, disabledAt: null }),
+    ).toBeNull();
+  });
+
+  it('describes keys without exposing the credential', () => {
+    const state = makeState(1);
+    markKeyFailed(state, 'alpha', 'KeyFault', { status: 401 });
+
+    const [alpha] = describeKeys(state);
+
+    expect(alpha).toMatchObject({
+      label: 'alpha',
+      provider: 'opencode-go',
+      enabled: false,
+      entitled: true,
+    });
+    expect(alpha.lastError?.reason).toBe('auth');
+    expect(JSON.stringify(describeKeys(state))).not.toContain('sk-a1');
+  });
+});
+
+describe('config-disabled keys', () => {
+  it('never selects a key marked enabled: false', () => {
+    const state = createProxyState([
+      { label: 'retired', key: 'sk-retired-000001', enabled: false },
+      { label: 'live', key: 'sk-live-00000001' },
+    ]);
+
+    expect(state.keys[0].enabled).toBe(false);
+    expect(state.keys[0].disabledByConfig).toBe(true);
+
+    const picked = new Set<string>();
+    for (let i = 0; i < 4; i++) {
+      const snap = selectKeyForRequest(state, `cfg-${i}`);
+      if (snap) picked.add(snap.label);
+    }
+    expect([...picked]).toEqual(['live']);
+  });
+
+  it('returns no key when the only key is disabled by config', () => {
+    const state = createProxyState([
+      { label: 'retired', key: 'sk-retired-000001', enabled: false },
+    ]);
+    expect(selectKeyForRequest(state, 'cfg-only')).toBeNull();
+    // Never selected means never penalised.
+    expect(state.keys[0].consecutiveFailures).toBe(0);
+    expect(state.keys[0].lastError).toBeNull();
+  });
+
+  it('is not revived by a success and reports where the disable came from', () => {
+    const state = createProxyState([
+      { label: 'retired', key: 'sk-retired-000001', enabled: false },
+    ]);
+
+    markKeySucceeded(state, 'retired');
+
+    expect(state.keys[0].enabled).toBe(false);
+    expect(describeKeys(state)[0]).toMatchObject({
+      enabled: false,
+      disabledByConfig: true,
+    });
   });
 });
 
