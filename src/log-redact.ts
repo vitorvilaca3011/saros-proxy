@@ -30,3 +30,14 @@ export function redactSecrets(text: string): string {
   }
   return out;
 }
+
+/**
+ * Safe one-line description of an error. YAML parse errors embed the offending
+ * source line (which may be an API key) after the first line, so only the
+ * first line — the diagnostic with `at line L, column C` — is kept, and that
+ * line is redacted as well.
+ */
+export function redactErrorMessage(err: unknown): string {
+  const message = err instanceof Error ? err.message : String(err);
+  return redactSecrets(message.split('\n')[0].trim());
+}

@@ -4,21 +4,32 @@
  */
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import {
+  chmodSync,
   existsSync,
+  lstatSync,
+  mkdirSync,
   mkdtempSync,
   readFileSync,
+  readlinkSync,
   rmSync,
   statSync,
+  symlinkSync,
   writeFileSync,
 } from 'node:fs';
 import { PassThrough, Readable } from 'node:stream';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { parse } from 'yaml';
-import { runSecretCommand, runSecretSet, runSecretStatus } from '../src/cli/secret.js';
+import {
+  MIN_PASSPHRASE_LENGTH,
+  runSecretCommand,
+  runSecretSet,
+  runSecretStatus,
+} from '../src/cli/secret.js';
 import { runKeysCommand, encryptConfigFile } from '../src/cli/keys.js';
 import { decryptValue, encryptValue, isEnvelope } from '../src/secrets/envelope.js';
 import { loadConfig } from '../src/config.js';
+import { createProxyApp } from '../src/proxy.js';
 import type { CommandRunner } from '../src/secrets/source.js';
 
 const PASSPHRASE = 'cli-test-passphrase-fixture';
@@ -66,6 +77,22 @@ describe('secret command', () => {
     );
     expect(logs.join('\n')).toContain('stored');
     expect(logs.join('\n')).not.toContain(PASSPHRASE);
+    expect(errors.join('\n')).not.toContain('shorter than');
+  });
+
+  it('warns below the minimum length but still stores the passphrase', async () => {
+    const run = vi.fn<CommandRunner>(() => ({ ok: true, stdout: '' }));
+    const short = 'short';
+    expect(short.length).toBeLessThan(MIN_PASSPHRASE_LENGTH);
+    const code = await runSecretSet({
+      input: Readable.from([`${short}\n`]),
+      platform: 'linux',
+      run,
+    });
+    expect(code).toBe(0);
+    expect(run).toHaveBeenCalledTimes(1);
+    expect(errors.join('\n')).toContain(`shorter than ${MIN_PASSPHRASE_LENGTH} characters`);
+    expect(logs.join('\n')).toContain('stored');
   });
 
   it('prompts twice on a TTY and refuses a mismatch', async () => {
@@ -297,7 +324,70 @@ describe('keys encrypt', () => {
     const loaded = loadConfig(configPath, { passphrase: PASSPHRASE });
     expect(loaded.keys.map((entry) => entry.key)).toEqual([KEY, SECOND_KEY]);
     expect(loaded.keys.every((entry) => entry.encrypted)).toBe(true);
+    expect(logs.join('\n')).toContain('PLAINTEXT — delete after the first successful boot');
   });
+
+  it('writes no plaintext backup with --no-backup and says so', async () => {
+    const code = await runKeysCommand(
+      ['encrypt', '--config', configPath, '--no-backup'],
+      { passphrase: PASSPHRASE },
+    );
+    expect(code).toBe(0);
+    expect(existsSync(`${configPath}.backup`)).toBe(false);
+    expect(logs.join('\n')).toContain('No backup written');
+    expect(readFileSync(configPath, 'utf-8')).toContain('enc:v1:');
+  });
+
+  it.skipIf(process.platform === 'win32')(
+    'encrypts the real target behind a symlinked config and keeps the link',
+    async () => {
+      const realPath = join(tempDir, 'dotfiles', 'config.yaml');
+      mkdirSync(dirname(realPath), { recursive: true });
+      writeFileSync(realPath, originalYaml, 'utf-8');
+      const linkPath = join(tempDir, 'linked-config.yaml');
+      symlinkSync(realPath, linkPath);
+
+      expect(await encryptConfigFile({ configPath: linkPath, passphrase: PASSPHRASE })).toBe(0);
+
+      expect(lstatSync(linkPath).isSymbolicLink()).toBe(true);
+      expect(readlinkSync(linkPath)).toBe(realPath);
+      const target = readFileSync(realPath, 'utf-8');
+      expect(target).toContain('enc:v1:');
+      expect(target).not.toContain(KEY);
+      expect(target).not.toContain(SECOND_KEY);
+      expect(readFileSync(linkPath, 'utf-8')).toBe(target);
+      expect(readFileSync(`${realPath}.backup`, 'utf-8')).toBe(originalYaml);
+    },
+  );
+
+  it.skipIf(process.platform === 'win32' || process.getuid?.() === 0)(
+    'reports a backup failure without touching the config',
+    async () => {
+      const before = readFileSync(configPath, 'utf-8');
+      chmodSync(tempDir, 0o500);
+      try {
+        expect(await encryptConfigFile({ configPath, passphrase: PASSPHRASE })).toBe(1);
+        expect(errors.join('\n')).toContain('Could not rewrite');
+        expect(readFileSync(configPath, 'utf-8')).toBe(before);
+      } finally {
+        chmodSync(tempDir, 0o700);
+      }
+    },
+  );
+
+  it.skipIf(process.platform === 'win32')(
+    'refuses a backup path that is a symlink instead of writing through it',
+    async () => {
+      const victim = join(tempDir, 'victim.txt');
+      symlinkSync(victim, `${configPath}.backup`);
+      const before = readFileSync(configPath, 'utf-8');
+
+      expect(await encryptConfigFile({ configPath, passphrase: PASSPHRASE })).toBe(1);
+      expect(errors.join('\n')).toContain('not a regular file');
+      expect(existsSync(victim)).toBe(false);
+      expect(readFileSync(configPath, 'utf-8')).toBe(before);
+    },
+  );
 
   it('is idempotent and preserves the original backup', async () => {
     expect(await encryptConfigFile({ configPath, passphrase: PASSPHRASE })).toBe(0);
@@ -362,6 +452,8 @@ describe('keys encrypt', () => {
     expect(code).toBe(1);
     expect(errors.join('\n')).toContain('SAROS_PASSPHRASE');
     expect(errors.join('\n')).toContain('saros-proxy secret set');
+    expect(errors.join('\n')).toContain('Attempts:');
+    expect(errors.join('\n')).toContain('store: not populated');
     expect(readFileSync(configPath, 'utf-8')).toBe(before);
     expect(existsSync(`${configPath}.backup`)).toBe(false);
   });
@@ -398,6 +490,36 @@ describe('keys encrypt', () => {
     writeFileSync(configPath, 'keys: [unterminated\n', 'utf-8');
     expect(await encryptConfigFile({ configPath, passphrase: PASSPHRASE })).toBe(1);
     expect(errors.join('\n')).toContain('Could not parse');
+  });
+
+  it('never prints a key from a malformed YAML error', async () => {
+    writeFileSync(
+      configPath,
+      'keys:\n  - label: leak\n    key: "sk-must-not-reach-output-0000001\n',
+      'utf-8',
+    );
+    expect(await encryptConfigFile({ configPath, passphrase: PASSPHRASE })).toBe(1);
+    const output = errors.join('\n');
+    expect(output).toContain('Could not parse');
+    expect(output).not.toContain('sk-must-not-reach-output');
+  });
+
+  it('does not trust encrypted: true on a plaintext entry', async () => {
+    writeFileSync(
+      configPath,
+      `keys:\n  - label: spoofed\n    key: ${KEY}\n    encrypted: true\n`,
+      'utf-8',
+    );
+    const loaded = loadConfig(configPath);
+    expect(loaded.keys[0]).toMatchObject({ label: 'spoofed', key: KEY });
+    expect(loaded.keys[0].encrypted).toBeUndefined();
+
+    const response = await createProxyApp(loaded).request('/health');
+    const body = (await response.json()) as {
+      keys: Array<Record<string, unknown>>;
+    };
+    expect(body.keys[0]).toMatchObject({ label: 'spoofed', encrypted: false });
+    expect(JSON.stringify(body)).not.toContain(KEY);
   });
 
   it('refuses configs whose keys are not a list of labelled mappings', async () => {

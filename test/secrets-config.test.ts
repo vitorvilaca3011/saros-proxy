@@ -79,6 +79,7 @@ describe('loadConfig — enc:v1 envelopes', () => {
     process.env.PATH = emptyPath;
     process.argv = ['node', 'saros-proxy'];
     loggerMock.warn.mockClear();
+    loggerMock.error.mockClear();
   });
 
   afterEach(() => {
@@ -113,13 +114,33 @@ describe('loadConfig — enc:v1 envelopes', () => {
     }
     expect(caught).toBeInstanceOf(SecretSourceError);
     const message = (caught as Error).message;
-    expect(message).toBe(NO_PASSPHRASE_MESSAGE);
+    expect(message).toContain(NO_PASSPHRASE_MESSAGE);
     expect(message).toContain('SAROS_PASSPHRASE');
     expect(message).toContain('saros-proxy secret set');
     expect(message).toContain('saros-proxy serve');
+    expect(message).toContain('Store: secret-tool is not installed');
     expect(message).not.toContain(PASSPHRASE);
     expect(message).not.toContain(KEY);
     expect(message).not.toContain('enc:v1:');
+  });
+
+  it('carries an absent-store reason into the fail-fast message', () => {
+    writeConfig([{ label: LABEL, key: envelope() }]);
+    const store = join(tempDir, 'secret-tool');
+    writeFileSync(store, '#!/bin/sh\nexit 1\n', 'utf-8');
+    chmodSync(store, 0o755);
+    process.env.PATH = `${tempDir}:${emptyPath}`;
+
+    let caught: unknown;
+    try {
+      loadConfig(yamlPath);
+    } catch (err) {
+      caught = err;
+    }
+    const message = (caught as Error).message;
+    expect(message).toContain('no entry for service saros-proxy (not found)');
+    expect(message).not.toContain(PASSPHRASE);
+    expect(message).not.toContain(KEY);
   });
 
   it('reports a wrong passphrase without leaking either secret', () => {
@@ -149,6 +170,27 @@ describe('loadConfig — enc:v1 envelopes', () => {
     process.env.PATH = `${tempDir}:${emptyPath}`;
 
     expect(loadConfig(yamlPath).keys[0].key).toBe(KEY);
+  });
+
+  it('strips encrypted: true from a plaintext entry', () => {
+    writeConfig([{ label: 'spoofed', key: KEY, encrypted: true }]);
+    const config = loadConfig(yamlPath);
+    expect(config.keys[0]).toMatchObject({ label: 'spoofed', key: KEY });
+    expect(config.keys[0].encrypted).toBeUndefined();
+  });
+
+  it('logs a malformed YAML failure without the offending key line', () => {
+    writeFileSync(
+      yamlPath,
+      'keys:\n  - label: leak\n    key: "sk-log-leak-fixture-00000001\n',
+      'utf-8',
+    );
+    process.env.OPENCODE_GO_KEYS = `env:${KEY}`;
+
+    expect(loadConfig(yamlPath).keys).toHaveLength(1);
+    const logged = loggerMock.error.mock.calls.map((args) => JSON.stringify(args)).join('\n');
+    expect(logged).toContain('Failed to parse config file');
+    expect(logged).not.toContain('sk-log-leak-fixture');
   });
 
   it('warns loudly for plaintext keys but still loads them', () => {

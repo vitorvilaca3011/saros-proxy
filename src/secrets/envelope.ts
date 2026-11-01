@@ -28,7 +28,8 @@ export type EnvelopeErrorCode =
   | 'unsupported-version'
   | 'corrupt'
   | 'wrong-passphrase'
-  | 'empty-passphrase';
+  | 'empty-passphrase'
+  | 'empty-plaintext';
 
 export interface EnvelopeError {
   code: EnvelopeErrorCode;
@@ -64,11 +65,15 @@ function deriveKey(passphrase: string, salt: Buffer): Buffer {
 
 /**
  * Encrypt `plaintext` under `passphrase`, bound to `label`.
- * Throws {@link EnvelopeFailure} on an empty passphrase — never on data.
+ * Throws {@link EnvelopeFailure} on an empty passphrase or empty plaintext,
+ * so the format stays symmetric: every ciphertext part decodes to >= 1 byte.
  */
 export function encryptValue(plaintext: string, passphrase: string, label: string): string {
   if (passphrase.length === 0) {
     throw new EnvelopeFailure('empty-passphrase', 'Passphrase must not be empty');
+  }
+  if (plaintext.length === 0) {
+    throw new EnvelopeFailure('empty-plaintext', 'Plaintext must not be empty');
   }
 
   const salt = randomBytes(SALT_LENGTH);

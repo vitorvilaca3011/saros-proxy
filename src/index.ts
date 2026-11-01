@@ -19,6 +19,7 @@ import { createProxyApp } from './proxy.js';
 import { flushModelStats } from './model-stats.js';
 import { flushTokenUsage } from './token-usage.js';
 import { logger, maskKey } from './logger.js';
+import { redactSecrets } from './log-redact.js';
 import { FORCE_SHUTDOWN_TIMEOUT_MS } from './constants.js';
 import { daemonStart, daemonStop, daemonStatus, daemonRestart } from './cli/daemon.js';
 import { runUsageCommand } from './cli/usage.js';
@@ -298,9 +299,11 @@ if (subcommand === 'start') {
     const passphrase = await prepareBootPassphrase();
     config = loadConfig(undefined, { passphrase });
   } catch (err) {
-    const message = err instanceof Error ? err.message : String(err);
+    // Keep the multi-line guidance (env/store/TTY options) but mask any
+    // credential-shaped substring before it reaches a terminal or the log.
+    const message = redactSecrets(err instanceof Error ? err.message : String(err));
     console.error(chalk.red(`✗ ${message}`));
-    logger.error({ err }, 'Failed to load configuration');
+    logger.error({ evt: 'boot.failed' }, 'Failed to load configuration: %s', message);
     process.exit(1);
   }
 

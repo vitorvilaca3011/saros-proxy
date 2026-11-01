@@ -53,6 +53,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Security review fixes for key encryption (#100).** The DPAPI blob now
+  travels in the child environment (`$env:SAROS_DPAPI_BLOB`) and is validated
+  as base64 before PowerShell runs, closing a command-injection path; a symlinked
+  `config.yaml` is rewritten through `realpathSync`, so the real target is
+  encrypted instead of being left in plaintext; YAML parse errors are reduced
+  to their first line and redacted before `keys encrypt`/boot print them; an
+  `encrypted: true` field on a plaintext entry is ignored; `keys encrypt`
+  states that `<config>.backup` is plaintext and adds `--no-backup`; backup and
+  temp writes use `COPYFILE_EXCL`/`wx` under a private `mkdtemp` directory to
+  defeat symlink and TOCTOU capture; `encryptValue('')` is rejected with a
+  typed `empty-plaintext` error; the freshness test now asserts distinct salt
+  and nonce; `secret set` warns below 12 characters; and store failures
+  distinguish "not found" from a locked keyring and are carried into
+  `secret status` and boot errors.
 - **A key's configured `provider` now decides its upstream**, instead of
   re-inferring it from the credential prefix. A key declared
   `provider: commandcode` with an `sk-…` credential was forwarded to the

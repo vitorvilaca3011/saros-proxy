@@ -84,7 +84,13 @@ describe('passphrase sources', () => {
     it('reports a non-zero exit with its code', () => {
       writeScript(tempDir, 'failing-tool', 'echo "nope" >&2; exit 7');
       const result = runCommand('failing-tool', []);
-      expect(result).toEqual({ ok: false, stdout: '', reason: 'failing-tool exited with code 7' });
+      expect(result).toMatchObject({
+        ok: false,
+        stdout: '',
+        reason: 'failing-tool exited with code 7',
+        status: 7,
+        stderr: 'nope\n',
+      });
     });
 
     it('reports a binary that exists but cannot be executed', () => {
@@ -185,6 +191,28 @@ describe('passphrase sources', () => {
       expect(empty.ok).toBe(false);
       if (!empty.ok) expect(empty.reason).toContain('empty secret');
     });
+
+    it('distinguishes an absent entry from a locked keyring', () => {
+      writeScript(tempDir, 'secret-tool', 'exit 1');
+      const absent = readStorePassphrase({ platform: 'linux' });
+      expect(absent.ok).toBe(false);
+      if (!absent.ok) {
+        expect(absent.reason).toContain('not found');
+        expect(absent.reason).not.toContain('keyring');
+      }
+
+      writeScript(
+        tempDir,
+        'secret-tool',
+        'echo "Cannot autolaunch D-Bus without X11 $DISPLAY" >&2; exit 1',
+      );
+      const locked = readStorePassphrase({ platform: 'linux' });
+      expect(locked.ok).toBe(false);
+      if (!locked.ok) {
+        expect(locked.reason).toContain('keyring locked or error');
+        expect(locked.reason).not.toContain('not found');
+      }
+    });
   });
 
   describe('macOS store (security)', () => {
@@ -208,6 +236,18 @@ describe('passphrase sources', () => {
         ok: true,
         value: STORED,
       });
+    });
+
+    it('maps errSecItemNotFound and a locked keychain to different reasons', () => {
+      writeScript(tempDir, 'security', 'exit 44');
+      const absent = readStorePassphrase({ platform: 'darwin', username: 'tester' });
+      expect(absent.ok).toBe(false);
+      if (!absent.ok) expect(absent.reason).toContain('not found');
+
+      writeScript(tempDir, 'security', 'echo "keychain is locked" >&2; exit 1');
+      const locked = readStorePassphrase({ platform: 'darwin', username: 'tester' });
+      expect(locked.ok).toBe(false);
+      if (!locked.ok) expect(locked.reason).toContain('keyring locked or error');
     });
   });
 
@@ -244,18 +284,69 @@ describe('passphrase sources', () => {
       if (!result.ok) expect(result.reason).toContain('is empty');
     });
 
-    it('calls PowerShell Unprotect with the blob and CurrentUser scope', () => {
+    it('calls PowerShell Unprotect with the blob in the environment', () => {
       const path = join(tempDir, 'secret.dpapi');
-      writeFileSync(path, Buffer.from('blob-fixture').toString('base64'), 'utf8');
+      const blob = Buffer.from('blob-fixture').toString('base64');
+      writeFileSync(path, blob, 'utf8');
       const run = vi.fn<CommandRunner>(() => ({ ok: true, stdout: `${STORED}\n` }));
       const result = readStorePassphrase({ platform: 'win32', dpapiPath: path, run });
       expect(result).toEqual({ ok: true, value: STORED });
-      const args = run.mock.calls[0]?.[1] ?? [];
-      expect(run.mock.calls[0]?.[0]).toBe('powershell');
+      const call = run.mock.calls[0];
+      const args = call?.[1] ?? [];
+      expect(call?.[0]).toBe('powershell');
       expect(args).toContain('-NoProfile');
       expect(args.join(' ')).toContain('Unprotect');
       expect(args.join(' ')).toContain("'CurrentUser'");
-      expect(args.join(' ')).toContain(Buffer.from('blob-fixture').toString('base64'));
+      expect(args.join(' ')).toContain('$env:SAROS_DPAPI_BLOB');
+      // The blob is data for the child env, never part of the command line.
+      expect(args.join(' ')).not.toContain(blob);
+      expect(call?.[2]?.env).toEqual({ SAROS_DPAPI_BLOB: blob });
+    });
+
+    it('rejects a blob that could break out of a PowerShell string', () => {
+      const path = join(tempDir, 'quoted.dpapi');
+      writeFileSync(path, "AAAA'; Write-Output 'INJECTED'; 'BBBB", 'utf8');
+      const run = vi.fn<CommandRunner>(() => ({ ok: true, stdout: `${STORED}\n` }));
+      const result = readStorePassphrase({ platform: 'win32', dpapiPath: path, run });
+      expect(result.ok).toBe(false);
+      if (!result.ok) expect(result.reason).toContain('not valid base64');
+      expect(run).not.toHaveBeenCalled();
+    });
+
+    it('rejects a blob whose base64 length is impossible', () => {
+      const path = join(tempDir, 'short.dpapi');
+      writeFileSync(path, 'AAAAA', 'utf8');
+      const run = vi.fn<CommandRunner>(() => ({ ok: true, stdout: `${STORED}\n` }));
+      const result = readStorePassphrase({ platform: 'win32', dpapiPath: path, run });
+      expect(result.ok).toBe(false);
+      if (!result.ok) expect(result.reason).toContain('not valid base64');
+      expect(run).not.toHaveBeenCalled();
+    });
+
+    it('keeps a DPAPI failure reason and defaults a missing stderr', () => {
+      const path = join(tempDir, 'secret.dpapi');
+      writeFileSync(path, Buffer.from('blob-fixture').toString('base64'), 'utf8');
+      const dpapiFailure = readStorePassphrase({
+        platform: 'win32',
+        dpapiPath: path,
+        run: () => ({
+          ok: false,
+          stdout: '',
+          reason: 'powershell exited with code 1',
+          status: 1,
+        }),
+      });
+      expect(dpapiFailure).toEqual({
+        ok: false,
+        reason: 'powershell exited with code 1',
+      });
+
+      const absent = readStorePassphrase({
+        platform: 'linux',
+        run: () => ({ ok: false, stdout: '', reason: 'secret-tool exited with code 1', status: 1 }),
+      });
+      expect(absent.ok).toBe(false);
+      if (!absent.ok) expect(absent.reason).toContain('(not found)');
     });
 
     it('uses the injected APPDATA path and rejects unsupported platforms', () => {

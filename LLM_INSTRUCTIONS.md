@@ -171,7 +171,7 @@ $env:OPENCODE_GO_ENCRYPTION_KEY = Get-Content /tmp/encryption-key.txt
 **Preferred after setup (enc:v1 envelope + OS store):**
 
 ```bash
-saros-proxy keys encrypt    # rewrite plaintext keys as enc:v1:…, backing up config.yaml
+saros-proxy keys encrypt    # rewrite plaintext keys as enc:v1:…; the .backup is plaintext (--no-backup skips it)
 saros-proxy secret set      # store the passphrase in the OS store (Keychain/DPAPI/secret-tool)
 saros-proxy secret status   # confirm which source wins; never prints the value
 saros-proxy serve           # foreground fallback: prompts once if no source exists

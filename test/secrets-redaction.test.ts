@@ -6,7 +6,7 @@ import { describe, it, expect } from 'vitest';
 import { Writable } from 'node:stream';
 import pino from 'pino';
 import { LOG_REDACT_PATHS } from '../src/logger.js';
-import { redactSecrets } from '../src/log-redact.js';
+import { redactErrorMessage, redactSecrets } from '../src/log-redact.js';
 import { encryptValue, decryptValue } from '../src/secrets/envelope.js';
 import { NO_PASSPHRASE_MESSAGE, decryptFailureMessage } from '../src/secrets/source.js';
 
@@ -65,6 +65,16 @@ describe('log redaction', () => {
     expect(line).toContain('"note":"ok"');
     expect(line).not.toContain(PASSPHRASE);
     expect(line).not.toContain(PLAINTEXT);
+  });
+
+  it('keeps only a redacted first line for error text', () => {
+    expect(
+      redactErrorMessage(new Error('Missing closing quote at line 4:\n  key: sk-leak-0000\n^')),
+    ).toBe('Missing closing quote at line 4:');
+    expect(redactErrorMessage('sk-string-error-0000')).toBe('[redacted-key]');
+    expect(redactErrorMessage(new Error('first sk-leak-0000\nsecond'))).toBe(
+      'first [redacted-key]',
+    );
   });
 
   it('keeps error and boot text free of plaintext, passphrase and ciphertext', () => {

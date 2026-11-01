@@ -398,7 +398,21 @@ persisted so encrypted keys still route correctly):
 ```bash
 saros-proxy keys encrypt
 # or: saros-proxy keys encrypt --config /etc/saros/config.yaml
+# or: saros-proxy keys encrypt --no-backup
 ```
+
+The backup is written **in plaintext** (mode 0600) on purpose: it is the
+recovery path if the passphrase is lost. Delete it after the first successful
+boot, or pass `--no-backup` to skip it. A symlinked config (dotfile setups) is
+rewritten through its real target — the link survives and the target is
+encrypted.
+
+**Cost of the KDF:** the envelope uses scrypt N=2^15, r=8, p=1 (about 32 MiB
+and ~70 ms per key on a current laptop). Boot derives the key once per
+encrypted entry, so 10 keys add roughly 0.7 s. Raising N to 2^17 (OWASP's
+recommendation) multiplies that boot cost by ~4 per key; do it only together
+with a migration, and remember that passphrase entropy — not the KDF — is what
+an offline attacker attacks first.
 
 **Passphrase sources, first match wins:**
 
@@ -417,11 +431,18 @@ saros-proxy secret status   # which source would win + whether the store is popu
 saros-proxy serve           # foreground; may prompt if no source is available
 ```
 
-`secret set` never writes the passphrase to a file and never prints it. On
+`secret set` never writes the passphrase to a file and never prints it; it
+warns when the value is shorter than 12 characters (scrypt makes guessing
+expensive, but passphrase entropy is what actually protects the keys). On
 Linux it is stored with `secret-tool store --label="saros-proxy passphrase"
 service saros-proxy account "$USER"`; on macOS with `security
 add-generic-password -U -s saros-proxy -a "$USER" -w`; on Windows PowerShell
 `ProtectedData.Protect(..., 'CurrentUser')` writes the blob.
+
+`secret status` distinguishes an absent entry (`not found`) from an
+unavailable keyring (`keyring locked or error`), and the same reason is carried
+into the "no passphrase source" boot error — a locked keyring is not reported
+as an empty store.
 
 **systemd-creds recipe** (keeps the passphrase out of the unit file and the
 environment of the shell):
@@ -447,7 +468,9 @@ ExecStart=/bin/sh -c 'SAROS_PASSPHRASE="$(cat "$CREDENTIALS_DIRECTORY/saros-pass
   message naming the three options. A wrong passphrase also exits `1` and
   names the key label — never the key or the passphrase.
 - `GET /health` reports `"encrypted": true` per key; it never returns the
-  ciphertext or the plaintext.
+  ciphertext or the plaintext. The flag is derived from the value being an
+  envelope — an `encrypted: true` field on a plaintext entry is stripped, so
+  the signal cannot be spoofed from YAML.
 - Legacy `enc:scrypt:` keys still decrypt with `OPENCODE_GO_ENCRYPTION_KEY`
   (with a warning); `keys encrypt` leaves them untouched.
 - `OPENCODE_GO_KEYS` is always plaintext (CI use) and is not covered by the
@@ -861,7 +884,7 @@ hands the plaintext to the proxy process, which that code can inspect.
 |---|---|---|---|---|
 | Config file copied to another machine/user | No protection | Protected (passphrase not in the file) | Protected (DPAPI/Keychain is user-bound) | Protected |
 | Dotfile sync / cloud backup / git accident | Leaks | Protected | Protected | Protected |
-| Backup of the config directory only | Leaks | Protected | Protected | Protected |
+| Backup of the config directory only | Leaks | Protected only after deleting `config.yaml.backup` (the migration backup is plaintext) | Same caveat | Same caveat |
 | Shoulder surfing the config file | Leaks | Protected | Protected | Protected |
 | Another local process **running as the same user** | Reads the file | Can read the env (`/proc/<pid>/environ`) | Can call the same OS CLI / read the same DPAPI blob | Can read the terminal or memory |
 | Malware running as the same user | Reads the file | No protection | No protection | No protection |
@@ -876,7 +899,11 @@ Practical guidance:
 - Use `SAROS_PASSPHRASE` for containers/systemd; prefer `systemd-creds` (recipe
   above) over a unit-file `Environment=` line.
 - The passphrase must be high entropy and independent from the API keys; the
-  envelope only makes an offline attack expensive, not impossible.
+  envelope only makes an offline attack expensive, not impossible. `secret set`
+  warns below 12 characters; no length is enforced.
+- `keys encrypt` writes `<config>.backup` in plaintext (0600) once. Delete it
+  after the first successful boot, or use `--no-backup`. Any directory/dotfile
+  backup taken before that deletion contains the original keys.
 - `saros-proxy secret status` shows which source would win and never prints a
   value.
 

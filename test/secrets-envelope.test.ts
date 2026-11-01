@@ -31,9 +31,26 @@ describe('enc:v1 envelope', () => {
   });
 
   it('uses a fresh salt and nonce per encryption', () => {
-    expect(encryptValue(PLAINTEXT, PASSPHRASE, LABEL)).not.toBe(
-      encryptValue(PLAINTEXT, PASSPHRASE, LABEL),
+    const parts = [1, 2, 3].map(() =>
+      encryptValue(PLAINTEXT, PASSPHRASE, LABEL)
+        .slice(ENVELOPE_PREFIX.length)
+        .split('.'),
     );
+    // Comparing whole envelopes would still pass with a fixed nonce; parse
+    // the parts so a mutation to a constant nonce fails.
+    expect(new Set(parts.map((part) => part[0])).size).toBe(3);
+    expect(new Set(parts.map((part) => part[1])).size).toBe(3);
+  });
+
+  it('rejects an empty plaintext with a typed error', () => {
+    expect(() => encryptValue('', PASSPHRASE, LABEL)).toThrow(EnvelopeFailure);
+    try {
+      encryptValue('', PASSPHRASE, LABEL);
+    } catch (err) {
+      expect(err).toBeInstanceOf(EnvelopeFailure);
+      expect((err as EnvelopeFailure).code).toBe('empty-plaintext');
+      expect((err as EnvelopeFailure).message).not.toContain(PASSPHRASE);
+    }
   });
 
   it('rejects a wrong passphrase with a typed error and no secret material', () => {

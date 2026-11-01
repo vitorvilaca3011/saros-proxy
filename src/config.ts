@@ -7,6 +7,7 @@ import { homedir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { parse as parseYaml } from 'yaml';
 import { logger, maskKey } from './logger.js';
+import { redactErrorMessage } from './log-redact.js';
 import { decryptKey, isEncryptedKey } from './key-encryption.js';
 import { decryptValue, isEnvelope } from './secrets/envelope.js';
 import {
@@ -355,7 +356,8 @@ function loadYamlOverrides(yamlPath: string): YamlConfig | null {
     logger.info('Loaded config from %s', yamlPath);
     return yaml;
   } catch (err) {
-    logger.error({ err }, 'Failed to parse config file %s', yamlPath);
+    // YAMLParseError.message embeds the offending line — possibly a key.
+    logger.error('Failed to parse config file %s: %s', yamlPath, redactErrorMessage(err));
     return null;
   }
 }
@@ -391,6 +393,13 @@ function warnPlaintextKeys(yaml: YamlConfig, yamlPath: string): void {
   );
 }
 
+/** Plaintext entries must not be able to claim `encrypted: true` in YAML. */
+function withoutEncryptedFlag(entry: KeyEntry): KeyEntry {
+  const copy = { ...entry };
+  delete copy.encrypted;
+  return copy;
+}
+
 /** Resolve every `enc:` entry before validation; a failure aborts boot. */
 function resolveEncryptedKeys(config: ProxyConfig, explicitPassphrase: string | undefined): void {
   const hasEnvelopes = config.keys.some((key) => isEnvelope(key.key));
@@ -400,7 +409,7 @@ function resolveEncryptedKeys(config: ProxyConfig, explicitPassphrase: string | 
     if (typeof entry.key === 'string' && isEncryptedKey(entry.key)) {
       return { ...entry, key: decryptLegacyEntry(entry), encrypted: true };
     }
-    return entry;
+    return withoutEncryptedFlag(entry);
   });
 }
 
@@ -418,7 +427,7 @@ function resolveEnvelopePassphrase(explicitPassphrase: string | undefined): stri
   const store = readStorePassphrase();
   if (store.ok) return store.value;
 
-  throw new SecretSourceError(NO_PASSPHRASE_MESSAGE);
+  throw new SecretSourceError(`${NO_PASSPHRASE_MESSAGE}\nStore: ${store.reason}`);
 }
 
 function decryptEnvelopeEntry(entry: KeyEntry, passphrase: string): KeyEntry {

@@ -14,6 +14,7 @@ import { isEnvelope } from './envelope.js';
 import {
   NO_PASSPHRASE_MESSAGE,
   SecretSourceError,
+  formatAttempts,
   resolvePassphrase,
   type ResolveOptions,
 } from './source.js';
@@ -51,9 +52,7 @@ export async function prepareBootPassphrase(
   const resolved = await resolvePassphrase({ ...options, allowTty });
   if (resolved.ok) return resolved.value;
 
-  const attempts = resolved.attempts
-    .map((entry) => `  ${entry.source}: ${entry.reason}`)
-    .join('\n');
+  const attempts = formatAttempts(resolved.attempts);
   throw new SecretSourceError(`${NO_PASSPHRASE_MESSAGE}\nAttempts:\n${attempts}`);
 }
 

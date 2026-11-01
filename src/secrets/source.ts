@@ -47,7 +47,7 @@ export interface SourceAttempt {
 
 export type CommandResult =
   | { ok: true; stdout: string }
-  | { ok: false; stdout: ''; reason: string };
+  | { ok: false; stdout: ''; reason: string; status?: number | null; stderr?: string };
 
 export interface CommandOptions {
   input?: string;
@@ -128,7 +128,11 @@ export function decryptFailureMessage(label: string, detail: string): string {
   );
 }
 
-/** Run a platform CLI without a shell; never returns stdout/stderr on failure. */
+/**
+ * Run a platform CLI without a shell. Failures carry only a generic reason
+ * plus exit status and (bounded) stderr for the store classifier — callers
+ * never print stderr, and stdout is dropped.
+ */
 export function runCommand(
   command: string,
   args: string[],
@@ -149,7 +153,14 @@ export function runCommand(
   }
   if (result.status !== 0) {
     const detail = result.status === null ? 'was terminated' : `exited with code ${result.status}`;
-    return { ok: false, stdout: '', reason: `${command} ${detail}` };
+    return {
+      ok: false,
+      stdout: '',
+      reason: `${command} ${detail}`,
+      status: result.status,
+      // Diagnostics for the store classifier only; never printed verbatim.
+      stderr: (result.stderr || '').slice(0, 4096),
+    };
   }
   return { ok: true, stdout: result.stdout || '' };
 }
@@ -160,8 +171,34 @@ function firstLine(stdout: string): string {
   return line.replace(/\r$/, '');
 }
 
-function interpret(result: CommandResult, command: string): SourceResult {
-  if (!result.ok) return { ok: false, reason: result.reason };
+/** `secret-tool`/`security` say "no match" through exit code and stderr. */
+const STORE_NOT_FOUND =
+  /not found|no such|does not exist|item could not be found|errSecItemNotFound/i;
+const STORE_UNAVAILABLE =
+  /(?:d-?bus|autolaunch|secret service|keyring|locked|denied|permission|not authorized|timed out)/i;
+
+function lookupFailureReason(result: Extract<CommandResult, { ok: false }>, command: string): string {
+  // Injected runners (tests/embedders) only provide a ready-made reason.
+  if (result.status === undefined) return result.reason;
+
+  const stderr = result.stderr ?? '';
+  if (
+    STORE_NOT_FOUND.test(stderr) ||
+    result.status === 44 ||
+    (result.status === 1 && stderr.trim().length === 0)
+  ) {
+    return `${command}: no entry for service ${SERVICE_NAME} (not found)`;
+  }
+  if (STORE_UNAVAILABLE.test(stderr)) {
+    return `${command}: OS secret store unavailable (keyring locked or error)`;
+  }
+  return result.reason;
+}
+
+function interpret(result: CommandResult, command: string, lookup = false): SourceResult {
+  if (!result.ok) {
+    return { ok: false, reason: lookup ? lookupFailureReason(result, command) : result.reason };
+  }
   const value = firstLine(result.stdout);
   return value.length > 0
     ? { ok: true, value }
@@ -184,6 +221,8 @@ export function defaultDpapiPath(env: NodeJS.ProcessEnv = process.env): string {
   return join(appData, 'saros', 'secret.dpapi');
 }
 
+const DPAPI_BLOB = /^[A-Za-z0-9+/]+={0,2}$/;
+
 function readDpapi(passphrasePath: string, run: CommandRunner): SourceResult {
   if (!existsSync(passphrasePath)) {
     return { ok: false, reason: `DPAPI blob not found at ${passphrasePath}` };
@@ -197,13 +236,23 @@ function readDpapi(passphrasePath: string, run: CommandRunner): SourceResult {
   if (blob.length === 0) {
     return { ok: false, reason: `DPAPI blob at ${passphrasePath} is empty` };
   }
+  // Fail closed before PowerShell sees anything: a quote in the blob used to
+  // break out of the single-quoted string and run arbitrary commands.
+  if (!DPAPI_BLOB.test(blob) || blob.length % 4 !== 0) {
+    return { ok: false, reason: `DPAPI blob at ${passphrasePath} is not valid base64` };
+  }
 
+  // The blob travels in the child environment, never interpolated into the
+  // script, so no base64 character can become PowerShell syntax.
   const script =
     "$ErrorActionPreference='Stop';" +
     'Add-Type -AssemblyName System.Security;' +
-    `[System.Text.Encoding]::UTF8.GetString([System.Security.Cryptography.ProtectedData]::Unprotect([Convert]::FromBase64String('${blob}'), $null, 'CurrentUser'))`;
+    '$b=[Convert]::FromBase64String($env:SAROS_DPAPI_BLOB);' +
+    "[System.Text.Encoding]::UTF8.GetString([System.Security.Cryptography.ProtectedData]::Unprotect($b, $null, 'CurrentUser'))";
   return interpret(
-    run('powershell', ['-NoProfile', '-NonInteractive', '-Command', script]),
+    run('powershell', ['-NoProfile', '-NonInteractive', '-Command', script], {
+      env: { SAROS_DPAPI_BLOB: blob },
+    }),
     'powershell',
   );
 }
@@ -218,12 +267,14 @@ export function readStorePassphrase(options: StoreOptions = {}): SourceResult {
     return interpret(
       run('secret-tool', ['lookup', 'service', SERVICE_NAME, 'account', username]),
       'secret-tool',
+      true,
     );
   }
   if (platform === 'darwin') {
     return interpret(
       run('security', ['find-generic-password', '-s', SERVICE_NAME, '-a', username, '-w']),
       'security',
+      true,
     );
   }
   if (platform === 'win32') {
@@ -295,6 +346,14 @@ export async function readTtyPassphrase(options: PromptOptions = {}): Promise<So
 
 function attempt(source: SecretSourceName, result: SourceResult): SourceAttempt {
   return result.ok ? { source, ok: true } : { source, ok: false, reason: result.reason };
+}
+
+/** One line per failed source; safe for errors, never includes a value. */
+export function formatAttempts(attempts: SourceAttempt[]): string {
+  return attempts
+    .filter((entry) => !entry.ok)
+    .map((entry) => `  ${entry.source}: ${entry.reason}`)
+    .join('\n');
 }
 
 /**

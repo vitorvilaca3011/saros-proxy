@@ -8,22 +8,29 @@
 
 import {
   chmodSync,
+  constants,
   copyFileSync,
   existsSync,
+  lstatSync,
+  mkdtempSync,
   readFileSync,
+  realpathSync,
   renameSync,
   rmSync,
   writeFileSync,
 } from 'node:fs';
+import { basename, dirname, join } from 'node:path';
 import type { Readable, Writable } from 'node:stream';
 import chalk from 'chalk';
 import { isMap, isSeq, parseDocument, type YAMLMap } from 'yaml';
 import { resolveConfigPath } from '../config.js';
+import { redactErrorMessage } from '../log-redact.js';
 import { inferProvider } from '../providers/infer.js';
 import { encryptValue, isEnvelope } from '../secrets/envelope.js';
 import { isEncryptedKey } from '../key-encryption.js';
 import {
   NO_PASSPHRASE_MESSAGE,
+  formatAttempts,
   resolvePassphrase,
   type CommandRunner,
   type SourceResult,
@@ -33,6 +40,7 @@ export interface KeysCommandOptions {
   configPath?: string;
   passphrase?: string;
   allowTty?: boolean;
+  noBackup?: boolean;
   input?: Readable & { isTTY?: boolean };
   output?: Writable;
   env?: NodeJS.ProcessEnv;
@@ -66,21 +74,40 @@ function collectKeys(sequence: unknown): KeyNode[] {
   });
 }
 
+/**
+ * Copy the plaintext config once, refusing to follow a pre-created symlink at
+ * the backup path (COPYFILE_EXCL fails with EEXIST instead of writing through).
+ */
 function backupConfig(configPath: string): string | null {
   const backupPath = `${configPath}.backup`;
-  if (existsSync(backupPath)) return null;
-  copyFileSync(configPath, backupPath);
+  try {
+    copyFileSync(configPath, backupPath, constants.COPYFILE_EXCL);
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code !== 'EEXIST') throw err;
+    if (!lstatSync(backupPath).isFile()) {
+      throw new KeysCommandError(
+        `Refusing to use ${backupPath} as the backup: it exists and is not a regular file`,
+      );
+    }
+    return null;
+  }
   chmodSync(backupPath, 0o600);
   return backupPath;
 }
 
+/**
+ * Write through an unpredictable temp file created inside a fresh private
+ * directory, opened with `wx` so an existing path can never capture the
+ * plaintext. Renaming over the real target keeps symlinked configs intact.
+ */
 function writeConfig(configPath: string, content: string): void {
-  const temporary = `${configPath}.tmp-${process.pid}`;
+  const directory = mkdtempSync(join(dirname(configPath), `.${basename(configPath)}.tmp-`));
+  const temporary = join(directory, basename(configPath));
   try {
-    writeFileSync(temporary, content, { encoding: 'utf-8', mode: 0o600 });
+    writeFileSync(temporary, content, { encoding: 'utf-8', mode: 0o600, flag: 'wx' });
     renameSync(temporary, configPath);
   } finally {
-    rmSync(temporary, { force: true });
+    rmSync(directory, { recursive: true, force: true });
   }
 }
 
@@ -100,25 +127,33 @@ async function resolveEncryptPassphrase(options: KeysCommandOptions): Promise<So
   });
   return resolved.ok
     ? { ok: true, value: resolved.value }
-    : { ok: false, reason: 'no passphrase source available' };
+    : { ok: false, reason: formatAttempts(resolved.attempts) };
 }
 
 /** Encrypt one already-parsed config document; exported for tests. */
 export async function encryptConfigFile(options: KeysCommandOptions = {}): Promise<number> {
-  const configPath = options.configPath ?? resolveConfigPath();
-  if (!existsSync(configPath)) {
-    console.error(chalk.red(`✗ Config file not found: ${configPath}`));
+  const requestedPath = options.configPath ?? resolveConfigPath();
+  if (!existsSync(requestedPath)) {
+    console.error(chalk.red(`✗ Config file not found: ${requestedPath}`));
     return 1;
   }
 
+  // A dotfile-managed config is usually a symlink; rewriting the link would
+  // leave the real target (the file the proxy reads) in plaintext.
+  let configPath = requestedPath;
   let document;
   try {
+    configPath = realpathSync(requestedPath);
     document = parseDocument(readFileSync(configPath, 'utf-8'));
     if (document.errors.length > 0) {
-      throw new KeysCommandError(document.errors.map((error) => error.message).join('; '));
+      throw new KeysCommandError(
+        document.errors.map((error) => redactErrorMessage(error)).join('; '),
+      );
     }
   } catch (err) {
-    console.error(chalk.red(`✗ Could not parse ${configPath}: ${errorMessage(err)}`));
+    console.error(
+      chalk.red(`✗ Could not parse ${requestedPath}: ${redactErrorMessage(err)}`),
+    );
     return 1;
   }
 
@@ -126,7 +161,7 @@ export async function encryptConfigFile(options: KeysCommandOptions = {}): Promi
   try {
     keys = collectKeys(document.get('keys'));
   } catch (err) {
-    console.error(chalk.red(`✗ ${errorMessage(err)}`));
+    console.error(chalk.red(`✗ ${redactErrorMessage(err)}`));
     return 1;
   }
 
@@ -140,7 +175,11 @@ export async function encryptConfigFile(options: KeysCommandOptions = {}): Promi
 
   const passphrase = await resolveEncryptPassphrase(options);
   if (!passphrase.ok) {
-    console.error(chalk.red('✗ No passphrase source available.\n') + NO_PASSPHRASE_MESSAGE);
+    console.error(
+      chalk.red('✗ No passphrase source available.\n') +
+        NO_PASSPHRASE_MESSAGE +
+        `\nAttempts:\n${passphrase.reason}`,
+    );
     return 1;
   }
 
@@ -152,16 +191,33 @@ export async function encryptConfigFile(options: KeysCommandOptions = {}): Promi
   }
 
   const legacy = keys.filter((entry) => isEncryptedKey(entry.key)).length;
-  const backupPath = backupConfig(configPath);
-  writeConfig(configPath, document.toString());
+  let backupPath: string | null = null;
+  try {
+    const content = document.toString();
+    if (options.noBackup !== true) backupPath = backupConfig(configPath);
+    writeConfig(configPath, content);
+  } catch (err) {
+    console.error(chalk.red(`✗ Could not rewrite ${requestedPath}: ${redactErrorMessage(err)}`));
+    return 1;
+  }
 
   console.log(
-    chalk.green(`✓ Encrypted ${plaintext.length} key(s) in ${configPath}.`),
+    chalk.green(`✓ Encrypted ${plaintext.length} key(s) in ${requestedPath}.`),
   );
-  if (backupPath) {
-    console.log(chalk.dim(`  Backup: ${backupPath} (mode 0600)`));
+  if (options.noBackup === true) {
+    console.log(chalk.dim('  No backup written (--no-backup); the old plaintext file is gone.'));
+  } else if (backupPath) {
+    console.log(
+      chalk.dim(
+        `  Backup: ${backupPath} (mode 0600, PLAINTEXT — delete after the first successful boot)`,
+      ),
+    );
   } else {
-    console.log(chalk.dim(`  Existing backup kept: ${configPath}.backup`));
+    console.log(
+      chalk.dim(
+        `  Existing backup kept: ${configPath}.backup (PLAINTEXT — delete after the first successful boot)`,
+      ),
+    );
   }
   if (legacy > 0) {
     console.log(
@@ -173,15 +229,13 @@ export async function encryptConfigFile(options: KeysCommandOptions = {}): Promi
   return 0;
 }
 
-function errorMessage(err: unknown): string {
-  return err instanceof Error ? err.message : String(err);
-}
-
 export function parseKeysArgs(args: string[]): KeysCommandOptions {
   const options: KeysCommandOptions = {};
   for (let i = 0; i < args.length; i++) {
     if (args[i] === '--config' && args[i + 1]) {
       options.configPath = args[++i];
+    } else if (args[i] === '--no-backup') {
+      options.noBackup = true;
     }
   }
   return options;
@@ -192,7 +246,7 @@ export async function runKeysCommand(
   options: KeysCommandOptions = {},
 ): Promise<number> {
   if (args[0] !== 'encrypt') {
-    console.error('Usage: saros-proxy keys encrypt [--config <path>]');
+    console.error('Usage: saros-proxy keys encrypt [--config <path>] [--no-backup]');
     return 1;
   }
   return encryptConfigFile({ ...options, ...parseKeysArgs(args.slice(1)) });

@@ -22,7 +22,7 @@ Commands:
   usage                                      Show per-key quota usage and most-used models
   secret set                                 Store the encryption passphrase in the OS secret store
   secret status                              Show which passphrase source would be used
-  keys encrypt [--config <path>]             Encrypt plaintext keys in config.yaml (backs up)
+  keys encrypt [--config <path>] [--no-backup]  Encrypt plaintext keys (backup is plaintext; --no-backup skips it)
   autostart install [--method <method>]      Install autostart
   autostart uninstall [--method <method>]    Uninstall autostart
   autostart status [--method <method>]       Check autostart status

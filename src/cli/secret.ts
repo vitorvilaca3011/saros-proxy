@@ -64,12 +64,24 @@ export async function readNewPassphrase(
   return { ok: true, value: first };
 }
 
+/** Below this length the passphrase is the weak link, not scrypt. */
+export const MIN_PASSPHRASE_LENGTH = 12;
+
 /** Store the passphrase in the OS store. Returns the process exit code. */
 export async function runSecretSet(options: SecretCommandOptions = {}): Promise<number> {
   const passphrase = await readNewPassphrase(options);
   if (!passphrase.ok) {
     console.error(chalk.red(`✗ ${passphrase.reason}`));
     return 1;
+  }
+
+  if (passphrase.value.length < MIN_PASSPHRASE_LENGTH) {
+    console.error(
+      chalk.yellow(
+        `⚠ Passphrase is shorter than ${MIN_PASSPHRASE_LENGTH} characters. ` +
+          'scrypt makes offline guessing expensive, but passphrase entropy is what protects the keys.',
+      ),
+    );
   }
 
   const stored = storePassphrase(passphrase.value, storeOptions(options));
