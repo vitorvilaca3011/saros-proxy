@@ -9,11 +9,10 @@
  */
 
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
-import { existsSync, mkdirSync, writeFileSync, readFileSync, rmSync, mkdtempSync, statSync, readlinkSync, readdirSync, closeSync, chmodSync } from 'node:fs';
+import { existsSync, mkdirSync, writeFileSync, appendFileSync, readFileSync, rmSync, mkdtempSync, statSync, readlinkSync, readdirSync, closeSync, chmodSync, openSync, writeSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { createServer } from 'node:http';
-import { EventEmitter } from 'node:events';
 import type * as Daemon from '../src/cli/daemon.js';
 
 // ---------------------------------------------------------------------------
@@ -29,9 +28,10 @@ vi.mock('node:os', async (importOriginal) => {
 });
 
 const mockSpawn = vi.hoisted(() =>
-  vi.fn((): { pid: number; unref: () => void; stderr?: EventEmitter } => ({
+  vi.fn((..._args: unknown[]): { pid: number; unref: () => void; stderr: null } => ({
     pid: 12345,
     unref: vi.fn(),
+    stderr: null,
   })),
 );
 vi.mock('node:child_process', () => ({
@@ -286,7 +286,7 @@ describe('daemonStart', () => {
     vi.restoreAllMocks();
     vi.useRealTimers();
     // restoreAllMocks may reset plain vi.fn()s — re-assert the spawn default.
-    mockSpawn.mockImplementation(() => ({ pid: 12345, unref: vi.fn() }));
+    mockSpawn.mockImplementation(() => ({ pid: 12345, unref: vi.fn(), stderr: null }));
   });
 
   it('refuses to start when the port is already serving', async () => {
@@ -317,7 +317,7 @@ describe('daemonStart', () => {
     expect(existsSync(join(tempHome, '.config', 'saros', 'daemon.pid'))).toBe(false);
   });
 
-  it('runs the child stdout into daemon.log instead of discarding it', async () => {
+  it('wires both child streams to daemon.log instead of a stderr pipe', async () => {
     stubHealthDown();
     stubPidDead();
     mockSpawn.mockClear();
@@ -332,31 +332,156 @@ describe('daemonStart', () => {
       string[],
       { stdio: unknown[] },
     ];
-    // stdin discarded, stdout is a file descriptor (pino writes there),
-    // stderr stays piped so startup failures can still be reported.
+    // stdin discarded; stdout and stderr are the SAME log descriptor. A pipe
+    // here would lose its reader when the parent exits (#99) and the child's
+    // next stderr write would die with EPIPE.
     expect(options.stdio[0]).toBe('ignore');
     expect(typeof options.stdio[1]).toBe('number');
-    expect(options.stdio[2]).toBe('pipe');
+    expect(options.stdio[2]).toBe(options.stdio[1]);
   });
 
-  it('appends child stderr to daemon.log during startup, synchronously', async () => {
+  it('lands stdout and stderr in daemon.log, in one file', async () => {
     stubHealthDown();
     stubPidDead();
     mockSpawn.mockClear();
     mockProcessExitRecord();
-    vi.spyOn(console, 'error').mockImplementation(() => {});
     vi.useFakeTimers();
-    const stderr = new EventEmitter();
-    mockSpawn.mockImplementationOnce(() => ({ pid: 12345, unref: vi.fn(), stderr }));
     const logPath = join(tempHome, '.config', 'saros', 'daemon.log');
+    // The child inherits both descriptors; writing through them here is what
+    // pino (stdout) and node's uncaught-exception reporter (stderr) do.
+    mockSpawn.mockImplementationOnce((...args: unknown[]) => {
+      const { stdio } = args[2] as { stdio: unknown[] };
+      writeSync(stdio[1] as number, '{"evt":"boot"}\n');
+      writeSync(stdio[2] as number, 'Error: crash on boot\n');
+      return { pid: 12345, unref: vi.fn(), stderr: null };
+    });
 
     await daemon.daemonStart();
-    stderr.emit('data', Buffer.from('boot failure line\n'));
-
-    // Sync append: the content is on disk as soon as the chunk is handled.
-    expect(readFileSync(logPath, 'utf-8')).toContain('boot failure line');
-
     await vi.advanceTimersByTimeAsync(2000);
+
+    const log = readFileSync(logPath, 'utf-8');
+    expect(log).toContain('{"evt":"boot"}');
+    expect(log).toContain('Error: crash on boot');
+  });
+
+  it('keeps a child stderr write after startup verification out of trouble', async () => {
+    stubHealthDown(); // probe fails, so the start is attempted
+    mockSpawn.mockClear();
+    const exitSpy = mockProcessExitRecord();
+    vi.spyOn(console, 'log').mockImplementation(() => {});
+    vi.spyOn(process, 'kill').mockImplementation(() => true); // child stays alive
+    vi.useFakeTimers();
+    const logPath = join(tempHome, '.config', 'saros', 'daemon.log');
+    // Emulates the descriptor the child inherits. The parent closes its own
+    // copy right after spawn, so this is the only writer left.
+    let childStderrFd = -1;
+    mockSpawn.mockImplementationOnce(() => {
+      childStderrFd = openSync(logPath, 'a', 0o600);
+      return { pid: 12345, unref: vi.fn(), stderr: null };
+    });
+
+    await daemon.daemonStart();
+    await vi.advanceTimersByTimeAsync(2000);
+    await vi.advanceTimersByTimeAsync(60_000); // parent exits after the sync
+
+    const [, , options] = mockSpawn.mock.calls.at(-1) as unknown as [
+      string,
+      string[],
+      { stdio: unknown[] },
+    ];
+    expect(options.stdio[2]).not.toBe('pipe'); // nothing to lose its reader
+
+    // The parent is gone by now; a late crash trace is a plain file append.
+    try {
+      expect(() => writeSync(childStderrFd, 'late crash trace\n')).not.toThrow();
+      expect(readFileSync(logPath, 'utf-8')).toContain('late crash trace');
+    } finally {
+      closeSync(childStderrFd);
+    }
+    expect(exitSpy).toHaveBeenCalledWith(0);
+  });
+
+  it('reports EADDRINUSE from the daemon.log tail when the child dies', async () => {
+    stubHealthDown();
+    stubPidDead();
+    mockSpawn.mockClear();
+    const exitSpy = mockProcessExitRecord();
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    vi.useFakeTimers();
+    const logPath = join(tempHome, '.config', 'saros', 'daemon.log');
+    mockSpawn.mockImplementationOnce(() => {
+      appendFileSync(logPath, 'Error: listen EADDRINUSE: address already in use :::3100\n');
+      return { pid: 12345, unref: vi.fn(), stderr: null };
+    });
+
+    await daemon.daemonStart(3100);
+    await vi.advanceTimersByTimeAsync(2000);
+
+    const output = errorSpy.mock.calls.map((c) => String(c[0])).join('\n');
+    expect(output).toContain('Port 3100 is already in use');
+    expect(exitSpy).toHaveBeenCalledWith(1);
+  });
+
+  it('reports missing API keys from the daemon.log tail', async () => {
+    stubHealthDown();
+    stubPidDead();
+    mockSpawn.mockClear();
+    const exitSpy = mockProcessExitRecord();
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    vi.useFakeTimers();
+    const logPath = join(tempHome, '.config', 'saros', 'daemon.log');
+    mockSpawn.mockImplementationOnce(() => {
+      appendFileSync(logPath, '✗ No valid API keys configured\n');
+      return { pid: 12345, unref: vi.fn(), stderr: null };
+    });
+
+    await daemon.daemonStart();
+    await vi.advanceTimersByTimeAsync(2000);
+
+    const output = errorSpy.mock.calls.map((c) => String(c[0])).join('\n');
+    expect(output).toContain('No valid API keys found');
+    expect(exitSpy).toHaveBeenCalledWith(1);
+  });
+
+  it('surfaces the crash tail from daemon.log for an unknown boot failure', async () => {
+    stubHealthDown();
+    stubPidDead();
+    mockSpawn.mockClear();
+    mockProcessExitRecord();
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    vi.useFakeTimers();
+    const logPath = join(tempHome, '.config', 'saros', 'daemon.log');
+    mockSpawn.mockImplementationOnce(() => {
+      appendFileSync(logPath, 'Error: Cannot find module \'./dist/index.js\'\n    at boot\n');
+      return { pid: 12345, unref: vi.fn(), stderr: null };
+    });
+
+    await daemon.daemonStart();
+    await vi.advanceTimersByTimeAsync(2000);
+
+    const output = errorSpy.mock.calls.map((c) => String(c[0])).join('\n');
+    expect(output).toContain('exited shortly after starting');
+    expect(output).toContain("Cannot find module './dist/index.js'");
+  });
+
+  it('ignores failures logged before this boot', async () => {
+    stubHealthDown();
+    stubPidDead();
+    mockSpawn.mockClear();
+    mockProcessExitRecord();
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    vi.useFakeTimers();
+    const dir = join(tempHome, '.config', 'saros');
+    mkdirSync(dir, { recursive: true });
+    const logPath = join(dir, 'daemon.log');
+    writeFileSync(logPath, 'Error: listen EADDRINUSE: address already in use :::3000\n');
+
+    await daemon.daemonStart();
+    await vi.advanceTimersByTimeAsync(2000);
+
+    const output = errorSpy.mock.calls.map((c) => String(c[0])).join('\n');
+    expect(output).not.toContain('already in use');
+    expect(output).toContain('Check your config');
   });
 
   it('holds no descriptor on daemon.log after the startup verification', async () => {

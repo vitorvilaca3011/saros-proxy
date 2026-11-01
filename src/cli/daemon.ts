@@ -9,7 +9,8 @@
  *
  * Daemon lifecycle:
  *   start   → refuses if the port is already serving, then spawns detached
- *             `node dist/index.js` process, saves PID, logs child stderr
+ *             `node dist/index.js` process, saves PID, appends child stdout
+ *             and stderr to daemon.log
  *   stop    → kills the process (taskkill /T /F on Windows), removes PID file
  *   restart → kills running instance (if any), waits, then starts fresh
  *   status  → checks PID file, falls back to an os-agnostic /health port
@@ -19,7 +20,7 @@
 
 import { spawn, execFileSync } from 'node:child_process';
 import chalk from 'chalk';
-import { existsSync, writeFileSync, writeSync, readFileSync, rmSync, mkdirSync, copyFileSync, statSync, renameSync, openSync, closeSync, chmodSync } from 'node:fs';
+import { existsSync, writeFileSync, readFileSync, rmSync, mkdirSync, copyFileSync, statSync, renameSync, openSync, closeSync, chmodSync, readSync, fstatSync } from 'node:fs';
 import { resolve as pathResolve, join as pathJoin } from 'node:path';
 import { homedir } from 'node:os';
 import { fileURLToPath } from 'node:url';
@@ -142,8 +143,8 @@ function rotateDaemonLog(): void {
 /**
  * Open daemon.log for append (0600 — it carries upstream error bodies).
  * Returns null when the file cannot be opened, so callers fall back to
- * discarding output. Used for the child's stdout and for the parent's stderr
- * mirror. Exported so the wiring can be asserted in tests.
+ * discarding output. Used for the child's stdout and stderr, which share this
+ * single file. Exported so the wiring can be asserted in tests.
  */
 export function openDaemonLog(): number | null {
   try {
@@ -155,6 +156,41 @@ export function openDaemonLog(): number | null {
     return fd;
   } catch {
     return null;
+  }
+}
+
+/** Enough of the boot tail to hold a stack trace; diagnostics only. */
+const LOG_TAIL_BYTES = 16 * 1024;
+
+/** Current daemon.log size — the offset past which this boot's output starts. */
+function logSize(): number {
+  try {
+    return statSync(DAEMON_LOG).size;
+  } catch {
+    return 0;
+  }
+}
+
+/**
+ * Read daemon.log from `offset` to the end, capped at LOG_TAIL_BYTES.
+ * The child's stdout and stderr are the same file (no pipe), so a startup
+ * failure has to be recovered from what this boot appended to the log.
+ */
+function readLogSince(offset: number): string {
+  try {
+    const fd = openSync(DAEMON_LOG, 'r');
+    try {
+      const size = fstatSync(fd).size;
+      const start = Math.max(offset, size - LOG_TAIL_BYTES);
+      if (size <= start) return '';
+      const buf = Buffer.alloc(size - start);
+      readSync(fd, buf, 0, buf.length, start);
+      return buf.toString('utf-8');
+    } finally {
+      closeSync(fd);
+    }
+  } catch {
+    return '';
   }
 }
 
@@ -322,8 +358,11 @@ export async function daemonStart(port?: number, configPath?: string): Promise<v
   const encKey = getEnv('OPENCODE_GO_ENCRYPTION_KEY');
   if (encKey) env.OPENCODE_GO_ENCRYPTION_KEY = encKey;
 
-  // Capture child stderr (also appended to daemon.log) so startup failures
-  // can be diagnosed instead of swallowed by stdio ignore.
+  // Child stdout carries pino, stderr carries node's uncaught-exception
+  // reporter and startup errors. Both are the same daemon.log descriptor and
+  // no pipe is involved: the parent exits after the models sync, and a pipe's
+  // missing reader used to kill the serve process with EPIPE on the next
+  // stderr write (#99) — a crash trace could be the thing that killed the proxy.
   rotateDaemonLog();
   // A synchronous append descriptor, not createWriteStream: a stream opens
   // asynchronously and its handle outlived startup verification, so cleanup
@@ -331,33 +370,20 @@ export async function daemonStart(port?: number, configPath?: string): Promise<v
   // restart left a writer on the old log. openDaemonLog chmods to 0600 (the
   // log carries upstream error bodies) and returns null when the file cannot
   // be opened — logging is diagnostic only.
-  const stderrFd = openDaemonLog();
-  let stderrFdClosed = false;
-  const closeStderrLog = (): void => {
-    if (stderrFd === null || stderrFdClosed) return;
-    stderrFdClosed = true;
-    try {
-      closeSync(stderrFd);
-    } catch {
-      // best effort
-    }
-  };
-  let stderrBuf = '';
-
-  // stdout carries pino. It used to be 'ignore', which is why daemon.log stayed
-  // empty even at LOG_LEVEL=debug. Open the file as the child's stdout instead;
-  // stderr stays piped for the startup diagnostics below and is appended too.
   const logFd = openDaemonLog();
+  // Everything past this offset belongs to this boot; earlier boots must not
+  // be able to explain a failure.
+  const bootOffset = logSize();
 
   const child = spawn('node', args, {
     cwd: PACKAGE_ROOT,
-    stdio: ['ignore', logFd ?? 'ignore', 'pipe'],
+    stdio: ['ignore', logFd ?? 'ignore', logFd ?? 'ignore'],
     detached: true,
     windowsHide: true,
     env,
   });
 
-  // The child holds its own duplicate of the descriptor.
+  // The child holds its own duplicates of the descriptor.
   if (logFd !== null) {
     try {
       closeSync(logFd);
@@ -365,17 +391,6 @@ export async function daemonStart(port?: number, configPath?: string): Promise<v
       // ignore
     }
   }
-
-  child.stderr?.on('data', (chunk: Buffer) => {
-    stderrBuf += chunk.toString();
-    if (stderrFd !== null && !stderrFdClosed) {
-      try {
-        writeSync(stderrFd, chunk);
-      } catch {
-        // diagnostics only
-      }
-    }
-  });
 
   // Allow parent to exit independently while child continues
   child.unref();
@@ -386,9 +401,6 @@ export async function daemonStart(port?: number, configPath?: string): Promise<v
   // Wait briefly then verify the process is alive
   setTimeout(async () => {
     if (isProcessAlive(pid)) {
-      // Startup is verified: the parent must not keep daemon.log open while it
-      // syncs models and checks for updates before exiting.
-      closeStderrLog();
       console.log(chalk.green(`✓ Proxy started (PID ${pid}) on port ${effectivePort}.`));
 
       // Sync models to all enabled harnesses — await with timeout before exit
@@ -408,25 +420,26 @@ export async function daemonStart(port?: number, configPath?: string): Promise<v
 
       process.exit(0);
     } else {
-      // Surface the real startup failure from the child's stderr.
-      if (stderrBuf.includes('EADDRINUSE')) {
+      // The child had no pipe to capture: recover its failure from whatever
+      // this boot appended to daemon.log (stdout and stderr are the same file).
+      const tail = readLogSince(bootOffset);
+      if (tail.includes('EADDRINUSE')) {
         console.error(
           chalk.red(
             `✗ Port ${effectivePort} is already in use. Choose a different port (\`--port <port>\`), or stop the running proxy first.`,
           ),
         );
-      } else if (stderrBuf.includes('No valid API keys')) {
+      } else if (tail.includes('No valid API keys')) {
         console.error(
           chalk.red('✗ No valid API keys found. Ensure keys start with "sk-" and are at least 20 characters.'),
         );
-      } else if (stderrBuf.trim()) {
-        const tail = stderrBuf.trim().split('\n').slice(-6).join('\n');
+      } else if (tail.trim()) {
+        const lines = tail.trim().split('\n').slice(-6).join('\n');
         console.error(chalk.red('✗ Proxy exited shortly after starting. Last output:'));
-        console.error(chalk.dim(tail));
+        console.error(chalk.dim(lines));
       } else {
         console.error(chalk.red('✗ Proxy exited shortly after starting. Check your config.'));
       }
-      closeStderrLog();
       deletePid();
       process.exit(1);
     }
