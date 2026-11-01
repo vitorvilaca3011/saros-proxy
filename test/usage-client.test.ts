@@ -10,7 +10,6 @@ import {
   resetUsageRefreshState,
 } from '../src/usage-client.js';
 import { createProxyState, type ProxyState } from '../src/proxy-logic.js';
-import { updateKeyUsage } from '../src/proxy-logic.js';
 import type { ProxyConfig } from '../src/config.js';
 
 const VALID_BODY = JSON.stringify({

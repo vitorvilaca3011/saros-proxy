@@ -6,13 +6,6 @@
  */
 import { describe, it, expect, beforeEach, vi } from 'vitest';
 
-// The success handler books token usage / model stats into
-// ~/.config/saros/; point that at a temp dir before the modules load.
-process.env.XDG_CONFIG_HOME = mkdtempSync(join(tmpdir(), 'saros-logging-test-'));
-import { mkdtempSync } from 'node:fs';
-import { join } from 'node:path';
-import { tmpdir } from 'node:os';
-
 const logCalls = vi.hoisted(() => ({
   info: [] as Array<Record<string, unknown>>,
   warn: [] as Array<Record<string, unknown>>,

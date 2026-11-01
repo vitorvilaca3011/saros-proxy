@@ -8,7 +8,7 @@
  * run before fetchCatalog populates the module state.
  */
 import { describe, it, expect, afterEach, vi } from 'vitest';
-import { commandcodeProvider, resolveClientVersion } from '../src/providers/commandcode.js';
+import { commandcodeProvider } from '../src/providers/commandcode.js';
 
 afterEach(() => {
   vi.unstubAllGlobals();

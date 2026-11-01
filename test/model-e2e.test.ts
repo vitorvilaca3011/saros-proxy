@@ -255,6 +255,15 @@ async function removeTempDir(dir: string): Promise<void> {
   }
 }
 
+/** Read the proxy log; a failed read must not mask the real failure. */
+function readProxyLog(path: string): string {
+  try {
+    return readFileSync(path, 'utf-8');
+  } catch {
+    return '<no log>';
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Suite
 // ---------------------------------------------------------------------------
@@ -309,7 +318,7 @@ async function spawnProxy(upstreamPort: number): Promise<ProxyHandle> {
   if (!(await pollHealth(port, 15_000))) {
     killProcessTree(child);
     await removeTempDir(workDir);
-    throw new Error(`proxy not healthy; log:\n${readFileSync(logPath, 'utf-8')}`);
+    throw new Error(`proxy not healthy; log:\n${readProxyLog(logPath)}`);
   }
   return { child, port, workDir, logPath };
 }
@@ -342,7 +351,7 @@ describe('model e2e (real binary, models running)', () => {
   });
 
   function proxyLog(): string {
-    try { return readFileSync(logPath, 'utf-8'); } catch { return '<no log>'; }
+    return readProxyLog(logPath);
   }
 
   async function complete(body: Record<string, unknown>): Promise<Response> {

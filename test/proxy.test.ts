@@ -1,12 +1,4 @@
 import { describe, it, expect, beforeAll, beforeEach, afterEach, vi } from 'vitest';
-
-// Isolate persisted counters (model-stats, token-usage) from the user's real
-// ~/.config/saros/ — these tests forward requests through real proxy apps and
-// would otherwise book their fake keys/models into the live stats files.
-process.env.XDG_CONFIG_HOME = mkdtempSync(join(tmpdir(), 'saros-proxy-test-'));
-import { mkdtempSync } from 'node:fs';
-import { join } from 'node:path';
-import { tmpdir } from 'node:os';
 import {
   buildUpstreamUrl,
   buildUpstreamHeaders,
