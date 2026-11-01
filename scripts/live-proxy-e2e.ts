@@ -97,7 +97,9 @@ try {
   for (const m of allChunks.matchAll(/"(?:reasoning|content)":"((?:[^"\\]|\\.)*)"/g)) {
     assembled += m[1];
   }
-  sawPong = /pong/i.test(assembled);
+  // Keep the per-chunk hit (broader than the quoted-field regex above) and
+  // OR it with the assembled search instead of discarding it.
+  sawPong = sawPong || /pong/i.test(assembled);
   console.log('assembled text:', assembled.slice(0, 120));
   console.log('stream saw pong:', sawPong, '| saw [DONE]:', sawDone);
   const streamOk = sres.status === 200 && sawPong;
