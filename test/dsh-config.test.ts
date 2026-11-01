@@ -245,6 +245,54 @@ describe('syncModelsToDshConfig', () => {
     expect(result.error).toContain('config not found at');
   });
 
+  it('creates neither the config nor a backup for a missing config', () => {
+    const missingPath = join(tmpDir, 'nope.yml');
+    const result = syncModelsToDshConfig(DSH_MODELS_MAP, 3000, { configPath: missingPath });
+    expect(result.success).toBe(false);
+    expect(result.error).toBe('config not found at ' + missingPath);
+    expect(existsSync(missingPath)).toBe(false);
+    expect(existsSync(missingPath + '.backup')).toBe(false);
+  });
+
+  it('surfaces an unreadable config as a failure instead of throwing', () => {
+    writeFileSync(cfgPath, stringifyYaml(dshFixture()), 'utf-8');
+    mockedFs.readFileSync.mockImplementationOnce(() => {
+      throw Object.assign(new Error('EACCES: permission denied, open'), { code: 'EACCES' });
+    });
+
+    const result = syncModelsToDshConfig(DSH_MODELS_MAP, 3000, { configPath: cfgPath });
+    expect(result.success).toBe(false);
+    expect(result.path).toBe(cfgPath);
+    expect(result.error).toContain('EACCES');
+  });
+
+  it('still writes when the backup source vanished (ENOENT)', () => {
+    writeFileSync(cfgPath, stringifyYaml(dshFixture()), 'utf-8');
+    mockedFs.copyFileSync.mockImplementationOnce(() => {
+      throw Object.assign(new Error('ENOENT: no such file or directory, copyfile'), {
+        code: 'ENOENT',
+      });
+    });
+
+    const result = syncModelsToDshConfig(DSH_MODELS_MAP, 3000, { configPath: cfgPath });
+    expect(result.success).toBe(true);
+    const doc = parseYaml(readFileSync(cfgPath, 'utf-8')) as Array<{ id: string }>;
+    expect(doc.some((r) => r.id === 'llm-pi-ai')).toBe(true);
+    expect(existsSync(cfgPath + '.backup')).toBe(false);
+  });
+
+  it('returns the underlying error when the backup copy fails', () => {
+    writeFileSync(cfgPath, stringifyYaml(dshFixture()), 'utf-8');
+    mockedFs.copyFileSync.mockImplementationOnce(() => {
+      throw new Error('EIO: i/o error, copyfile');
+    });
+
+    const result = syncModelsToDshConfig(DSH_MODELS_MAP, 3000, { configPath: cfgPath });
+    expect(result.success).toBe(false);
+    expect(result.path).toBe(cfgPath);
+    expect(result.error).toContain('EIO');
+  });
+
   it('reports invalid YAML in the patch file', () => {
     writeFileSync(cfgPath, 'providers: [unclosed', 'utf-8');
     const result = syncModelsToDshConfig(DSH_MODELS_MAP, 3000, { configPath: cfgPath });

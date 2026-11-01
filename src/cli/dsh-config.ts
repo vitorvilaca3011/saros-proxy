@@ -14,7 +14,7 @@
  * cordis.yml is NEVER touched (dsh rewrites it empty at every boot).
  */
 
-import { existsSync, readFileSync, writeFileSync, copyFileSync } from 'node:fs';
+import { readFileSync, writeFileSync, copyFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { homedir } from 'node:os';
 import { parse as parseYaml, stringify as stringifyYaml } from 'yaml';
@@ -67,6 +67,32 @@ function splitLeadingComments(raw: string): { comments: string; body: string } {
 }
 
 /**
+ * Read the patch layer once, mapping ENOENT to `undefined`. Rethrows every
+ * other error so callers can report it; avoids the stat-then-read race.
+ */
+function readConfigText(configPath: string): string | undefined {
+  try {
+    return readFileSync(configPath, 'utf-8');
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err;
+    return undefined;
+  }
+}
+
+/**
+ * Snapshot the pre-sync file next to it. A file that vanished between the
+ * read and the copy (ENOENT) means there is nothing to back up, not that
+ * the sync must fail.
+ */
+function backupConfig(configPath: string): void {
+  try {
+    copyFileSync(configPath, configPath + '.backup');
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code !== 'ENOENT') throw err;
+  }
+}
+
+/**
  * Sync the saros-proxy provider model list into the dsh patch layer.
  *
  * @param modelsMap — Canonical model map (id → opencode-shaped entry)
@@ -82,12 +108,11 @@ export function syncModelsToDshConfig(
   void port;
   const configPath = options.configPath ?? getDefaultDshConfigPath();
 
-  if (!existsSync(configPath)) {
-    return { success: false, error: 'config not found at ' + configPath };
-  }
-
   try {
-    const raw = readFileSync(configPath, 'utf-8');
+    const raw = readConfigText(configPath);
+    if (raw === undefined) {
+      return { success: false, error: 'config not found at ' + configPath };
+    }
     const { comments, body } = splitLeadingComments(raw);
 
     let doc: unknown;
@@ -123,10 +148,7 @@ export function syncModelsToDshConfig(
     // Replace ONLY the models key.
     provider.models = toPiOmpModelArray(modelsMap).map(toDshModel);
 
-    const backupPath = configPath + '.backup';
-    if (existsSync(configPath)) {
-      copyFileSync(configPath, backupPath);
-    }
+    backupConfig(configPath);
     writeFileSync(configPath, comments ? comments + '\n' + stringifyYaml(doc) : stringifyYaml(doc), 'utf-8');
     return { success: true, path: configPath, created: false };
   } catch (err) {
