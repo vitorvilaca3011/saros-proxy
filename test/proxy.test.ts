@@ -765,14 +765,14 @@ describe('buildNoKeysBody', () => {
     const body = buildNoKeysBody([], 'req-3', 'claude-opus-5', ['alpha']);
 
     expect(body.keys).toHaveLength(0);
-    expect(body.causes.join(' ')).toMatch(/already tried/i);
+    expect(body.causes.join(' ')).toMatch(/keys tried for this request/i);
     expect(body.causes.join(' ')).toContain('alpha');
   });
 
   it('keeps the per-key reasons when some keys are also listed as tried', () => {
     const body = buildNoKeysBody([unavailable()], 'req-4', undefined, ['other']);
-    // keys[] is not empty, so the tried-key cause must not be added on top.
-    expect(body.causes.some((cause) => /already tried/i.test(cause))).toBe(false);
+    // Both the per-key reason and the tried-key context are reported.
+    expect(body.causes.some((cause) => /keys tried for this request/i.test(cause))).toBe(true);
     expect(body.causes.some((cause) => /revoked|rotated/i.test(cause))).toBe(true);
   });
 
