@@ -196,7 +196,7 @@ keys:
 | Background daemon | stop | `saros-proxy stop` |
 | Background daemon | status | `saros-proxy status` |
 
-**Note:** The daemon child runs with `NODE_ENV=production` (JSON logging). For pretty-printed logs, run in foreground mode with `NODE_ENV=development`.
+**Note:** The daemon child runs with `NODE_ENV=production` (JSON logging). Its stdout and stderr are appended to `~/.config/saros/daemon.log`, which rotates at start (10 MB → `daemon.log.1`, five kept) and carries an `evt:"boot"` line (version, config path, port, key labels) — that is where to look when the daemon "starts" but nothing works. For pretty-printed logs, run in foreground mode with `NODE_ENV=development`.
 
 ### 2.4 Verify
 
@@ -217,9 +217,21 @@ The proxy will start automatically on next login. Verify with:
 saros-proxy autostart
 ```
 
-### 2.6 OpenCode Config (if requested)
+### 2.6 Harness Config (per harness, if requested)
 
-Add to `~/.config/opencode/opencode.json`:
+Saros exposes one OpenAI-compatible endpoint — `http://127.0.0.1:{port}/zen/go/v1` — and every supported harness needs the same two things: a `saros-proxy` provider pointing at it, and the model list Saros writes on sync.
+
+```bash
+# Add harnesses to the sync selection (accepted: oc|opencode, omp|ohmypi, pi, dsh)
+saros-proxy configharness oc
+saros-proxy configharness        # show the current selection
+saros-proxy sync-upstream        # pull the live model list into every selected harness
+```
+
+`saros-proxy start` runs the same sync as `sync-upstream` on boot (live catalog, bundled models as the offline fallback), so a daemon install only needs `configharness`. **That sync never creates a harness config**: if the file below does not exist, ask the user to launch that harness once so it writes its own config, then sync. The exception is `saros-proxy setup`, which writes the OpenCode config path it is given — `opencode.jsonc` on new installs — and in non-interactive mode only updates a file that already exists.
+
+#### OpenCode — `~/.config/opencode/opencode.json` (or `.jsonc`)
+
 ```json
 {
   "provider": {
@@ -235,12 +247,69 @@ Add to `~/.config/opencode/opencode.json`:
 }
 ```
 
-Then sync models from `~/.config/saros/models.json`:
-```bash
-saros-proxy sync-models
+OpenCode can also discover models from `/v1/models`, but the synced list is what carries context/output limits and reasoning metadata.
+
+#### oh-my-pi (`omp`) — `~/.omp/agent/models.yml`
+
+```yaml
+providers:
+  saros-proxy:
+    baseUrl: http://127.0.0.1:{port}/zen/go/v1
+    apiKey: not-used
+    api: openai-completions
+    compat:
+      supportsDeveloperRole: false
+      maxTokensField: max_tokens
+      supportsReasoningEffort: true
+    models: []        # filled by `saros-proxy sync-upstream`
 ```
 
-The `models.json` file is the source of truth for model definitions. Edit it to update context windows, output limits, or modalities.
+If the `saros-proxy` provider is missing, sync creates it with these values; existing fields win, except `compat.supportsReasoningEffort`, which Saros owns (a stale `false` makes the harness drop the wire parameter).
+
+#### pi — `~/.pi/agent/models.json`
+
+```json
+{
+  "providers": {
+    "saros-proxy": {
+      "name": "Saros",
+      "baseUrl": "http://127.0.0.1:{port}/zen/go/v1",
+      "apiKey": "not-used",
+      "api": "openai-completions",
+      "compat": {
+        "supportsDeveloperRole": false,
+        "maxTokensField": "max_tokens",
+        "supportsReasoningEffort": true
+      },
+      "models": []
+    }
+  }
+}
+```
+
+pi has no model discovery for custom providers — the synced `models` array is the only source.
+
+#### DeepSeek Harness (`dsh`) — `~/.dsh/profiles/web/cordis.patch.yml`
+
+dsh keeps providers in a patch layer, and Saros replaces **only** `row.config.providers["saros-proxy"].models` inside the `llm-pi-ai` row:
+
+```yaml
+- id: llm-pi-ai          # row must already exist
+  config:
+    providers:
+      saros-proxy:       # provider must already exist; point its baseUrl at saros
+        baseUrl: http://127.0.0.1:{port}/zen/go/v1
+        models: []       # replaced on every sync — do not hand-edit
+```
+
+dsh regenerates `cordis.yml` at boot and keeps this patch file; the sync re-emits the patch's leading comments and replaces only `models`, so keep hand edits out of the `models` block (the rest of the file is round-tripped, not preserved byte for byte). If the `llm-pi-ai` row or the `saros-proxy` provider is missing, sync fails with that exact message instead of creating them.
+
+#### Rules that apply to every harness
+
+- Only `providers["saros-proxy"].models` is replaced; other providers and fields are preserved. Comments are **not**: OpenCode strips JSONC comments on rewrite, pi/omp drop them in the JSON/YAML round-trip, and dsh re-emits only the patch file's leading comments. A `<file>.backup` is written before the first change — dsh refreshes that backup on every sync instead.
+- Static model lists are deliberate: no harness can rediscover reasoning/context/output metadata for a custom provider, and dsh rewrites dynamic config at boot.
+- A harness whose config file is missing is skipped, never created.
+- The selection lives in `~/.config/saros/harnesses.json`; `saros-proxy status` prints which harnesses are enabled.
 
 ### 2.7 Cleanup
 

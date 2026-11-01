@@ -32,6 +32,7 @@ import {
 } from './proxy-logic.js';
 import type { ProxyConfig } from './config.js';
 import { logger, maskKey } from './logger.js';
+import { redactSecrets } from './log-redact.js';
 import {
   MAX_BODY_SIZE,
   MAX_RETRIES,
@@ -605,8 +606,8 @@ const FAILURE_CAUSES: Record<KeyFailureReason, string> = {
 
 /** Why a key cannot serve a request, in the 503/502 vocabulary. */
 function unavailableState(report: KeyHealthReport): UnavailableKey['state'] {
-  if (!report.entitled) return 'not_entitled';
   if (report.disabledByConfig) return 'disabled_by_config';
+  if (!report.entitled) return 'not_entitled';
   return 'disabled';
 }
 
@@ -880,7 +881,9 @@ function logUpstreamError(
     logger.warn(
       { requestId, keyLabel: key.label, status, errorType, kind },
       'Upstream returned error: %s',
-      errorBody.slice(0, 200),
+      // Redact before truncating: a 401 that echoes the bearer must not write a
+      // working key into daemon.log.
+      redactSecrets(errorBody).slice(0, 200),
     );
   } else {
     logger.warn(
