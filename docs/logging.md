@@ -12,7 +12,7 @@ without reading the source.
 | `saros-proxy start` (daemon) | `~/.config/saros/daemon.log` | NDJSON, pretty-printing off |
 | `saros-proxy start`, second stream | same file (stderr is appended too) | NDJSON |
 
-- Level: `LOG_LEVEL` (default `info`). `debug` adds key selection and request forwarding.
+- Level: `LOG_LEVEL` (default `info`). `debug` adds `key.selected`; per-attempt forwarding (`Forwarding request…`) is `info` because it is what a failed attempt needs in order to be reconstructible.
 - The daemon log rotates **at start**: past 10 MB it becomes `daemon.log.1` and up to five
   files are kept. Rotation is deliberately not a runtime dependency.
 - The daemon also writes a boot line before any traffic (`evt:"boot"`), so an empty
@@ -26,19 +26,22 @@ without reading the source.
 | — (`Loaded config from …`) | info | config load | path, or a warning when falling back to `./config.yaml` |
 | `key.selected` | debug | each attempt, before the upstream call | requestId, keyLabel, provider, attempt, pinned |
 | `upstream.response` | info | upstream 2xx | requestId, keyLabel, provider, status, durationMs, stream |
-| `upstream.error` | warn | upstream non-2xx | requestId, keyLabel, status, errorType, kind, durationMs, bodyPrefix (≤200 chars) |
+| `upstream.error` | warn | upstream non-2xx | requestId, keyLabel, status, errorType, kind, durationMs, bodyPrefix (≤200 chars, redacted). The streaming branch carries status/kind/durationMs only — no body, no errorType |
 | `upstream.timeout` | warn | request timed out | requestId, keyLabel, kind, timeoutMs |
 | `upstream.network_error` | error | connection error | requestId, keyLabel, kind, err |
 | `key.state` | info/warn | a key leaving or re-entering rotation | requestId, keyLabel, provider, enabled, reason (`auth`/`quota`/`rate_limit`/`server`), status, consecutiveFailures/cooldownMs |
 | `request.no_keys` | warn | no key could be selected | requestId, attempt, kind, model, unavailable[{label,reason,status}] |
 | `request.retries_exhausted` | error | every attempt failed | requestId, kind, err |
-| `request.complete` | info | **once per request** | requestId, method, path, model, provider, keyLabel, status, durationMs, stream, attempt |
+| `request.complete` | info | **once per proxied request** (not `/health`, `/v1/models`, 413 or a middleware 429) | requestId, method, path, model, provider, keyLabel, status, durationMs, stream, attempt |
 
 `request.complete` is the access log: success, upstream client error (4xx from the
 provider), 503 (no usable key) and 502 (retries exhausted) are mutually exclusive paths, so
 exactly one line lands per request. It is logged after the success handler produces the
-downstream response — if that handler throws, the request retries and the retry logs its own
-outcome.
+downstream response, and `status` is the status the client received — a 2xx upstream whose
+stream body is missing becomes a downstream 502 and is logged as 502.
+`model` is the raw model id from the request body (`model@provider` keeps its suffix here,
+it is stripped only on the way upstream). If the success handler throws, the request retries
+and the retry logs its own outcome.
 
 `reason` on `key.state` is derived from the upstream verdict: `401 → auth`,
 `429 → rate_limit`, 5xx carrying a quota/balance hint → `quota`, anything else 5xx →
@@ -51,9 +54,12 @@ outcome.
 - `authorization`, `cookie`, `set-cookie`, `x-api-key`, `apiKey`, `token`, `key` are
   censored by pino's `redact` (`[redacted]`), so an accidentally-passed header object
   cannot leak.
-- Request/response bodies: never, by default. `SAROS_CAPTURE_4XX=1` writes failing 4xx
-  requests to `~/.config/saros/captures/` for offline replay — opt-in, never on in
-  production.
+- Request bodies: never. Response bodies: never in full. The exception is diagnostic and
+  bounded: `upstream.error` carries the first 200 characters of a non-2xx upstream body,
+  and `SAROS_CAPTURE_4XX=1` writes failing 4xx requests (bodies included) to
+  `~/.config/saros/captures/` for offline replay — opt-in, never on in production. Both
+  paths run `redactSecrets` (or are opt-in files), because a provider may echo the
+  submitted key back in its error message.
 
 ## Not covered yet
 

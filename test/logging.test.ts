@@ -167,15 +167,36 @@ describe('request lifecycle logging', () => {
     expect(selected).toMatchObject({ keyLabel: 'cc', provider: 'commandcode', pinned: true });
   });
 
-  it('never writes key material into a log line', async () => {
+  it('never writes key material into a log line, even when the upstream echoes it', async () => {
     vi.spyOn(globalThis, 'fetch').mockImplementation(async () =>
-      new Response('{"error":"invalid key"}', { status: 401 }),
+      new Response('{"error":"Incorrect API key provided: sk-leaked-key-abcdef123456"}', {
+        status: 401,
+      }),
     );
     const app = createProxyApp(makeConfig());
 
     await post(app, { messages: [] });
 
     const dump = JSON.stringify([logCalls.info, logCalls.warn, logCalls.error, logCalls.debug]);
-    expect(dump).not.toContain('sk-alpha-key-0001');
+    expect(dump).not.toContain('sk-leaked-key-abcdef123456');
+    expect(dump).toContain('[redacted-key]');
+
+    // The retries-exhausted error carries the body in err.message.
+    const exhausted = logCalls.error.find((entry) => entry.evt === 'request.retries_exhausted');
+    expect(String((exhausted?.err as Error | undefined)?.message)).not.toContain(
+      'sk-leaked-key-abcdef123456',
+    );
+  });
+
+  it('reports the downstream status when the success handler synthesizes an error', async () => {
+    // Upstream 2xx without a body: the streaming handler answers 502.
+    vi.spyOn(globalThis, 'fetch').mockImplementation(async () => new Response(null, { status: 200 }));
+    const app = createProxyApp(makeConfig());
+
+    const res = await post(app, { messages: [], stream: true });
+    await res.text();
+    expect(res.status).toBe(502);
+
+    expect(completions()[0]).toMatchObject({ status: 502, stream: true });
   });
 });

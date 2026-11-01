@@ -196,7 +196,7 @@ keys:
 | Background daemon | stop | `saros-proxy stop` |
 | Background daemon | status | `saros-proxy status` |
 
-**Note:** The daemon child runs with `NODE_ENV=production` (JSON logging). For pretty-printed logs, run in foreground mode with `NODE_ENV=development`.
+**Note:** The daemon child runs with `NODE_ENV=production` (JSON logging). Its stdout and stderr are appended to `~/.config/saros/daemon.log`, which rotates at start (10 MB → `daemon.log.1`, five kept) and carries an `evt:"boot"` line (version, config path, port, key labels) — that is where to look when the daemon "starts" but nothing works. For pretty-printed logs, run in foreground mode with `NODE_ENV=development`.
 
 Every request emits exactly one `evt:"request.complete"` line (requestId, path, model, provider, keyLabel, status, durationMs, stream, attempt); `key.state` explains a key leaving or returning to rotation. `docs/logging.md` is the contract (events, levels, redaction) — read it before diagnosing a request from logs.
 

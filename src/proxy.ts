@@ -32,6 +32,7 @@ import {
 } from './proxy-logic.js';
 import type { ProxyConfig } from './config.js';
 import { logger, maskKey } from './logger.js';
+import { redactSecrets } from './log-redact.js';
 import {
   MAX_BODY_SIZE,
   MAX_RETRIES,
@@ -541,7 +542,9 @@ async function executeSingleAttempt(attempt: number, ctx: RetryContext): Promise
       const downstream = await ctx.onSuccess(response, ctx.state, ctx.requestId, key.label);
       // Logged after the success handler: if it throws, the request retries and
       // this is not a completed request (the retry path logs its own outcome).
-      logRequestComplete(ctx, response.status, key.label);
+      // The downstream status is what the client saw — the streaming handler
+      // synthesizes a 502 when the upstream 2xx carried no body.
+      logRequestComplete(ctx, downstream.status, key.label);
       return { kind: 'done', response: downstream };
     }
     return await handleUpstreamErrorResponse(response, ctx, key, attemptStarted);
@@ -613,7 +616,7 @@ async function handleUpstreamErrorResponse(
     body: errorBody,
   });
   const lastError = ctx.kind === 'standard'
-    ? new Error(`Upstream error ${response.status}: ${errorBody.slice(0, 200)}`)
+    ? new Error(`Upstream error ${response.status}: ${redactSecrets(errorBody).slice(0, 200)}`)
     : null;
   return { kind: 'retry', lastError };
 }
@@ -949,7 +952,9 @@ function logUpstreamError(
         errorType,
         kind,
         durationMs,
-        bodyPrefix: errorBody.slice(0, 200),
+        // Redact before truncating: a 401 that echoes the bearer must not write
+        // a working key into the access log or daemon.log.
+        bodyPrefix: redactSecrets(errorBody).slice(0, 200),
       },
       'Upstream returned error',
     );
