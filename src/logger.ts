@@ -5,6 +5,24 @@
 import pino from 'pino';
 
 /**
+ * Object paths pino must censor. Secrets live in headers and provider
+ * credentials; nothing in a log line ever needs their value, so the redaction
+ * is unconditional (not env-gated).
+ */
+export const LOG_REDACT_PATHS = [
+  'authorization',
+  'cookie',
+  'set-cookie',
+  'x-api-key',
+  'apiKey',
+  'token',
+  'key',
+  'headers.authorization',
+  'headers.cookie',
+  'err.config.headers.authorization',
+] as const;
+
+/**
  * Mask a secret key: show first 4 and last 4 characters.
  * Masks keys matching common patterns (sk-, key-, api-, token-)
  * or any string longer than 20 characters.
@@ -28,6 +46,13 @@ function createLogger() {
 
   return pino({
     level: process.env.LOG_LEVEL || 'info',
+    // Fields that must never reach a log line, even nested under an error or a
+    // request object. Key material is masked by callers (maskKey); this is the
+    // safety net for everything else.
+    redact: {
+      paths: [...LOG_REDACT_PATHS],
+      censor: '[redacted]',
+    },
     ...(isDev
       ? {
           transport: tryTransport('pino-pretty', { colorize: true }),

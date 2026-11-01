@@ -198,6 +198,8 @@ keys:
 
 **Note:** The daemon child runs with `NODE_ENV=production` (JSON logging). For pretty-printed logs, run in foreground mode with `NODE_ENV=development`.
 
+Every request emits exactly one `evt:"request.complete"` line (requestId, path, model, provider, keyLabel, status, durationMs, stream, attempt); `key.state` explains a key leaving or returning to rotation. `docs/logging.md` is the contract (events, levels, redaction) — read it before diagnosing a request from logs.
+
 ### 2.4 Verify
 
 ```bash
