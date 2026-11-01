@@ -125,12 +125,30 @@ function rotateDaemonLog(): void {
     if (!existsSync(DAEMON_LOG)) return;
     if (statSync(DAEMON_LOG).size < LOG_MAX_BYTES) return;
     rmSync(`${DAEMON_LOG}.${LOG_KEEP}`, { force: true });
-    for (let i = LOG_KEEP - 1; i >= 1; i--) {
-      const from = i === 1 ? DAEMON_LOG : `${DAEMON_LOG}.${i - 1}`;
+    // Shift newest-first: .4→.5 … .1→.2, then the live log becomes .1. The
+    // loop used to stop at i=4, so .4→.5 never happened and the newest
+    // generation was silently dropped while .5 disappeared.
+    for (let i = LOG_KEEP; i >= 2; i--) {
+      const from = `${DAEMON_LOG}.${i - 1}`;
       if (existsSync(from)) renameSync(from, `${DAEMON_LOG}.${i}`);
     }
+    if (existsSync(DAEMON_LOG)) renameSync(DAEMON_LOG, `${DAEMON_LOG}.1`);
   } catch {
     // Diagnostics only — a failed rotation must never block startup.
+  }
+}
+
+/**
+ * Open daemon.log as the child's stdout (0600 — it carries upstream error
+ * bodies). Returns null when the file cannot be opened, so the caller falls
+ * back to discarding stdout. Exported so the wiring can be asserted in tests.
+ */
+export function openDaemonLog(): number | null {
+  try {
+    ensurePidDir();
+    return openSync(DAEMON_LOG, 'a', 0o600);
+  } catch {
+    return null;
   }
 }
 
@@ -299,19 +317,15 @@ export async function daemonStart(port?: number, configPath?: string): Promise<v
   // not crash the starter — the stream open is async and can lose the race
   // with cleanup in tests.
   rotateDaemonLog();
-  const logStream = createWriteStream(DAEMON_LOG, { flags: 'a' });
+  // 0600: the file now carries pino output, including upstream error bodies.
+  const logStream = createWriteStream(DAEMON_LOG, { flags: 'a', mode: 0o600 });
   logStream.on('error', () => { /* daemon.log is diagnostic only */ });
   let stderrBuf = '';
 
   // stdout carries pino. It used to be 'ignore', which is why daemon.log stayed
   // empty even at LOG_LEVEL=debug. Open the file as the child's stdout instead;
   // stderr stays piped for the startup diagnostics below and is appended too.
-  let logFd: number | null = null;
-  try {
-    logFd = openSync(DAEMON_LOG, 'a');
-  } catch {
-    // Same best-effort rule: fall back to discarding stdout.
-  }
+  const logFd = openDaemonLog();
 
   const child = spawn('node', args, {
     cwd: PACKAGE_ROOT,

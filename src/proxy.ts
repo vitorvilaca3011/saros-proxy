@@ -27,6 +27,7 @@ import {
 } from './proxy-logic.js';
 import type { ProxyConfig } from './config.js';
 import { logger, maskKey } from './logger.js';
+import { redactSecrets } from './log-redact.js';
 import {
   MAX_BODY_SIZE,
   MAX_RETRIES,

@@ -319,7 +319,7 @@ if (subcommand === 'start') {
       bundledModels: Object.keys(loadModelsCatalog()).length,
       logLevel: process.env.LOG_LEVEL ?? 'info',
     },
-    'saros-proxy %s serving on %s:%d',
+    'saros-proxy %s starting on %s:%d',
     getVersion(),
     config.host,
     config.port,

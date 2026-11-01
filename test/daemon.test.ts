@@ -9,7 +9,7 @@
  */
 
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
-import { existsSync, mkdirSync, writeFileSync, readFileSync, rmSync, mkdtempSync, statSync } from 'node:fs';
+import { existsSync, mkdirSync, writeFileSync, readFileSync, rmSync, mkdtempSync, statSync, readlinkSync, closeSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { createServer } from 'node:http';
@@ -333,6 +333,38 @@ describe('daemonStart', () => {
     expect(existsSync(`${logPath}.1`)).toBe(true);
     expect(statSync(`${logPath}.1`).size).toBeGreaterThan(10 * 1024 * 1024);
     expect(statSync(logPath).size).toBeLessThan(1024);
+  });
+
+  it('shifts the rotation chain and drops the oldest file', async () => {
+    stubHealthDown();
+    stubPidDead();
+    mockSpawn.mockClear();
+    mockProcessExitRecord();
+    vi.useFakeTimers();
+    const dir = join(tempHome, '.config', 'saros');
+    mkdirSync(dir, { recursive: true });
+    const logPath = join(dir, 'daemon.log');
+    writeFileSync(logPath, Buffer.alloc(11 * 1024 * 1024, 'x'));
+    for (let i = 1; i <= 5; i++) writeFileSync(`${logPath}.${i}`, `gen-${i}`);
+
+    await daemon.daemonStart();
+    await vi.advanceTimersByTimeAsync(2000);
+
+    // .5 dropped, .4→.5, .1→.2, current log→.1
+    expect(readFileSync(`${logPath}.2`, 'utf-8')).toBe('gen-1');
+    expect(readFileSync(`${logPath}.5`, 'utf-8')).toBe('gen-4');
+    expect(existsSync(`${logPath}.6`)).toBe(false);
+    expect(statSync(`${logPath}.1`).size).toBeGreaterThan(10 * 1024 * 1024);
+  });
+
+  it('opens daemon.log, 0600, as the child stdout', async () => {
+    if (process.platform !== 'linux') return; // /proc/self/fd is the cheap identity check
+    const fd = daemon.openDaemonLog();
+    expect(fd).not.toBeNull();
+    const target = readlinkSync(`/proc/self/fd/${fd}`);
+    expect(target).toBe(join(tempHome, '.config', 'saros', 'daemon.log'));
+    expect(statSync(target).mode & 0o777).toBe(0o600);
+    closeSync(fd as number);
   });
 
   it('leaves a daemon.log under the limit alone', async () => {
