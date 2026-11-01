@@ -50,6 +50,9 @@ export default defineConfig({
     watch: false,
     // Global teardown to force exit after tests (prevents hanging on Windows)
     globalSetup: './test/global-teardown.ts',
+    // Point the saros config dir at a per-test-file temp dir before any
+    // src/* module is evaluated (see test/setup-env.ts).
+    setupFiles: ['./test/setup-env.ts'],
     // Timeout for individual tests
     testTimeout: 60_000,
     // Timeout for beforeAll/afterAll hooks

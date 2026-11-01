@@ -1,12 +1,6 @@
 import { describe, it, expect, beforeAll, beforeEach, afterEach, vi } from 'vitest';
-
-// Isolate persisted counters (model-stats, token-usage) from the user's real
-// ~/.config/saros/ — these tests forward requests through real proxy apps and
-// would otherwise book their fake keys/models into the live stats files.
-process.env.XDG_CONFIG_HOME = mkdtempSync(join(tmpdir(), 'saros-proxy-test-'));
-import { existsSync, mkdtempSync, readFileSync, readdirSync, rmSync, statSync } from 'node:fs';
+import { existsSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
-import { tmpdir } from 'node:os';
 import {
   buildUpstreamUrl,
   buildUpstreamHeaders,
@@ -21,7 +15,7 @@ import type { KeyProvider } from '../src/providers/index.js';
 import { resetModelsFetcherState } from '../src/models-fetcher.js';
 import { getKeyTokenUsage, resetTokenUsage } from '../src/token-usage.js';
 import { loadModelsCatalog } from '../src/models-catalog.js';
-import type { ProxyConfig } from '../src/config.js';
+import { getSarosDir, type ProxyConfig } from '../src/config.js';
 import { MAX_BODY_SIZE } from '../src/constants.js';
 
 describe('buildUpstreamUrl', () => {
@@ -725,8 +719,9 @@ describe('createProxyApp — standard proxy pipeline', () => {
 });
 
 describe('createProxyApp — SAROS_CAPTURE_4XX diagnostics', () => {
-  const captureDir = (): string =>
-    join(process.env.XDG_CONFIG_HOME as string, 'saros', 'captures');
+  // Resolve through the same helper the proxy uses: on win32 the config dir
+  // comes from LOCALAPPDATA, not XDG_CONFIG_HOME.
+  const captureDir = (): string => join(getSarosDir(), 'captures');
 
   const postChat = (app: AppLike, body: string): Promise<Response> =>
     app.request('/v1/chat/completions', {
@@ -781,6 +776,32 @@ describe('createProxyApp — SAROS_CAPTURE_4XX diagnostics', () => {
     });
     expect(capture.requestId).toBeTruthy();
     expect(capture.ts).toBeTruthy();
+  });
+
+  it('refuses to overwrite a pre-existing file at the capture path (wx)', async () => {
+    process.env.SAROS_CAPTURE_4XX = '1';
+    // Freeze the clock so the only unknown in the filename is the module-level
+    // sequence, which the first capture reveals.
+    const fixedNow = 1_700_000_000_000;
+    vi.spyOn(Date, 'now').mockReturnValue(fixedNow);
+    vi.spyOn(globalThis, 'fetch').mockImplementation(() =>
+      Promise.resolve(new Response('{"error":"first"}', { status: 400 })),
+    );
+    const app = createProxyApp(makeConfig());
+
+    expect((await postChat(app, '{}')).status).toBe(400);
+    const [firstName] = readdirSync(captureDir());
+    const sequence = Number(firstName.replace(/\.json$/, '').split('-')[1]);
+    const colliding = `${fixedNow}-${sequence + 1}.json`;
+    const collidingPath = join(captureDir(), colliding);
+    writeFileSync(collidingPath, 'do-not-touch');
+
+    // 'wx' fails with EEXIST instead of overwriting; the proxy swallows the
+    // diagnostic failure and still answers the client.
+    expect((await postChat(app, '{}')).status).toBe(400);
+
+    expect(readdirSync(captureDir()).sort()).toEqual([firstName, colliding].sort());
+    expect(readFileSync(collidingPath, 'utf-8')).toBe('do-not-touch');
   });
 
   it('truncates the captured upstream error and request body', async () => {
