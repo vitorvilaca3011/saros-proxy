@@ -136,7 +136,11 @@ function captureFailedRequest(ctx: RetryContext, status: number, errorBody: stri
       null,
       2,
     );
-    // codeql[js/http-to-file-access] opt-in diagnostic: fixed config-dir path, synthetic filename, mode 0600, never executed.
+    // Opt-in diagnostic (SAROS_CAPTURE_4XX=1), not a general sink: the target
+    // is always <saros config dir>/captures/<timestamp>-<counter>.json, so no
+    // network-derived value selects the path. The file is created with mode
+    // 0600 and flag 'wx', which fails on a pre-existing file instead of
+    // following or overwriting it.
     writeFileSync(file, payload, { encoding: 'utf-8', mode: 0o600, flag: 'wx' });
     logger.warn({ requestId: ctx.requestId, file }, 'captured failing request (SAROS_CAPTURE_4XX)');
   } catch {
