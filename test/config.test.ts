@@ -252,6 +252,16 @@ describe('validateConfig', () => {
     expect(result.keys).toHaveLength(1);
   });
 
+  it('ignores a malformed enabled value instead of retiring the key', () => {
+    const keys = [{ label: 'typo', key: VALID_KEY, enabled: 'false' }];
+    // A non-boolean is a config typo, not a retirement order: the key stays in
+    // the pool and the warning is the only signal.
+    const result = validateConfig(validBase({ keys: keys as never }));
+    const entry = result.keys.find((k) => k.label === 'typo');
+    expect(entry).toBeDefined();
+    expect(entry?.enabled).toBeUndefined();
+  });
+
   it('throws when key array is empty', () => {
     expect(() => validateConfig(validBase({ keys: [] }))).toThrow(
       'No valid API keys configured',

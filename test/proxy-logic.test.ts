@@ -225,6 +225,30 @@ describe('key failure reporting', () => {
     expect(state.keys[2].lastError?.reason).toBe('server');
   });
 
+  it('labels a rate-limited 5xx as rate_limit, not quota', () => {
+    const state = makeState(1);
+    // classifyHttpError sees "limit" in the body and calls it KeyFault; the
+    // reason must still be the rate limit, not a quota wall.
+    markKeyFailed(state, 'alpha', 'KeyFault', { status: 503, body: 'rate limit exceeded, retry later' });
+    expect(state.keys[0].lastError?.reason).toBe('rate_limit');
+  });
+
+  it('still calls a quota wall a quota wall', () => {
+    const state = makeState(1);
+    markKeyFailed(state, 'alpha', 'KeyFault', { status: 503, body: 'insufficient balance' });
+    expect(state.keys[0].lastError?.reason).toBe('quota');
+  });
+
+  it('redacts credentials that the upstream echoed back', () => {
+    const state = makeState(1);
+    markKeyFailed(state, 'alpha', 'KeyFault', {
+      status: 401,
+      body: '{"error":"Incorrect API key provided: sk-leaked-key-abcdef123456"}',
+    });
+    expect(state.keys[0].lastError?.detail).not.toContain('sk-leaked-key-abcdef123456');
+    expect(state.keys[0].lastError?.detail).toContain('[redacted-key]');
+  });
+
   it('keeps the last error after a success but clears the disable', () => {
     const state = makeState(1);
     markKeyFailed(state, 'alpha', 'KeyFault', { status: 401 });
