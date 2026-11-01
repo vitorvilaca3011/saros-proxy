@@ -228,7 +228,7 @@ saros-proxy configharness        # show the current selection
 saros-proxy sync-upstream        # pull the live model list into every selected harness
 ```
 
-`saros-proxy start` syncs the bundled model list on boot too, so a daemon install only needs `configharness` (plus one `sync-upstream` when the live catalog should replace the bundled one). **`sync-upstream` never creates a harness config**: if the file below does not exist, ask the user to launch that harness once so it writes its own config, then sync. The exception is `saros-proxy setup`, which does create `~/.config/opencode/opencode.json` as part of the wizard.
+`saros-proxy start` runs the same sync as `sync-upstream` on boot (live catalog, bundled models as the offline fallback), so a daemon install only needs `configharness`. **That sync never creates a harness config**: if the file below does not exist, ask the user to launch that harness once so it writes its own config, then sync. The exception is `saros-proxy setup`, which writes the OpenCode config path it is given — `opencode.jsonc` on new installs — and in non-interactive mode only updates a file that already exists.
 
 #### OpenCode — `~/.config/opencode/opencode.json` (or `.jsonc`)
 

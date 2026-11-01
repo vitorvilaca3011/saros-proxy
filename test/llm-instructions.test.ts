@@ -428,8 +428,10 @@ describe('LLM Instructions Smoke Test', () => {
       for (const sub of mentioned) {
         // A documented command that does not exist silently falls through to
         // the overview and exits 0 — the drift this test exists to catch.
+        // Trailing boundary matters: `sync` must not match the `sync-upstream`
+        // help line.
         expect(help, `documented but missing from printHelp: saros-proxy ${sub}`).toMatch(
-          new RegExp(`\\n\\s+${sub}\\b`),
+          new RegExp(`\\n\\s+${sub}(?=\\s|\\[|$)`),
         );
       }
     });
