@@ -125,7 +125,9 @@ queryable quota API (CommandCode): their keys report no percentages, but
 #### Circuit Breaker
 
 Keys that return auth/quota errors (`401`, quota `4xx/5xx`) enter a cooldown
-and are lazily re-enabled after it expires. Timeouts and connection errors do
+and are lazily re-enabled after it expires — or immediately by a successful
+response through the same key, which happens when tier 2 shares one key between
+concurrent requests and only one of them fails. Timeouts and connection errors do
 **not** disable keys — they are shared-upstream failures, so Saros keeps
 cycling instead of locking up with "all keys unavailable".
 

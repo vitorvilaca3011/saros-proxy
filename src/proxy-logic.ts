@@ -483,11 +483,17 @@ export function markKeyFailed(
 }
 
 /**
- * Mark a key as succeeded — resets consecutive failures.
+ * Mark a key as succeeded — resets consecutive failures and clears any
+ * cooldown. `enabled` must come back too: a success can arrive after the key
+ * was disabled (tier 2 shares a key between concurrent requests, and a stream
+ * that fails after completeRequest(…, true) marks failure late). Leaving
+ * `enabled=false` with `disabledAt=null` made the key unselectable forever,
+ * because isKeyAvailable only revives keys that still carry a disabledAt.
  */
 export function markKeySucceeded(state: ProxyState, keyLabel: string): void {
   const key = state.keys.find((k) => k.label === keyLabel);
   if (!key) return;
+  key.enabled = true;
   key.consecutiveFailures = 0;
   // C1: clear cooldown on success so next selection isn't penalised
   key.disabledAt = null;
