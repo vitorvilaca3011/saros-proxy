@@ -728,11 +728,12 @@ export function buildKeyDiagnosis(
   if (pinned) {
     causes.add(`the request is pinned to @${pinned} and none of its keys are usable`);
   }
-  if (keys.length === 0 && triedLabels.length > 0) {
-    // Healthy keys, but every one was already attempted for this request: the
-    // 503 used to come back with an empty keys[] and no cause at all.
+  if (triedLabels.length > 0) {
+    // No key was selectable, so every key this request touched failed — say
+    // which ones. Gating this on an empty keys[] hid the case where an
+    // unrelated retired key was listed while the tried keys were not.
     causes.add(
-      `every usable key was already tried for this request (${triedLabels.join(', ')}); the upstream kept answering with a retryable error`,
+      `keys tried for this request: ${triedLabels.join(', ')} — the upstream kept answering with a retryable error`,
     );
   }
 
