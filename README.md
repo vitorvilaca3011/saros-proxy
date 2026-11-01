@@ -705,9 +705,11 @@ curl -s -D - http://127.0.0.1:3000/v1/chat/completions \
 # X-Proxy-Request-Id: 550e8400-e29b-41d4-a716-446655440000
 ```
 
-`X-Proxy-Provider` reports the provider of the key that actually served the request — never the `@provider` routing suffix in the model id, which only pins the pool.
+`X-Proxy-Provider` reports the configured provider of the key that actually served the request. The credential prefix is not re-inferred at routing time: an explicit `provider:` in `config.yaml` wins, so a key declared `provider: commandcode` is sent to CommandCode and reported as `commandcode` even with an `sk-…` credential. For a pinned `model@provider` request the value equals the suffix because the selected key belongs to that provider — not because the header parses the model id.
 
-Only responses an upstream key produced carry these headers. `GET /health`, `GET /v1/models`, `GET /zen/go/v1/models`, `GET /debug/recent`, the 413/429 rejections and the error responses the proxy builds itself (503 no-key, 502 retries exhausted, forwarded 4xx) have no serving key, so the headers are omitted rather than filled with a guess. `/v1/models` is answered by the catalogue handler (`models-fetcher`, no key selected, no provider attribution), which is why it is outside the header contract.
+These headers are emitted only on 2xx responses served by an upstream key. The local routes (`GET /health`, `GET /v1/models`, `GET /zen/go/v1/models`, `GET /debug/recent`) and the 413/429 rejections carry none. The proxy's own error responses — 503 no key, 502 retries exhausted, the 502 synthesized for a bodyless stream, and a forwarded 4xx it re-serializes — omit them even when a key was involved: use the body's `requestId`, and `/debug/recent` still records the `keyLabel`. `/v1/models` is answered by the catalogue handler (`models-fetcher`, no key selected, no provider attribution), which is why it is outside the header contract.
+
+Browser clients can read the three headers: the CORS middleware lists them in `Access-Control-Expose-Headers`.
 
 ### Inspect the last requests
 
@@ -715,9 +717,9 @@ Only responses an upstream key produced carry these headers. `GET /health`, `GET
 curl -s http://127.0.0.1:3000/debug/recent | jq
 ```
 
-`GET /debug/recent` returns `{capacity, count, entries}` with the last 200 proxied requests, oldest first. Each entry mirrors the `evt:"request.complete"` log line: `requestId`, `at` (ISO), `method`, `path`, `model`, `provider`, `keyLabel`, `status`, `durationMs`, `stream`, `attempt`. It lives in memory only and never stores keys, headers or bodies — only the public key label — so it starts empty on restart.
+`GET /debug/recent` returns `{capacity, count, entries}` with the last 200 proxied requests, oldest first. Each entry mirrors the `evt:"request.complete"` log line: `requestId`, `at` (ISO, when the response was produced — for a stream that is its headers, not the end of the stream), `method`, `path`, `model`, `provider`, `keyLabel`, `status`, `durationMs`, `stream`, `attempt`. It lives in memory only and never stores keys, headers or bodies — only the public key label — so it starts empty on restart.
 
-Disable it with `SAROS_DEBUG_BUFFER=0`: the endpoint answers `404` and no entry is kept. Like `/health`, it is unauthenticated (request metadata only, never credentials) — keep the default loopback bind unless the network is trusted.
+Disable it with `SAROS_DEBUG_BUFFER=0`: the endpoint answers `404` and no entry is kept. Like `/health`, it is unauthenticated and metadata-only: `requestId`, paths, models, providers, key labels, status and timing — never keys, headers or bodies. It is designed for the loopback bind; a deployment reachable from the network (including a container/port binding beyond `127.0.0.1`) exposes those request paths, model names and key labels to anyone who can reach the port.
 
 ### Common issues
 

@@ -13,7 +13,11 @@ import { RECENT_REQUESTS_CAPACITY } from './constants.js';
 /** One proxied request, exactly as it appears in the access log. */
 export interface RecentRequestEntry {
   requestId: string;
-  /** ISO timestamp of completion (same instant as the `request.complete` line). */
+  /**
+   * ISO timestamp of when the downstream response was produced (for a stream,
+   * its headers — not the end of the stream). Same instant as the
+   * `request.complete` line.
+   */
   at: string;
   method: string;
   path: string;
@@ -21,7 +25,10 @@ export interface RecentRequestEntry {
   model: string | null;
   /** Provider of the key that served (or last tried) the request. */
   provider: string | null;
-  /** Public key label — never the credential. */
+  /**
+   * Public key label — never the credential. The serving key, or the last key
+   * tried when the request ended in 502; null only when none was selected.
+   */
   keyLabel: string | null;
   status: number;
   durationMs: number;

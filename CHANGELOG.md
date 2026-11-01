@@ -9,18 +9,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- **`X-Proxy-Provider` response header** on responses served by an upstream
-  key: `opencode-go` or `commandcode`, taken from the key that actually served
-  the request (not the `@provider` routing suffix). Local routes (`/health`,
-  `/v1/models`, `/debug/recent`) and proxy-built error responses carry no debug
-  headers — the README now scopes the claim instead of promising them on
-  "every response".
+- **`X-Proxy-Provider` response header** on 2xx responses served by an
+  upstream key: `opencode-go` or `commandcode`, taken from the key's normalized
+  `provider` (an explicit `provider:` in config wins over the credential
+  prefix). A pinned `model@provider` request reports the same value as the
+  suffix because the selected key belongs to that provider, not because the
+  header parses the model id. Local routes (`/health`, `/v1/models`,
+  `/debug/recent`) and error responses the proxy returns (503, 502, forwarded
+  4xx) carry no debug headers even when a key was involved; the README now
+  says so.
+- **The `X-Proxy-*` headers are CORS-exposed**, so browser clients can read
+  them from `fetch()` responses.
 - **`GET /debug/recent` — in-memory buffer of the last 200 proxied requests.**
   Each entry is the same object as the `evt:"request.complete"` access line
   (`requestId`, `at`, `method`, `path`, `model`, `provider`, `keyLabel`,
   `status`, `durationMs`, `stream`, `attempt`), so the endpoint and the log
   cannot drift. It never stores keys, headers or bodies. `SAROS_DEBUG_BUFFER=0`
-  disables it: the endpoint answers 404 and nothing is kept.
+  disables it: the endpoint answers 404 and nothing is kept. The endpoint is
+  unauthenticated metadata meant for the loopback bind; a network-reachable
+  deployment exposes paths, models and key labels to whoever can reach the
+  port.
+
+### Fixed
+
+- **A key's configured `provider` now decides its upstream**, instead of
+  re-inferring it from the credential prefix. A key declared
+  `provider: commandcode` with an `sk-…` credential was forwarded to the
+  OpenCode-Go URL and reported as `opencode-go`; it now goes to CommandCode and
+  the response header says `commandcode`.
+- **The retries-exhausted (502) access entry carries the last key tried**
+  instead of `keyLabel: null`; null now means no key was ever selected (503).
 
 ## [0.10.2] - 2026-10-27
 

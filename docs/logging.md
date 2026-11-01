@@ -43,13 +43,22 @@ stream body is missing becomes a downstream 502 and is logged as 502.
 it is stripped only on the way upstream). If the success handler throws, the request retries
 and the retry logs its own outcome.
 
-`at` is the ISO completion timestamp. The exact same entry object is pushed to the
+`at` is the timestamp when the downstream response was produced, and `durationMs` the time
+from request entry to that instant. For a stream that is when the response headers were
+produced, not the end of the stream: a stream that breaks mid-flight stays recorded as the
+2xx it started as. The exact same entry object is pushed to the
 in-memory buffer behind `GET /debug/recent` (last 200 requests, oldest first), so the
 endpoint and the access log cannot drift: whatever a line says, the buffer entry says.
 The buffer never stores keys, headers or bodies — `keyLabel` is the public label.
 `SAROS_DEBUG_BUFFER=0` removes the buffer entirely: the endpoint answers 404 and no
-entry is kept. `provider` is the provider of the key that last attempted the request
-(`null` when no key could be selected); it is not the `@provider` model suffix.
+entry is kept. The endpoint is unauthenticated and metadata-only (paths, models, labels,
+status, timing — never keys, headers or bodies): it is meant for the loopback bind, and a
+network-reachable deployment exposes those fields to anyone who can reach the port.
+`provider` is the configured provider of the key that last attempted the request (`null`
+when no key could be selected); for a pinned `model@provider` request it equals the suffix
+because the serving key belongs to that provider, not because the suffix is copied.
+`keyLabel` is the serving key, or the last key tried when the request ended in 502; it is
+`null` only when no key was ever selected.
 
 `reason` on `key.state` is derived from the upstream verdict: `401 → auth`,
 `429 → rate_limit`, 5xx carrying a quota/balance hint → `quota`, anything else 5xx →

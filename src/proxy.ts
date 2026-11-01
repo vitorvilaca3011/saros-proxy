@@ -43,7 +43,7 @@ import { getModelsList } from './models-fetcher.js';
 import { maybeRefreshUsage } from './usage-client.js';
 import { recordModelRequest } from './model-stats.js';
 import { recordKeyTokens } from './token-usage.js';
-import { getProvider, inferProvider } from './providers/index.js';
+import { getProvider } from './providers/index.js';
 import type { KeyProvider, ProviderId } from './providers/index.js';
 import {
   createRecentRequestBuffer,
@@ -226,17 +226,20 @@ export function prepareOutboundRequest(
 
 /**
  * Provider for a key snapshot. Suffix-routed requests (​@provider model ids)
- * pin the provider; otherwise structural inference from the key itself.
+ * pin the provider; otherwise the key's configured provider decides.
+ *
+ * The credential prefix is deliberately not re-inferred here: `key.provider`
+ * is normalized from config (an explicit `provider:` wins over the prefix) and
+ * it is what selection filters on. Routing on a different signal sent a key
+ * declared `provider: commandcode` through the OpenCode-Go URL.
  */
-function providerForKey(key: KeySnapshot, config: ProxyConfig, modelId?: string): KeyProvider {
+function providerForKey(key: KeySnapshot, modelId?: string): KeyProvider {
   const suffixProvider = parseProviderSuffix(modelId);
   if (suffixProvider) {
     const pinned = getProvider(suffixProvider as ProviderId);
     if (pinned) return pinned;
   }
-  const inferred = inferProvider({ label: key.label, key: key.key });
-  void config;
-  return getProvider(inferred) ?? getProvider('opencode-go')!;
+  return getProvider(key.provider as ProviderId) ?? getProvider('opencode-go')!;
 }
 
 // Augment Hono's ContextVariableMap for @hono/node-server remote address
@@ -498,7 +501,7 @@ async function executeSingleAttempt(attempt: number, ctx: RetryContext): Promise
   // Per-attempt upstream: keys may be mixed-provider within one failover chain.
   // Suffix-routed models (@provider) pin the provider and lose the suffix
   // in the forwarded body; the upstream never sees saros's routing shim.
-  const provider = providerForKey(key, ctx.config, ctx.modelId);
+  const provider = providerForKey(key, ctx.modelId);
   ctx.lastProvider = provider.id;
   logger.debug(
     {
@@ -824,6 +827,7 @@ function handleAllRetriesFailed(ctx: RetryContext, maxRetries: number, lastError
   // goes through failoverRequest (the loop ends), so its key is only in
   // currentKey — omitting it hides the key that failed last.
   const active = ctx.state.activeRequests.get(ctx.requestId);
+  const lastKeyLabel = active?.currentKey?.label ?? null;
   const triedLabels = [
     ...new Set([...(active?.triedKeys ?? []), ...(active?.currentKey ? [active.currentKey.label] : [])]),
   ];
@@ -835,7 +839,7 @@ function handleAllRetriesFailed(ctx: RetryContext, maxRetries: number, lastError
       : 'Streaming failed after %d attempts',
     maxRetries,
   );
-  logRequestComplete(ctx, 502, null);
+  logRequestComplete(ctx, 502, lastKeyLabel);
   const message = ctx.kind === 'standard'
     ? 'Upstream service unavailable after multiple attempts'
     : 'Streaming service unavailable after multiple attempts';
@@ -867,7 +871,9 @@ function handleAllRetriesFailed(ctx: RetryContext, maxRetries: number, lastError
  * (502) are mutually exclusive paths.
  *
  * The same entry is pushed to the in-memory buffer served by `GET /debug/recent`
- * (when enabled), so the two views cannot drift.
+ * (when enabled), so the two views cannot drift. `keyLabel` is the key that
+ * served the request, the last key tried when it ended in 502, and null only
+ * when no key was ever selected (503).
  */
 function logRequestComplete(
   ctx: RetryContext,
@@ -1280,6 +1286,9 @@ export function createProxyApp(config: ProxyConfig): Hono {
   app.use(
     '*',
     cors({
+      // Browser JS cannot read a response header unless it is exposed: without
+      // this the X-Proxy-* annotations are visible to curl but not to fetch().
+      exposeHeaders: ['X-Proxy-Key-Label', 'X-Proxy-Request-Id', 'X-Proxy-Provider'],
       origin: (origin: string) => {
         if (!origin) return null; // Non-browser requests (no Origin header) — skip CORS
         const allowed = config.allowedOrigins.some((pattern) => {
