@@ -64,6 +64,15 @@ async function removeTempDir(dir: string): Promise<void> {
   }
 }
 
+/** Read the proxy log; a failed read must not mask the real failure. */
+function readProxyLog(path: string): string {
+  try {
+    return readFileSync(path, 'utf-8');
+  } catch {
+    return '<no log>';
+  }
+}
+
 describe.skipIf(!ENABLED)('live model e2e (real upstream)', () => {
   let workDir: string;
   let logPath: string;
@@ -119,7 +128,7 @@ describe.skipIf(!ENABLED)('live model e2e (real upstream)', () => {
       } catch { /* not ready */ }
       await new Promise((r) => setTimeout(r, 300));
     }
-    throw new Error(`proxy not healthy; log:\n${readFileSync(logPath, 'utf-8')}`);
+    throw new Error(`proxy not healthy; log:\n${readProxyLog(logPath)}`);
   }, 60_000);
 
   afterAll(async () => {
@@ -138,7 +147,7 @@ describe.skipIf(!ENABLED)('live model e2e (real upstream)', () => {
       }),
     });
     if (res.status !== 200) {
-      throw new Error(`status ${res.status}; proxy log:\n${readFileSync(logPath, 'utf-8')}`);
+      throw new Error(`status ${res.status}; proxy log:\n${readProxyLog(logPath)}`);
     }
     expect(res.headers.get('x-proxy-key-label')).toBeTruthy();
 
