@@ -53,6 +53,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **The daemon child no longer dies from EPIPE on a stderr write (#99).** The
+  launcher used to pipe the child's stderr and mirror it into `daemon.log` only
+  until startup verification settled; the parent then exited and took the read
+  end with it, so any later `process.stderr.write` — an uncaught-exception
+  trace, most of all — raised EPIPE and killed `serve`. The child now gets
+  `daemon.log` as both stdout and stderr (one descriptor, no pipe). Startup
+  failures are recovered from the log tail written since the boot offset:
+  `EADDRINUSE` and missing-key failures keep their specific messages, anything
+  else still prints the last six lines and exits non-zero.
 - **Security review fixes for key encryption (#100).** The DPAPI blob now
   travels in the child environment (`$env:SAROS_DPAPI_BLOB`) and is validated
   as base64 before PowerShell runs, closing a command-injection path; a symlinked
