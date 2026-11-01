@@ -301,9 +301,9 @@ describe('keys encrypt', () => {
     expect(code).toBe(0);
 
     const backupPath = `${configPath}.backup`;
-    expect(existsSync(backupPath)).toBe(true);
+    const backup = readFileSync(backupPath, 'utf-8');
+    expect(backup).toBe(originalYaml);
     expect(statSync(backupPath).mode & 0o777).toBe(0o600);
-    expect(readFileSync(backupPath, 'utf-8')).toBe(originalYaml);
 
     const updated = readFileSync(configPath, 'utf-8');
     expect(updated).toContain('# keep this comment');
@@ -349,13 +349,14 @@ describe('keys encrypt', () => {
 
       expect(await encryptConfigFile({ configPath: linkPath, passphrase: PASSPHRASE })).toBe(0);
 
-      expect(lstatSync(linkPath).isSymbolicLink()).toBe(true);
-      expect(readlinkSync(linkPath)).toBe(realPath);
       const target = readFileSync(realPath, 'utf-8');
+      const throughLink = readFileSync(linkPath, 'utf-8');
+      expect(throughLink).toBe(target);
       expect(target).toContain('enc:v1:');
       expect(target).not.toContain(KEY);
       expect(target).not.toContain(SECOND_KEY);
-      expect(readFileSync(linkPath, 'utf-8')).toBe(target);
+      expect(lstatSync(linkPath).isSymbolicLink()).toBe(true);
+      expect(readlinkSync(linkPath)).toBe(realPath);
       expect(readFileSync(`${realPath}.backup`, 'utf-8')).toBe(originalYaml);
     },
   );

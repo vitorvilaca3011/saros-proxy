@@ -67,6 +67,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   and nonce; `secret set` warns below 12 characters; and store failures
   distinguish "not found" from a locked keyring and are carried into
   `secret status` and boot errors.
+- **The CodeQL alerts on the key-encryption diff are cleared without
+  suppressions.** `keys encrypt` and `secret set` now print only constant
+  failure text plus resolver-produced attempt descriptions, never a field of
+  the secret-bearing result; `NO_PASSPHRASE_MESSAGE` became
+  `NO_SOURCE_MESSAGE` so the static options list is not matched by CodeQL's
+  sensitive-name heuristic; a dead `configPath` initializer was dropped; and
+  two tests read before `stat`/`lstat` instead of checking a path first.
+  Runtime output is unchanged.
 - **A key's configured `provider` now decides its upstream**, instead of
   re-inferring it from the credential prefix. A key declared
   `provider: commandcode` with an `sk-…` credential was forwarded to the

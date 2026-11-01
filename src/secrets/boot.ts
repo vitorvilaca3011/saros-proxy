@@ -12,7 +12,7 @@ import { parse as parseYaml } from 'yaml';
 import { resolveConfigPath, type ProxyConfig } from '../config.js';
 import { isEnvelope } from './envelope.js';
 import {
-  NO_PASSPHRASE_MESSAGE,
+  NO_SOURCE_MESSAGE,
   SecretSourceError,
   formatAttempts,
   resolvePassphrase,
@@ -53,7 +53,7 @@ export async function prepareBootPassphrase(
   if (resolved.ok) return resolved.value;
 
   const attempts = formatAttempts(resolved.attempts);
-  throw new SecretSourceError(`${NO_PASSPHRASE_MESSAGE}\nAttempts:\n${attempts}`);
+  throw new SecretSourceError(`${NO_SOURCE_MESSAGE}\nAttempts:\n${attempts}`);
 }
 
 export interface BootMetadata {

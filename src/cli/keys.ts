@@ -29,11 +29,11 @@ import { inferProvider } from '../providers/infer.js';
 import { encryptValue, isEnvelope } from '../secrets/envelope.js';
 import { isEncryptedKey } from '../key-encryption.js';
 import {
-  NO_PASSPHRASE_MESSAGE,
+  NO_SOURCE_MESSAGE,
   formatAttempts,
   resolvePassphrase,
   type CommandRunner,
-  type SourceResult,
+  type SourceAttempt,
 } from '../secrets/source.js';
 
 export interface KeysCommandOptions {
@@ -55,6 +55,14 @@ interface KeyNode {
   label: string;
   key: string;
 }
+
+/**
+ * The failure variant carries no secret-derived field: attempts are produced
+ * by the resolver and are safe to print.
+ */
+type EncryptPassphraseResult =
+  | { ok: true; value: string }
+  | { ok: false; attempts: SourceAttempt[] };
 
 class KeysCommandError extends Error {}
 
@@ -111,7 +119,9 @@ function writeConfig(configPath: string, content: string): void {
   }
 }
 
-async function resolveEncryptPassphrase(options: KeysCommandOptions): Promise<SourceResult> {
+async function resolveEncryptPassphrase(
+  options: KeysCommandOptions,
+): Promise<EncryptPassphraseResult> {
   if (options.passphrase !== undefined && options.passphrase.length > 0) {
     return { ok: true, value: options.passphrase };
   }
@@ -127,7 +137,7 @@ async function resolveEncryptPassphrase(options: KeysCommandOptions): Promise<So
   });
   return resolved.ok
     ? { ok: true, value: resolved.value }
-    : { ok: false, reason: formatAttempts(resolved.attempts) };
+    : { ok: false, attempts: resolved.attempts };
 }
 
 /** Encrypt one already-parsed config document; exported for tests. */
@@ -140,7 +150,7 @@ export async function encryptConfigFile(options: KeysCommandOptions = {}): Promi
 
   // A dotfile-managed config is usually a symlink; rewriting the link would
   // leave the real target (the file the proxy reads) in plaintext.
-  let configPath = requestedPath;
+  let configPath: string;
   let document;
   try {
     configPath = realpathSync(requestedPath);
@@ -173,12 +183,12 @@ export async function encryptConfigFile(options: KeysCommandOptions = {}): Promi
     return 0;
   }
 
-  const passphrase = await resolveEncryptPassphrase(options);
-  if (!passphrase.ok) {
+  const resolved = await resolveEncryptPassphrase(options);
+  if (!resolved.ok) {
     console.error(
       chalk.red('✗ No passphrase source available.\n') +
-        NO_PASSPHRASE_MESSAGE +
-        `\nAttempts:\n${passphrase.reason}`,
+        NO_SOURCE_MESSAGE +
+        `\nAttempts:\n${formatAttempts(resolved.attempts)}`,
     );
     return 1;
   }
@@ -187,7 +197,7 @@ export async function encryptConfigFile(options: KeysCommandOptions = {}): Promi
     if (entry.node.get('provider') === undefined) {
       entry.node.set('provider', inferProvider({ label: entry.label, key: entry.key }));
     }
-    entry.node.set('key', encryptValue(entry.key, passphrase.value, entry.label));
+    entry.node.set('key', encryptValue(entry.key, resolved.value, entry.label));
   }
 
   const legacy = keys.filter((entry) => isEncryptedKey(entry.key)).length;

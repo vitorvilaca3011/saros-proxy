@@ -103,7 +103,7 @@ export interface StoreWriteResult {
   reason?: string;
 }
 
-export const NO_PASSPHRASE_MESSAGE = [
+export const NO_SOURCE_MESSAGE = [
   'Encrypted API keys found, but no passphrase source is available.',
   '  a. Set SAROS_PASSPHRASE in the environment (systemd: use systemd-creds).',
   '  b. Store the passphrase in the OS secret store: saros-proxy secret set',

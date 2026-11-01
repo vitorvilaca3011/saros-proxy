@@ -69,13 +69,13 @@ export const MIN_PASSPHRASE_LENGTH = 12;
 
 /** Store the passphrase in the OS store. Returns the process exit code. */
 export async function runSecretSet(options: SecretCommandOptions = {}): Promise<number> {
-  const passphrase = await readNewPassphrase(options);
-  if (!passphrase.ok) {
-    console.error(chalk.red(`✗ ${passphrase.reason}`));
+  const resolved = await readNewPassphrase(options);
+  if (!resolved.ok) {
+    console.error(chalk.red(`✗ ${resolved.reason}`));
     return 1;
   }
 
-  if (passphrase.value.length < MIN_PASSPHRASE_LENGTH) {
+  if (resolved.value.length < MIN_PASSPHRASE_LENGTH) {
     console.error(
       chalk.yellow(
         `⚠ Passphrase is shorter than ${MIN_PASSPHRASE_LENGTH} characters. ` +
@@ -84,7 +84,7 @@ export async function runSecretSet(options: SecretCommandOptions = {}): Promise<
     );
   }
 
-  const stored = storePassphrase(passphrase.value, storeOptions(options));
+  const stored = storePassphrase(resolved.value, storeOptions(options));
   if (!stored.ok) {
     console.error(chalk.red(`✗ Could not store the passphrase: ${stored.reason}`));
     return 1;

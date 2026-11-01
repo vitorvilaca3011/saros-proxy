@@ -25,7 +25,7 @@ import { encryptKey } from '../src/key-encryption.js';
 import type * as LoggerModule from '../src/logger.js';
 import { encryptValue } from '../src/secrets/envelope.js';
 import {
-  NO_PASSPHRASE_MESSAGE,
+  NO_SOURCE_MESSAGE,
   SecretSourceError,
   decryptFailureMessage,
 } from '../src/secrets/source.js';
@@ -114,7 +114,7 @@ describe('loadConfig — enc:v1 envelopes', () => {
     }
     expect(caught).toBeInstanceOf(SecretSourceError);
     const message = (caught as Error).message;
-    expect(message).toContain(NO_PASSPHRASE_MESSAGE);
+    expect(message).toContain(NO_SOURCE_MESSAGE);
     expect(message).toContain('SAROS_PASSPHRASE');
     expect(message).toContain('saros-proxy secret set');
     expect(message).toContain('saros-proxy serve');
@@ -326,7 +326,7 @@ describe('prepareBootPassphrase', () => {
     }
     expect(caught).toBeInstanceOf(SecretSourceError);
     const message = (caught as Error).message;
-    expect(message).toContain(NO_PASSPHRASE_MESSAGE);
+    expect(message).toContain(NO_SOURCE_MESSAGE);
     expect(message).toContain('env: SAROS_PASSPHRASE is not set');
     expect(message).toContain('store:');
     expect(message).toContain('tty: interactive prompt is disabled in this context');

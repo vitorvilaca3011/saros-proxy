@@ -11,7 +11,7 @@ import { redactErrorMessage } from './log-redact.js';
 import { decryptKey, isEncryptedKey } from './key-encryption.js';
 import { decryptValue, isEnvelope } from './secrets/envelope.js';
 import {
-  NO_PASSPHRASE_MESSAGE,
+  NO_SOURCE_MESSAGE,
   SecretSourceError,
   decryptFailureMessage,
   readEnvPassphrase,
@@ -427,7 +427,7 @@ function resolveEnvelopePassphrase(explicitPassphrase: string | undefined): stri
   const store = readStorePassphrase();
   if (store.ok) return store.value;
 
-  throw new SecretSourceError(`${NO_PASSPHRASE_MESSAGE}\nStore: ${store.reason}`);
+  throw new SecretSourceError(`${NO_SOURCE_MESSAGE}\nStore: ${store.reason}`);
 }
 
 function decryptEnvelopeEntry(entry: KeyEntry, passphrase: string): KeyEntry {

@@ -8,7 +8,7 @@ import pino from 'pino';
 import { LOG_REDACT_PATHS } from '../src/logger.js';
 import { redactErrorMessage, redactSecrets } from '../src/log-redact.js';
 import { encryptValue, decryptValue } from '../src/secrets/envelope.js';
-import { NO_PASSPHRASE_MESSAGE, decryptFailureMessage } from '../src/secrets/source.js';
+import { NO_SOURCE_MESSAGE, decryptFailureMessage } from '../src/secrets/source.js';
 
 const PASSPHRASE = 'redaction-test-passphrase-fixture';
 const PLAINTEXT = 'sk-redaction-fixture-key-long-enough-0001';
@@ -81,7 +81,7 @@ describe('log redaction', () => {
     const envelope = encryptValue(PLAINTEXT, PASSPHRASE, 'label');
     const wrong = decryptValue(envelope, 'wrong-fixture-passphrase', 'label');
     const messages = [
-      NO_PASSPHRASE_MESSAGE,
+      NO_SOURCE_MESSAGE,
       wrong.ok ? '' : decryptFailureMessage('label', wrong.error.message),
     ].join('\n');
     for (const secret of [PASSPHRASE, PLAINTEXT, envelope]) {
