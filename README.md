@@ -45,6 +45,7 @@ Manage multiple API keys behind a single endpoint — OpenCode-Go **and** Comman
 - **Security hardening** — API key masking in logs, SSRF prevention (HTTPS-only upstream), configurable CORS, host binding validation.
 - **Config validation** — CLI args, YAML file, or environment variables with sensible defaults.
 - **Health endpoint** — `GET /health` shows key status per key (enabled, why it is out of rotation, when it retries), active requests, and circuit-breaker state.
+- **Request forensics** — `X-Proxy-Provider` / `X-Proxy-Key-Label` / `X-Proxy-Request-Id` headers on served responses, plus `GET /debug/recent` (last 200 requests in memory, no credentials).
 - **No database** — Stateless proxy, zero external dependencies beyond Node.js.
 
 ---
@@ -685,20 +686,38 @@ NODE_ENV=development npx tsx src/index.ts
 NODE_ENV=production npx tsx src/index.ts
 ```
 
-### See which key served a request
+### See which key and provider served a request
 
-Saros adds two debug headers to every response:
+Responses served by an upstream key carry three debug headers:
 
 | Header | Example | What it is |
 |---|---|---|
 | `X-Proxy-Key-Label` | `primary` | Which key was used |
+| `X-Proxy-Provider` | `commandcode` | Provider of that key (`opencode-go` or `commandcode`) |
 | `X-Proxy-Request-Id` | `550e8400-e29b-41d4-a716-446655440000` | Unique ID for log correlation |
 
 ```bash
-curl -s -D - http://127.0.0.1:3000/zen/go/v1/models | grep -i x-proxy
+curl -s -D - http://127.0.0.1:3000/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d '{"model":"gpt-4","messages":[{"role":"user","content":"Hello"}]}' | grep -i x-proxy
 # X-Proxy-Key-Label: primary
+# X-Proxy-Provider: opencode-go
 # X-Proxy-Request-Id: 550e8400-e29b-41d4-a716-446655440000
 ```
+
+`X-Proxy-Provider` reports the provider of the key that actually served the request — never the `@provider` routing suffix in the model id, which only pins the pool.
+
+Only responses an upstream key produced carry these headers. `GET /health`, `GET /v1/models`, `GET /zen/go/v1/models`, `GET /debug/recent`, the 413/429 rejections and the error responses the proxy builds itself (503 no-key, 502 retries exhausted, forwarded 4xx) have no serving key, so the headers are omitted rather than filled with a guess. `/v1/models` is answered by the catalogue handler (`models-fetcher`, no key selected, no provider attribution), which is why it is outside the header contract.
+
+### Inspect the last requests
+
+```bash
+curl -s http://127.0.0.1:3000/debug/recent | jq
+```
+
+`GET /debug/recent` returns `{capacity, count, entries}` with the last 200 proxied requests, oldest first. Each entry mirrors the `evt:"request.complete"` log line: `requestId`, `at` (ISO), `method`, `path`, `model`, `provider`, `keyLabel`, `status`, `durationMs`, `stream`, `attempt`. It lives in memory only and never stores keys, headers or bodies — only the public key label — so it starts empty on restart.
+
+Disable it with `SAROS_DEBUG_BUFFER=0`: the endpoint answers `404` and no entry is kept. Like `/health`, it is unauthenticated (request metadata only, never credentials) — keep the default loopback bind unless the network is trusted.
 
 ### Common issues
 

@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **`X-Proxy-Provider` response header** on responses served by an upstream
+  key: `opencode-go` or `commandcode`, taken from the key that actually served
+  the request (not the `@provider` routing suffix). Local routes (`/health`,
+  `/v1/models`, `/debug/recent`) and proxy-built error responses carry no debug
+  headers — the README now scopes the claim instead of promising them on
+  "every response".
+- **`GET /debug/recent` — in-memory buffer of the last 200 proxied requests.**
+  Each entry is the same object as the `evt:"request.complete"` access line
+  (`requestId`, `at`, `method`, `path`, `model`, `provider`, `keyLabel`,
+  `status`, `durationMs`, `stream`, `attempt`), so the endpoint and the log
+  cannot drift. It never stores keys, headers or bodies. `SAROS_DEBUG_BUFFER=0`
+  disables it: the endpoint answers 404 and nothing is kept.
+
 ## [0.10.2] - 2026-10-27
 
 ### Fixed

@@ -32,7 +32,7 @@ without reading the source.
 | `key.state` | info/warn | a key leaving or re-entering rotation | requestId, keyLabel, provider, enabled, reason (`auth`/`quota`/`rate_limit`/`server`), status, consecutiveFailures/cooldownMs |
 | `request.no_keys` | warn | no key could be selected | requestId, attempt, kind, modelId, retryAfterMs, unavailable[{label,reason,status}] |
 | `request.retries_exhausted` | error | every attempt failed | requestId, kind, err |
-| `request.complete` | info | **once per proxied request** (not `/health`, `/v1/models`, 413 or a middleware 429) | requestId, method, path, model, provider, keyLabel, status, durationMs, stream, attempt |
+| `request.complete` | info | **once per proxied request** (not `/health`, `/v1/models`, `/debug/recent`, 413 or a middleware 429) | requestId, at, method, path, model, provider, keyLabel, status, durationMs, stream, attempt |
 
 `request.complete` is the access log: success, upstream client error (4xx from the
 provider), 503 (no usable key) and 502 (retries exhausted) are mutually exclusive paths, so
@@ -42,6 +42,14 @@ stream body is missing becomes a downstream 502 and is logged as 502.
 `model` is the raw model id from the request body (`model@provider` keeps its suffix here,
 it is stripped only on the way upstream). If the success handler throws, the request retries
 and the retry logs its own outcome.
+
+`at` is the ISO completion timestamp. The exact same entry object is pushed to the
+in-memory buffer behind `GET /debug/recent` (last 200 requests, oldest first), so the
+endpoint and the access log cannot drift: whatever a line says, the buffer entry says.
+The buffer never stores keys, headers or bodies — `keyLabel` is the public label.
+`SAROS_DEBUG_BUFFER=0` removes the buffer entirely: the endpoint answers 404 and no
+entry is kept. `provider` is the provider of the key that last attempted the request
+(`null` when no key could be selected); it is not the `@provider` model suffix.
 
 `reason` on `key.state` is derived from the upstream verdict: `401 → auth`,
 `429 → rate_limit`, 5xx carrying a quota/balance hint → `quota`, anything else 5xx →

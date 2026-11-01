@@ -198,7 +198,9 @@ keys:
 
 **Note:** The daemon child runs with `NODE_ENV=production` (JSON logging). Its stdout and stderr are appended to `~/.config/saros/daemon.log`, which rotates at start (10 MB → `daemon.log.1`, five kept) and carries an `evt:"boot"` line (version, config path, port, key labels) — that is where to look when the daemon "starts" but nothing works. For pretty-printed logs, run in foreground mode with `NODE_ENV=development`.
 
-Every request emits exactly one `evt:"request.complete"` line (requestId, path, model, provider, keyLabel, status, durationMs, stream, attempt); `key.state` explains a key leaving or returning to rotation. `docs/logging.md` is the contract (events, levels, redaction) — read it before diagnosing a request from logs.
+Every proxied response carries `X-Proxy-Request-Id`, `X-Proxy-Key-Label` and `X-Proxy-Provider` (the provider of the key that actually served it: `opencode-go` or `commandcode`, never the `@provider` model suffix). Local and error routes (`/health`, `/v1/models`, `/debug/recent`, 503/502 and forwarded 4xx) carry none — there is no serving key to attribute.
+
+Every request emits exactly one `evt:"request.complete"` line (requestId, at, path, model, provider, keyLabel, status, durationMs, stream, attempt); `key.state` explains a key leaving or returning to rotation. `GET /debug/recent` returns the same last 200 entries in memory, oldest first, and never contains keys, headers or bodies; it answers 404 when `SAROS_DEBUG_BUFFER=0`. `docs/logging.md` is the contract (events, levels, redaction) — read it before diagnosing a request from logs.
 
 ### 2.4 Verify
 
@@ -207,6 +209,8 @@ curl http://127.0.0.1:{port}/health
 ```
 
 Expected: `{"status":"ok","keyCount":2,"enabledCount":2,...}`
+
+For request-level forensics, `curl -s http://127.0.0.1:{port}/debug/recent` lists the last 200 proxied requests with `requestId`, `provider`, `keyLabel`, `status` and timing — correlate it with the `evt:"request.complete"` line carrying the same `requestId`.
 
 ### 2.5 Auto-Start on Login (if requested)
 

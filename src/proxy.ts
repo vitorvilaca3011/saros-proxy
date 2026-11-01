@@ -45,6 +45,12 @@ import { recordModelRequest } from './model-stats.js';
 import { recordKeyTokens } from './token-usage.js';
 import { getProvider, inferProvider } from './providers/index.js';
 import type { KeyProvider, ProviderId } from './providers/index.js';
+import {
+  createRecentRequestBuffer,
+  isDebugBufferEnabled,
+  type RecentRequestBuffer,
+  type RecentRequestEntry,
+} from './debug-buffer.js';
 
 /** Canonical client-facing chat route prefix (the opencode-go shape). */
 const CANONICAL_CHAT_BASE = '/zen/go/v1';
@@ -405,6 +411,8 @@ type SuccessHandler = (
   state: ProxyState,
   requestId: string,
   keyLabel: string,
+  /** Provider that actually served the request (routed key, not model suffix). */
+  provider: ProviderId,
 ) => Promise<Response>;
 
 interface RetryContext {
@@ -425,6 +433,8 @@ interface RetryContext {
   lastProvider?: string;
   /** Zero-based attempt currently running. */
   attempt: number;
+  /** In-memory access buffer; absent when SAROS_DEBUG_BUFFER=0. */
+  recentRequests?: RecentRequestBuffer;
 }
 
 type AttemptResult =
@@ -448,6 +458,7 @@ async function executeWithRetry(opts: {
   modelId?: string;
   onSuccess: SuccessHandler;
   maxRetries: number;
+  recentRequests?: RecentRequestBuffer;
 }): Promise<Response> {
   const ctx: RetryContext = {
     state: opts.state,
@@ -462,6 +473,7 @@ async function executeWithRetry(opts: {
     onSuccess: opts.onSuccess,
     startedAt: Date.now(),
     attempt: 0,
+    recentRequests: opts.recentRequests,
   };
 
   let lastError: Error | null = null;
@@ -539,7 +551,7 @@ async function executeSingleAttempt(attempt: number, ctx: RetryContext): Promise
       );
       recordKeySuccess(ctx.state, key.label, ctx.requestId);
       completeRequest(ctx.state, ctx.requestId, true);
-      const downstream = await ctx.onSuccess(response, ctx.state, ctx.requestId, key.label);
+      const downstream = await ctx.onSuccess(response, ctx.state, ctx.requestId, key.label, provider.id);
       // Logged after the success handler: if it throws, the request retries and
       // this is not a completed request (the retry path logs its own outcome).
       // The downstream status is what the client saw — the streaming handler
@@ -853,28 +865,30 @@ function handleAllRetriesFailed(ctx: RetryContext, maxRetries: number, lastError
  * One line per finished request — the access log. Exactly one per request:
  * success, upstream client error, no usable key (503) and retries exhausted
  * (502) are mutually exclusive paths.
+ *
+ * The same entry is pushed to the in-memory buffer served by `GET /debug/recent`
+ * (when enabled), so the two views cannot drift.
  */
 function logRequestComplete(
   ctx: RetryContext,
   status: number,
   keyLabel: string | null,
 ): void {
-  logger.info(
-    {
-      evt: 'request.complete',
-      requestId: ctx.requestId,
-      method: ctx.method,
-      path: ctx.path,
-      model: ctx.modelId ?? null,
-      provider: ctx.lastProvider ?? null,
-      keyLabel,
-      status,
-      durationMs: Date.now() - ctx.startedAt,
-      stream: ctx.kind === 'streaming',
-      attempt: ctx.attempt + 1,
-    },
-    'request complete',
-  );
+  const entry: RecentRequestEntry = {
+    requestId: ctx.requestId,
+    at: new Date().toISOString(),
+    method: ctx.method,
+    path: ctx.path,
+    model: ctx.modelId ?? null,
+    provider: ctx.lastProvider ?? null,
+    keyLabel,
+    status,
+    durationMs: Date.now() - ctx.startedAt,
+    stream: ctx.kind === 'streaming',
+    attempt: ctx.attempt + 1,
+  };
+  logger.info({ evt: 'request.complete', ...entry }, 'request complete');
+  ctx.recentRequests?.push(entry);
 }
 
 function logKeyAttempt(requestId: string, key: KeySnapshot, attempt: number, kind: RequestKind): void {
@@ -988,7 +1002,7 @@ function logNetworkError(requestId: string, key: KeySnapshot, err: unknown, kind
 // Success handlers
 // ---------------------------------------------------------------------------
 
-const standardSuccessHandler: SuccessHandler = async (response, state, requestId, keyLabel) => {
+const standardSuccessHandler: SuccessHandler = async (response, state, requestId, keyLabel, provider) => {
   logger.info(
     { requestId, keyLabel, status: response.status },
     'Upstream request succeeded',
@@ -1001,13 +1015,14 @@ const standardSuccessHandler: SuccessHandler = async (response, state, requestId
   const downstreamHeaders = buildDownstreamHeaders(response.headers);
   downstreamHeaders.set('X-Proxy-Key-Label', keyLabel);
   downstreamHeaders.set('X-Proxy-Request-Id', requestId);
+  downstreamHeaders.set('X-Proxy-Provider', provider);
   return new Response(responseBody, {
     status: response.status,
     headers: downstreamHeaders,
   });
 };
 
-const streamingSuccessHandler: SuccessHandler = async (response, state, requestId, keyLabel) => {
+const streamingSuccessHandler: SuccessHandler = async (response, state, requestId, keyLabel, provider) => {
   if (!response.body) {
     logger.error({ requestId, keyLabel }, 'Streaming response missing body');
     return new Response(
@@ -1022,6 +1037,7 @@ const streamingSuccessHandler: SuccessHandler = async (response, state, requestI
   responseHeaders.set('connection', 'keep-alive');
   responseHeaders.set('X-Proxy-Key-Label', keyLabel);
   responseHeaders.set('X-Proxy-Request-Id', requestId);
+  responseHeaders.set('X-Proxy-Provider', provider);
   return new Response(wrappedStream, { status: 200, headers: responseHeaders });
 };
 
@@ -1036,6 +1052,8 @@ interface HandleRequestOptions {
   /** Model id from the request body — drives provider-affinity routing. */
   modelId?: string;
   maxRetries?: number;
+  /** In-memory access buffer; absent when SAROS_DEBUG_BUFFER=0. */
+  recentRequests?: RecentRequestBuffer;
 }
 
 /**
@@ -1055,6 +1073,7 @@ async function handleWithFailover(opts: HandleRequestOptions): Promise<Response>
     modelId: opts.modelId,
     onSuccess: standardSuccessHandler,
     maxRetries: opts.maxRetries ?? MAX_RETRIES,
+    recentRequests: opts.recentRequests,
   });
 }
 
@@ -1076,6 +1095,7 @@ async function handleStreamingRequest(opts: HandleRequestOptions): Promise<Respo
     modelId: opts.modelId,
     onSuccess: streamingSuccessHandler,
     maxRetries: opts.maxRetries ?? MAX_RETRIES,
+    recentRequests: opts.recentRequests,
   });
 }
 
@@ -1217,6 +1237,9 @@ export function createProxyApp(config: ProxyConfig): Hono {
     circuitBreakerThreshold: config.circuitBreakerThreshold,
     circuitBreakerCooldownMs: config.circuitBreakerCooldownMs,
   });
+  // Last proxied requests, in memory only. `SAROS_DEBUG_BUFFER=0` removes the
+  // instance entirely: `/debug/recent` answers 404 and nothing is stored.
+  const recentRequests = isDebugBufferEnabled() ? createRecentRequestBuffer() : undefined;
   // Model→provider affinity: requests naming a provider-specific model
   // (e.g. commandcode's vendor-prefixed ids) are routed to a matching key
   // first; 'maybe' providers remain as fallback. Bare-name matching lets
@@ -1304,6 +1327,14 @@ export function createProxyApp(config: ProxyConfig): Hono {
     });
   });
 
+  // --- Recent proxied requests (in-memory, opt-out) ---
+  // Same entries as the `request.complete` access lines: requestId, provider,
+  // key label and outcome — never credentials, headers or bodies.
+  app.get('/debug/recent', (c: Context) => {
+    if (!recentRequests) return c.json({ error: 'Not Found' }, 404);
+    return c.json(recentRequests.snapshot());
+  });
+
   // --- Models discovery endpoint (OpenAI-compatible) ---
   // Returns the full model list so the OpenCode client can discover all
   // available models. Without this, OpenCode falls back to a hardcoded
@@ -1355,6 +1386,7 @@ export function createProxyApp(config: ProxyConfig): Hono {
         incomingHeaders,
         bodyText,
         modelId: typeof parsedBody.model === 'string' ? parsedBody.model : undefined,
+        recentRequests,
       });
     }
 
@@ -1368,6 +1400,7 @@ export function createProxyApp(config: ProxyConfig): Hono {
       incomingHeaders,
       bodyText,
       modelId: typeof parsedBody?.model === 'string' ? parsedBody.model : undefined,
+      recentRequests,
     });
   }
 
