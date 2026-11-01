@@ -27,6 +27,7 @@ import {
 } from './proxy-logic.js';
 import type { ProxyConfig } from './config.js';
 import { logger, maskKey } from './logger.js';
+import { redactSecrets } from './log-redact.js';
 import {
   MAX_BODY_SIZE,
   MAX_RETRIES,
@@ -660,7 +661,9 @@ function logUpstreamError(
     logger.warn(
       { requestId, keyLabel: key.label, status, errorType, kind },
       'Upstream returned error: %s',
-      errorBody.slice(0, 200),
+      // Redact before truncating: a 401 that echoes the bearer must not write a
+      // working key into daemon.log.
+      redactSecrets(errorBody).slice(0, 200),
     );
   } else {
     logger.warn(

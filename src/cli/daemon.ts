@@ -19,7 +19,7 @@
 
 import { spawn, execFileSync } from 'node:child_process';
 import chalk from 'chalk';
-import { existsSync, writeFileSync, readFileSync, rmSync, mkdirSync, copyFileSync, createWriteStream } from 'node:fs';
+import { existsSync, writeFileSync, readFileSync, rmSync, mkdirSync, copyFileSync, createWriteStream, statSync, renameSync, openSync, closeSync, chmodSync } from 'node:fs';
 import { resolve as pathResolve, join as pathJoin } from 'node:path';
 import { homedir } from 'node:os';
 import { fileURLToPath } from 'node:url';
@@ -36,6 +36,9 @@ import { syncModelsInAllHarnesses, readHarnessSettings } from './harness-sync.js
 const PID_DIR = pathJoin(homedir(), '.config', 'saros');
 const PID_FILE = pathJoin(PID_DIR, 'daemon.pid');
 const DAEMON_LOG = pathJoin(PID_DIR, 'daemon.log');
+/** daemon.log is rotated at start: 10 MB per file, 5 kept. */
+const LOG_MAX_BYTES = 10 * 1024 * 1024;
+const LOG_KEEP = 5;
 const PACKAGE_ROOT = pathResolve(fileURLToPath(import.meta.url), '..', '..', '..');
 const ENTRY_POINT = pathResolve(PACKAGE_ROOT, 'dist', 'index.js');
 
@@ -106,6 +109,50 @@ function deletePid(): void {
     rmSync(PID_FILE);
   } catch {
     // ignore
+  }
+}
+
+/**
+ * Rotate daemon.log at start when it grew past LOG_MAX_BYTES:
+ * daemon.log.5 is dropped, .4→.5 … .1→.2, and daemon.log becomes .1.
+ *
+ * Rotation at boot keeps the logging path dependency-free. A local proxy
+ * restarts far more often than it writes 10 MB, so mid-run rotation buys
+ * nothing but a runtime dependency.
+ */
+function rotateDaemonLog(): void {
+  try {
+    if (!existsSync(DAEMON_LOG)) return;
+    if (statSync(DAEMON_LOG).size < LOG_MAX_BYTES) return;
+    rmSync(`${DAEMON_LOG}.${LOG_KEEP}`, { force: true });
+    // Shift newest-first: .4→.5 … .1→.2, then the live log becomes .1. The
+    // loop used to stop at i=4, so .4→.5 never happened and the newest
+    // generation was silently dropped while .5 disappeared.
+    for (let i = LOG_KEEP; i >= 2; i--) {
+      const from = `${DAEMON_LOG}.${i - 1}`;
+      if (existsSync(from)) renameSync(from, `${DAEMON_LOG}.${i}`);
+    }
+    if (existsSync(DAEMON_LOG)) renameSync(DAEMON_LOG, `${DAEMON_LOG}.1`);
+  } catch {
+    // Diagnostics only — a failed rotation must never block startup.
+  }
+}
+
+/**
+ * Open daemon.log as the child's stdout (0600 — it carries upstream error
+ * bodies). Returns null when the file cannot be opened, so the caller falls
+ * back to discarding stdout. Exported so the wiring can be asserted in tests.
+ */
+export function openDaemonLog(): number | null {
+  try {
+    ensurePidDir();
+    // mode only applies on create; an existing 0644 log from an older version
+    // keeps pino output world-readable unless we chmod it explicitly.
+    const fd = openSync(DAEMON_LOG, 'a', 0o600);
+    chmodSync(DAEMON_LOG, 0o600);
+    return fd;
+  } catch {
+    return null;
   }
 }
 
@@ -273,17 +320,38 @@ export async function daemonStart(port?: number, configPath?: string): Promise<v
   // Best-effort: an unopenable log (dir deleted under us, permissions) must
   // not crash the starter — the stream open is async and can lose the race
   // with cleanup in tests.
-  const logStream = createWriteStream(DAEMON_LOG, { flags: 'a' });
+  rotateDaemonLog();
+  // 0600: the file now carries pino output, including upstream error bodies.
+  const logStream = createWriteStream(DAEMON_LOG, { flags: 'a', mode: 0o600 });
+  try {
+    chmodSync(DAEMON_LOG, 0o600);
+  } catch {
+    // best effort
+  }
   logStream.on('error', () => { /* daemon.log is diagnostic only */ });
   let stderrBuf = '';
 
+  // stdout carries pino. It used to be 'ignore', which is why daemon.log stayed
+  // empty even at LOG_LEVEL=debug. Open the file as the child's stdout instead;
+  // stderr stays piped for the startup diagnostics below and is appended too.
+  const logFd = openDaemonLog();
+
   const child = spawn('node', args, {
     cwd: PACKAGE_ROOT,
-    stdio: ['ignore', 'ignore', 'pipe'],
+    stdio: ['ignore', logFd ?? 'ignore', 'pipe'],
     detached: true,
     windowsHide: true,
     env,
   });
+
+  // The child holds its own duplicate of the descriptor.
+  if (logFd !== null) {
+    try {
+      closeSync(logFd);
+    } catch {
+      // ignore
+    }
+  }
 
   child.stderr?.on('data', (chunk: Buffer) => {
     stderrBuf += chunk.toString();

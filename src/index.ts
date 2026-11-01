@@ -14,7 +14,7 @@ import { serve } from '@hono/node-server';
 import type { ServerType } from '@hono/node-server';
 import { dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { loadConfig, type ProxyConfig } from './config.js';
+import { loadConfig, getDefaultConfigPath, type ProxyConfig } from './config.js';
 import { createProxyApp } from './proxy.js';
 import { flushModelStats } from './model-stats.js';
 import { flushTokenUsage } from './token-usage.js';
@@ -35,6 +35,8 @@ import {
 import { probeModel } from './model-probe.js';
 import { getCachedProbe, setCachedProbe } from './probe-cache.js';
 import type { ModelProbe } from './probe-cache.js';
+import { loadModelsCatalog } from './models-catalog.js';
+import { getVersion } from './cli/overview.js';
 import chalk from 'chalk';
 import { printHelp } from './cli/help.js';
 import { readFileSync } from 'node:fs';
@@ -296,6 +298,32 @@ if (subcommand === 'start') {
   for (const k of config.keys) {
     logger.info('  - %s: %s', k.label, maskKey(k.key));
   }
+
+  // One structured boot line, so daemon.log answers "did it start, from which
+  // config, with which keys?" without any traffic. Never carries the key.
+  const configArgIndex = process.argv.indexOf('--config');
+  const configPath =
+    configArgIndex !== -1 && process.argv[configArgIndex + 1]
+      ? process.argv[configArgIndex + 1]
+      : getDefaultConfigPath();
+  logger.info(
+    {
+      evt: 'boot',
+      version: getVersion(),
+      node: process.version,
+      platform: process.platform,
+      configPath,
+      port: config.port,
+      host: config.host,
+      keys: config.keys.map((k) => ({ label: k.label, provider: k.provider })),
+      bundledModels: Object.keys(loadModelsCatalog()).length,
+      logLevel: process.env.LOG_LEVEL ?? 'info',
+    },
+    'saros-proxy %s starting on %s:%d',
+    getVersion(),
+    config.host,
+    config.port,
+  );
 
   // -----------------------------------------------------------------------
   // Security startup banner
