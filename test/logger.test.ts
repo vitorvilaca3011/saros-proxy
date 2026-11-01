@@ -83,6 +83,22 @@ describe('logger creation', () => {
     expect(logger.level).toBe('debug');
   });
 
+  it('redacts credentials at the logger, not only at the call sites', async () => {
+    process.env.NODE_ENV = 'production';
+    // LOG_REDACT_PATHS is the contract; assert the options pino actually got.
+    const { LOG_REDACT_PATHS } = await import('../src/logger.js');
+    expect(LOG_REDACT_PATHS).toEqual(
+      expect.arrayContaining(['authorization', 'cookie', 'x-api-key', 'apiKey']),
+    );
+
+    const pinoMock = (await import('pino')).default as unknown as {
+      mock: { calls: Array<[{ redact?: { paths: string[]; censor: string } }]> };
+    };
+    const options = pinoMock.mock.calls.at(-1)?.[0];
+    expect(options?.redact?.censor).toBe('[redacted]');
+    expect(options?.redact?.paths).toEqual([...LOG_REDACT_PATHS]);
+  });
+
   it('falls back to JSON logging when pino-pretty is unavailable', async () => {
     // Simulate NODE_ENV=development (tries pretty transport)
     // but pino-pretty IS available here (dev incl. devDeps) — so we can only

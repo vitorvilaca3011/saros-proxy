@@ -419,6 +419,12 @@ interface RetryContext {
   /** Model id parsed from the request body (for affinity routing); optional. */
   modelId?: string;
   onSuccess: SuccessHandler;
+  /** Epoch ms when the request entered the retry loop (for durationMs). */
+  startedAt: number;
+  /** Provider of the last selected key — the upstream actually called. */
+  lastProvider?: string;
+  /** Zero-based attempt currently running. */
+  attempt: number;
 }
 
 type AttemptResult =
@@ -454,6 +460,8 @@ async function executeWithRetry(opts: {
     kind: opts.kind,
     modelId: opts.modelId,
     onSuccess: opts.onSuccess,
+    startedAt: Date.now(),
+    attempt: 0,
   };
 
   let lastError: Error | null = null;
@@ -468,9 +476,10 @@ async function executeWithRetry(opts: {
 }
 
 async function executeSingleAttempt(attempt: number, ctx: RetryContext): Promise<AttemptResult> {
+  ctx.attempt = attempt;
   const key = pickKey(ctx, attempt);
   if (!key) {
-    return { kind: 'done', response: buildNoKeysResponse(ctx.state, ctx.requestId, ctx.kind, attempt, ctx.modelId) };
+    return { kind: 'done', response: buildNoKeysResponse(ctx, attempt) };
   }
 
   logKeyAttempt(ctx.requestId, key, attempt, ctx.kind);
@@ -478,6 +487,18 @@ async function executeSingleAttempt(attempt: number, ctx: RetryContext): Promise
   // Suffix-routed models (@provider) pin the provider and lose the suffix
   // in the forwarded body; the upstream never sees saros's routing shim.
   const provider = providerForKey(key, ctx.config, ctx.modelId);
+  ctx.lastProvider = provider.id;
+  logger.debug(
+    {
+      evt: 'key.selected',
+      requestId: ctx.requestId,
+      keyLabel: key.label,
+      provider: provider.id,
+      attempt,
+      pinned: Boolean(parseProviderSuffix(ctx.modelId)),
+    },
+    'key selected',
+  );
   const upstreamUrl = resolveUpstreamUrl(ctx.config, provider, ctx.path);
   const sessionHeader = provider.sessionHeader;
   const prepared = ctx.bodyText
@@ -500,17 +521,33 @@ async function executeSingleAttempt(attempt: number, ctx: RetryContext): Promise
     sessionId: prepared.sessionId,
   });
 
+  const attemptStarted = Date.now();
   try {
     const response = await fetchWithTimeout(upstreamUrl, fetchOptions, ctx.config.requestTimeoutMs);
     if (response.ok) {
+      logger.info(
+        {
+          evt: 'upstream.response',
+          requestId: ctx.requestId,
+          keyLabel: key.label,
+          provider: provider.id,
+          status: response.status,
+          durationMs: Date.now() - attemptStarted,
+          stream: ctx.kind === 'streaming',
+        },
+        'upstream response',
+      );
       recordKeySuccess(ctx.state, key.label, ctx.requestId);
       completeRequest(ctx.state, ctx.requestId, true);
-      return {
-        kind: 'done',
-        response: await ctx.onSuccess(response, ctx.state, ctx.requestId, key.label),
-      };
+      const downstream = await ctx.onSuccess(response, ctx.state, ctx.requestId, key.label);
+      // Logged after the success handler: if it throws, the request retries and
+      // this is not a completed request (the retry path logs its own outcome).
+      // The downstream status is what the client saw — the streaming handler
+      // synthesizes a 502 when the upstream 2xx carried no body.
+      logRequestComplete(ctx, downstream.status, key.label);
+      return { kind: 'done', response: downstream };
     }
-    return await handleUpstreamErrorResponse(response, ctx, key);
+    return await handleUpstreamErrorResponse(response, ctx, key, attemptStarted);
   } catch (err) {
     return handleNetworkError(err, ctx, key);
   }
@@ -559,15 +596,17 @@ async function handleUpstreamErrorResponse(
   response: Response,
   ctx: RetryContext,
   key: KeySnapshot,
+  attemptStarted: number,
 ): Promise<AttemptResult> {
   const errorBody = await response.text();
   const errorType = classifyHttpError(response.status, errorBody);
-  logUpstreamError(ctx.requestId, key, response.status, errorType, errorBody, ctx.kind);
+  logUpstreamError(ctx.requestId, key, response.status, errorType, errorBody, ctx.kind, Date.now() - attemptStarted);
   captureFailedRequest(ctx, response.status, errorBody);
 
   if (errorType === 'RequestFault') {
     // Client error — don't retry, don't penalise the key
     completeRequest(ctx.state, ctx.requestId, false);
+    logRequestComplete(ctx, response.status, key.label);
     return { kind: 'done', response: buildClientErrorResponse(response.status, errorBody, ctx.requestId) };
   }
 
@@ -577,7 +616,7 @@ async function handleUpstreamErrorResponse(
     body: errorBody,
   });
   const lastError = ctx.kind === 'standard'
-    ? new Error(`Upstream error ${response.status}: ${errorBody.slice(0, 200)}`)
+    ? new Error(`Upstream error ${response.status}: ${redactSecrets(errorBody).slice(0, 200)}`)
     : null;
   return { kind: 'retry', lastError };
 }
@@ -726,13 +765,8 @@ export function buildNoKeysBody(
   };
 }
 
-function buildNoKeysResponse(
-  state: ProxyState,
-  requestId: string,
-  kind: RequestKind,
-  attempt: number,
-  modelId?: string,
-): Response {
+function buildNoKeysResponse(ctx: RetryContext, attempt: number): Response {
+  const { state, requestId, kind, modelId } = ctx;
   const triedLabels = [...(state.activeRequests.get(requestId)?.triedKeys ?? [])];
   const keys = unavailableKeyReports(state);
   const body = buildNoKeysBody(keys, requestId, modelId, triedLabels);
@@ -743,13 +777,14 @@ function buildNoKeysResponse(
       requestId,
       attempt,
       kind,
-      modelId,
+      modelId: modelId ?? null,
       retryAfterMs: body.retryAfterMs,
       unavailable: keys.map((k) => ({ label: k.label, reason: k.reason, status: k.lastStatus })),
     },
     'No API key available for this request',
   );
   completeRequest(state, requestId, false);
+  logRequestComplete(ctx, 503, null);
   return new Response(JSON.stringify(body), {
     status: 503,
     headers: { 'content-type': 'application/json' },
@@ -782,12 +817,13 @@ function handleAllRetriesFailed(ctx: RetryContext, maxRetries: number, lastError
   ];
   completeRequest(ctx.state, ctx.requestId, false);
   logger.error(
-    { requestId: ctx.requestId, err: lastError, kind: ctx.kind },
+    { evt: 'request.retries_exhausted', requestId: ctx.requestId, err: lastError, kind: ctx.kind },
     ctx.kind === 'standard'
       ? 'All %d retries exhausted, returning 502'
       : 'Streaming failed after %d attempts',
     maxRetries,
   );
+  logRequestComplete(ctx, 502, null);
   const message = ctx.kind === 'standard'
     ? 'Upstream service unavailable after multiple attempts'
     : 'Streaming service unavailable after multiple attempts';
@@ -812,6 +848,34 @@ function handleAllRetriesFailed(ctx: RetryContext, maxRetries: number, lastError
 }
 
 // --- Logging helpers (preserve original log message format) ---
+
+/**
+ * One line per finished request — the access log. Exactly one per request:
+ * success, upstream client error, no usable key (503) and retries exhausted
+ * (502) are mutually exclusive paths.
+ */
+function logRequestComplete(
+  ctx: RetryContext,
+  status: number,
+  keyLabel: string | null,
+): void {
+  logger.info(
+    {
+      evt: 'request.complete',
+      requestId: ctx.requestId,
+      method: ctx.method,
+      path: ctx.path,
+      model: ctx.modelId ?? null,
+      provider: ctx.lastProvider ?? null,
+      keyLabel,
+      status,
+      durationMs: Date.now() - ctx.startedAt,
+      stream: ctx.kind === 'streaming',
+      attempt: ctx.attempt + 1,
+    },
+    'request complete',
+  );
+}
 
 function logKeyAttempt(requestId: string, key: KeySnapshot, attempt: number, kind: RequestKind): void {
   logger.info(
@@ -876,18 +940,27 @@ function logUpstreamError(
   errorType: string,
   errorBody: string,
   kind: RequestKind,
+  durationMs?: number,
 ): void {
   if (kind === 'standard') {
     logger.warn(
-      { requestId, keyLabel: key.label, status, errorType, kind },
-      'Upstream returned error: %s',
-      // Redact before truncating: a 401 that echoes the bearer must not write a
-      // working key into daemon.log.
-      redactSecrets(errorBody).slice(0, 200),
+      {
+        evt: 'upstream.error',
+        requestId,
+        keyLabel: key.label,
+        status,
+        errorType,
+        kind,
+        durationMs,
+        // Redact before truncating: a 401 that echoes the bearer must not write
+        // a working key into the access log or daemon.log.
+        bodyPrefix: redactSecrets(errorBody).slice(0, 200),
+      },
+      'Upstream returned error',
     );
   } else {
     logger.warn(
-      { requestId, keyLabel: key.label, status, kind },
+      { evt: 'upstream.error', requestId, keyLabel: key.label, status, kind, durationMs },
       'Upstream streaming error',
     );
   }
@@ -895,17 +968,16 @@ function logUpstreamError(
 
 function logTimeout(requestId: string, key: KeySnapshot, timeoutMs: number, kind: RequestKind): void {
   logger.warn(
-    { requestId, keyLabel: key.label, kind },
+    { evt: 'upstream.timeout', requestId, keyLabel: key.label, kind, timeoutMs },
     kind === 'standard'
-      ? 'Request timed out after %dms, retrying with next key'
-      : 'Streaming request timed out after %dms, retrying with next key',
-    timeoutMs,
+      ? 'Request timed out, retrying with next key'
+      : 'Streaming request timed out, retrying with next key',
   );
 }
 
 function logNetworkError(requestId: string, key: KeySnapshot, err: unknown, kind: RequestKind): void {
   logger.error(
-    { requestId, keyLabel: key.label, err, kind },
+    { evt: 'upstream.network_error', requestId, keyLabel: key.label, err, kind },
     kind === 'standard'
       ? 'Network error forwarding to upstream'
       : 'Network error during streaming',
