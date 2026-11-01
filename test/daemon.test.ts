@@ -9,10 +9,11 @@
  */
 
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
-import { existsSync, mkdirSync, writeFileSync, readFileSync, rmSync, mkdtempSync, statSync, readlinkSync, closeSync, chmodSync } from 'node:fs';
+import { existsSync, mkdirSync, writeFileSync, readFileSync, rmSync, mkdtempSync, statSync, readlinkSync, readdirSync, closeSync, chmodSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { createServer } from 'node:http';
+import { EventEmitter } from 'node:events';
 import type * as Daemon from '../src/cli/daemon.js';
 
 // ---------------------------------------------------------------------------
@@ -27,7 +28,12 @@ vi.mock('node:os', async (importOriginal) => {
   return { ...actual, homedir: () => mockHomeRef.current };
 });
 
-const mockSpawn = vi.hoisted(() => vi.fn(() => ({ pid: 12345, unref: vi.fn() })));
+const mockSpawn = vi.hoisted(() =>
+  vi.fn((): { pid: number; unref: () => void; stderr?: EventEmitter } => ({
+    pid: 12345,
+    unref: vi.fn(),
+  })),
+);
 vi.mock('node:child_process', () => ({
   spawn: mockSpawn,
   execFileSync: vi.fn(() => Buffer.from('')),
@@ -84,6 +90,20 @@ function stubHealthDown() {
 function stubPidDead() {
   vi.spyOn(process, 'kill').mockImplementation(() => {
     throw new Error('ESRCH');
+  });
+}
+
+/**
+ * File descriptors this process holds on `target` (Linux only). /proc/self/fd
+ * is the cheap identity check — same trick as the stdout wiring test.
+ */
+function openFdsTo(target: string): number[] {
+  return readdirSync('/proc/self/fd').filter((name) => {
+    try {
+      return readlinkSync(`/proc/self/fd/${name}`) === target;
+    } catch {
+      return false; // fd closed between readdir and readlink
+    }
   });
 }
 
@@ -259,7 +279,9 @@ describe('daemonStart', () => {
 
   afterEach(() => {
     mockHomeRef.current = '';
-    rmSync(tempHome, { recursive: true, force: true });
+    // Second layer: daemonStart closes daemon.log before it settles, but the OS
+    // can still refuse a recursive delete while a just-closed handle is reaped.
+    rmSync(tempHome, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
     vi.unstubAllGlobals();
     vi.restoreAllMocks();
     vi.useRealTimers();
@@ -315,6 +337,63 @@ describe('daemonStart', () => {
     expect(options.stdio[0]).toBe('ignore');
     expect(typeof options.stdio[1]).toBe('number');
     expect(options.stdio[2]).toBe('pipe');
+  });
+
+  it('appends child stderr to daemon.log during startup, synchronously', async () => {
+    stubHealthDown();
+    stubPidDead();
+    mockSpawn.mockClear();
+    mockProcessExitRecord();
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    vi.useFakeTimers();
+    const stderr = new EventEmitter();
+    mockSpawn.mockImplementationOnce(() => ({ pid: 12345, unref: vi.fn(), stderr }));
+    const logPath = join(tempHome, '.config', 'saros', 'daemon.log');
+
+    await daemon.daemonStart();
+    stderr.emit('data', Buffer.from('boot failure line\n'));
+
+    // Sync append: the content is on disk as soon as the chunk is handled.
+    expect(readFileSync(logPath, 'utf-8')).toContain('boot failure line');
+
+    await vi.advanceTimersByTimeAsync(2000);
+  });
+
+  it('holds no descriptor on daemon.log after the startup verification', async () => {
+    if (process.platform !== 'linux') return; // /proc/self/fd only
+    stubHealthDown();
+    stubPidDead();
+    mockSpawn.mockClear();
+    mockProcessExitRecord();
+    vi.spyOn(console, 'error').mockImplementation(() => {});
+    vi.useFakeTimers();
+    const logPath = join(tempHome, '.config', 'saros', 'daemon.log');
+
+    await daemon.daemonStart();
+    await vi.advanceTimersByTimeAsync(2000);
+
+    // A surviving handle lets an async open recreate daemon.log while cleanup
+    // walks the directory — the CI ENOTEMPTY.
+    expect(openFdsTo(logPath)).toEqual([]);
+  });
+
+  it('closes daemon.log on the started branch too', async () => {
+    if (process.platform !== 'linux') return; // /proc/self/fd only
+    stubHealthDown(); // probe fails, so the start is attempted
+    mockSpawn.mockClear();
+    const exitSpy = mockProcessExitRecord();
+    vi.spyOn(console, 'log').mockImplementation(() => {});
+    vi.spyOn(process, 'kill').mockImplementation(() => true); // child stays alive
+    vi.useFakeTimers();
+    const logPath = join(tempHome, '.config', 'saros', 'daemon.log');
+
+    await daemon.daemonStart();
+    await vi.advanceTimersByTimeAsync(2000);
+    // Let the post-verification work (models sync, update check) settle.
+    await vi.advanceTimersByTimeAsync(60_000);
+
+    expect(exitSpy).toHaveBeenCalledWith(0);
+    expect(openFdsTo(logPath)).toEqual([]);
   });
 
   it('rotates daemon.log at start when it exceeds 10 MB', async () => {
