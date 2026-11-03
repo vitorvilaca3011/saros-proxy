@@ -158,10 +158,53 @@ describe('LLM Instructions Smoke Test', () => {
       ).toBe(true);
     });
 
-    it('covers OpenCode Integration question', () => {
+    it('asks which harness(es) the user runs as a multi-select', () => {
+      expect(parsedQuestions).not.toBeNull();
+      const harnessQuestion = parsedQuestions!.find(
+        (q) => String(q.header) === 'Harnesses',
+      );
+      expect(harnessQuestion).toBeDefined();
+      expect(harnessQuestion!.multiSelect).toBe(true);
+
+      const labels = (harnessQuestion!.options as Array<{ label: string }>).map(
+        (option) => option.label,
+      );
+      expect(labels).toEqual(
+        expect.arrayContaining([
+          'OpenCode',
+          'oh-my-pi (omp)',
+          'pi',
+          'dsh (DeepSeek Harness)',
+          'None',
+        ]),
+      );
+    });
+
+    it('does not ask a single-harness OpenCode Integration question', () => {
+      expect(parsedQuestions).not.toBeNull();
       expect(
-        parsedQuestions!.some((q) => String(q.header).includes('OpenCode')),
-      ).toBe(true);
+        parsedQuestions!.some((q) => JSON.stringify(q).includes('OpenCode Integration')),
+      ).toBe(false);
+    });
+
+    it('documents the answer → configharness flag mapping in section 2.6', () => {
+      const start = LLM_INSTRUCTIONS.indexOf('### 2.6 Harness Config');
+      const end = LLM_INSTRUCTIONS.indexOf('### 2.7');
+      expect(start).toBeGreaterThan(-1);
+      expect(end).toBeGreaterThan(start);
+      const section = LLM_INSTRUCTIONS.slice(start, end);
+
+      const rows = [
+        ['OpenCode', 'oc', '~/.config/opencode/opencode.json'],
+        ['oh-my-pi', 'omp', '~/.omp/agent/models.yml'],
+        ['pi', 'pi', '~/.pi/agent/models.json'],
+        ['dsh', 'dsh', '~/.dsh/profiles/web/cordis.patch.yml'],
+      ];
+      for (const [answer, flag, configPath] of rows) {
+        expect(section).toContain(`| ${answer} | \`${flag}\` | \`${configPath}\``);
+      }
+      expect(section).toContain('| None | — | skip this section entirely');
+      expect(section).toContain('saros-proxy configharness oc');
     });
 
     it('each question has required fields (question, header, options)', () => {
