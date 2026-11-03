@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.11.0] - 2026-11-03
+
 ### Added
 
 - **`enc:v1:` key envelopes with a real secret source (#85).** API keys can
@@ -398,7 +400,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Hop-by-hop header sanitization
 - Non-root Docker user
 
-[Unreleased]: https://github.com/vitorvilaca3011/saros-proxy/compare/v0.10.2...HEAD
+[Unreleased]: https://github.com/vitorvilaca3011/saros-proxy/compare/v0.11.0...HEAD
+[0.11.0]: https://github.com/vitorvilaca3011/saros-proxy/compare/v0.10.2...v0.11.0
 [0.10.2]: https://github.com/vitorvilaca3011/saros-proxy/compare/v0.10.1...v0.10.2
 [0.10.1]: https://github.com/vitorvilaca3011/saros-proxy/compare/v0.10.0...v0.10.1
 [0.10.0]: https://github.com/vitorvilaca3011/saros-proxy/compare/v0.9.0...v0.10.0
