@@ -10,7 +10,7 @@
 
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { existsSync, mkdirSync, writeFileSync, appendFileSync, readFileSync, rmSync, mkdtempSync, statSync, readlinkSync, readdirSync, closeSync, chmodSync, openSync, writeSync } from 'node:fs';
-import { join } from 'node:path';
+import { dirname, join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { createServer } from 'node:http';
 import type * as Daemon from '../src/cli/daemon.js';
@@ -584,6 +584,115 @@ describe('daemonStop', () => {
 });
 
 // ---------------------------------------------------------------------------
+// Legacy PID opt-in (#104) — the pre-0.11 pid sits in the REAL home
+// ---------------------------------------------------------------------------
+
+describe('legacy PID file is opt-in', () => {
+  const TEST_PID = 979; // the live daemon a test run killed in #104
+  let tempHome: string;
+  let legacyHome: string;
+  let daemon: Daemon;
+
+  beforeEach(async () => {
+    tempHome = createTempHome();
+    // The incident shape: config dir isolated (temp XDG), home not. The
+    // state dir and the legacy path must be different directories for the
+    // fallback to be exercised at all.
+    legacyHome = createTempHome();
+    mockHomeRef.current = legacyHome;
+    stubStateDir(tempHome);
+    daemon = await importDaemon();
+  });
+
+  afterEach(() => {
+    mockHomeRef.current = '';
+    rmSync(tempHome, { recursive: true, force: true });
+    rmSync(legacyHome, { recursive: true, force: true });
+    vi.unstubAllEnvs();
+    vi.unstubAllGlobals();
+    vi.restoreAllMocks();
+    vi.useRealTimers();
+  });
+
+  function writeLegacyPid(pid: number): string {
+    const file = join(legacyHome, '.config', 'saros', 'daemon.pid');
+    mkdirSync(dirname(file), { recursive: true });
+    writeFileSync(file, String(pid), 'utf-8');
+    return file;
+  }
+
+  it('is inert without SAROS_ALLOW_LEGACY_PID=1: stop never signals it', () => {
+    const legacyPidFile = writeLegacyPid(TEST_PID);
+    const killSpy = vi.spyOn(process, 'kill').mockImplementation(() => true);
+    const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+    const exitSpy = mockProcessExitThrow();
+
+    expect(() => daemon.daemonStop()).toThrow('process.exit(0)');
+
+    const output = logSpy.mock.calls.map((call) => String(call[0])).join('\n');
+    expect(output).toContain('No running proxy daemon found.');
+    expect(exitSpy).toHaveBeenCalledWith(0);
+    // Not even a liveness probe: the file was never consulted.
+    expect(killSpy).not.toHaveBeenCalled();
+    expect(mockExecFileSync).not.toHaveBeenCalled();
+    // Untouched: not migrated into the state dir, not deleted from home.
+    expect(readFileSync(legacyPidFile, 'utf-8')).toBe(String(TEST_PID));
+    expect(existsSync(join(sarosDir, 'daemon.pid'))).toBe(false);
+  });
+
+  it('getDaemonState ignores a live legacy PID without the flag', async () => {
+    writeLegacyPid(TEST_PID);
+    stubHealthDown();
+    const killSpy = vi.spyOn(process, 'kill').mockImplementation(() => true);
+
+    const state = await daemon.getDaemonState();
+
+    expect(state.pid).toBeNull();
+    expect(state.running).toBe(false);
+    expect(state.stalePid).toBe(false);
+    expect(killSpy).not.toHaveBeenCalled();
+    expect(existsSync(join(sarosDir, 'daemon.pid'))).toBe(false);
+  });
+
+  it('reads, migrates and kills a live legacy PID with SAROS_ALLOW_LEGACY_PID=1', async () => {
+    vi.stubEnv('SAROS_ALLOW_LEGACY_PID', '1');
+    const legacyPidFile = writeLegacyPid(TEST_PID);
+    const state = { alive: true };
+    const killSpy = vi
+      .spyOn(process, 'kill')
+      .mockImplementation((_pid: number, signal?: string | number) => {
+        if (signal === 0) {
+          if (!state.alive) throw errnoError('ESRCH');
+          return true;
+        }
+        state.alive = false; // SIGKILL lands
+        return true;
+      });
+    const exitSpy = mockProcessExitRecord();
+    const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+    vi.useFakeTimers();
+    stubHealthDown();
+
+    // The explicit opt-in is what makes the legacy PID visible, and reading
+    // it moves it into the current state dir.
+    const before = await daemon.getDaemonState();
+    expect(before.pid).toBe(String(TEST_PID));
+    expect(readFileSync(join(sarosDir, 'daemon.pid'), 'utf-8')).toBe(String(TEST_PID));
+    expect(existsSync(legacyPidFile)).toBe(false);
+
+    await withPlatform('linux', async () => {
+      daemon.daemonStop();
+      await vi.advanceTimersByTimeAsync(3000);
+    });
+
+    expect(killSpy).toHaveBeenCalledWith(TEST_PID, 'SIGKILL');
+    const output = logSpy.mock.calls.map((call) => String(call[0])).join('\n');
+    expect(output).toContain(`✓ Proxy (PID ${TEST_PID}) stopped.`);
+    expect(exitSpy).toHaveBeenCalledWith(0);
+  });
+});
+
+// ---------------------------------------------------------------------------
 // State directory — pid/log next to config.yaml (#83, defect 5)
 // ---------------------------------------------------------------------------
 
@@ -646,9 +755,10 @@ describe('daemon state directory', () => {
     });
   });
 
-  it('win32: reads a legacy ~/.config/saros/daemon.pid and migrates it', async () => {
+  it('win32: reads a legacy ~/.config/saros/daemon.pid and migrates it when opted in', async () => {
     const localAppData = join(tempHome, 'AppData', 'Local');
     vi.stubEnv('LOCALAPPDATA', localAppData);
+    vi.stubEnv('SAROS_ALLOW_LEGACY_PID', '1');
     mkdirSync(join(tempHome, '.config', 'saros'), { recursive: true });
     const legacyPidFile = join(tempHome, '.config', 'saros', 'daemon.pid');
     writeFileSync(legacyPidFile, String(process.pid), 'utf-8');

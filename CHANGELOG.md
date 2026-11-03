@@ -101,7 +101,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   its "not found" text no longer leaks into the console / PowerShell
   `NativeCommandError`, and removes the PID file in both outcomes. The PID file
   and `daemon.log` now live next to `config.yaml` (`%LOCALAPPDATA%\saros` on
-  Windows); a legacy `~/.config/saros/daemon.pid` is still read and migrated.
+  Windows); a legacy `~/.config/saros/daemon.pid` is read only on explicit
+  opt-in (see below).
+- **The pre-0.11 pid file is inert unless the operator opts in (#104).**
+  `readPid()` fell back to `~/.config/saros/daemon.pid` whenever the new state
+  dir had no pid, and `stop` killed what it read. That path is in the user's
+  real home, so a vitest run with a temp `XDG_CONFIG_HOME` and the real `HOME`
+  signalled the developer's live daemon (systemd logged the SIGTERM). Reading,
+  migrating and deleting the legacy file now require `SAROS_ALLOW_LEGACY_PID=1`;
+  an installation started before 0.11.0 keeps its pid under `~/.config/saros`;
+  set `SAROS_ALLOW_LEGACY_PID=1` once to stop it, or the new layout takes over
+  on the next start. Tests additionally resolve `HOME`/`USERPROFILE` and
+  `homedir()` inside a per-file temp dir and scrub the flag from the
+  environment, so no suite can reach a real installation.
 
 ## [0.10.2] - 2026-10-27
 

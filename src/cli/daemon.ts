@@ -54,11 +54,19 @@ const PID_DIR = resolveStateDir();
 const PID_FILE = pathJoin(PID_DIR, 'daemon.pid');
 const DAEMON_LOG = pathJoin(PID_DIR, 'daemon.log');
 /**
- * Pre-0.11 location. Read-only transition path: a daemon started by an older
- * CLI is still stoppable, and the PID is migrated to PID_FILE on first read.
+ * Pre-0.11 location. Transition path, and OPT-IN: this path sits in the
+ * user's real home, so an isolated run (a test with a temp XDG_CONFIG_HOME but
+ * the real HOME) would otherwise act on the developer's live daemon — it did,
+ * killing a running proxy from a test. Reading, migrating and deleting it all
+ * require SAROS_ALLOW_LEGACY_PID=1; without the flag the file is inert.
  * null when the state dir already *is* that location (POSIX default).
  */
 const LEGACY_PID_FILE = resolveLegacyPidFile();
+
+/** Legacy PID handling is explicit operator intent, never a silent fallback. */
+function legacyPidEnabled(): boolean {
+  return process.env.SAROS_ALLOW_LEGACY_PID === '1';
+}
 
 function resolveLegacyPidFile(): string | null {
   const legacy = pathJoin(homedir(), '.config', 'saros', 'daemon.pid');
@@ -136,14 +144,15 @@ function readPidFile(file: string | null): string | null {
 }
 
 /**
- * The running PID: the current state dir first, then the pre-0.11 path so a
- * daemon started by an older CLI is still visible and stoppable. A live
- * legacy PID is migrated into the state dir; stop/status clean a dead one.
+ * The running PID: the current state dir first. The pre-0.11 path is consulted
+ * only when the operator sets SAROS_ALLOW_LEGACY_PID=1 — it lives in the real
+ * home, so treating it as a default fallback made isolated runs kill a live
+ * daemon. With the flag on, a live legacy PID is migrated into the state dir.
  */
 function readPid(): string | null {
   const current = readPidFile(PID_FILE);
   if (current !== null) return current;
-  if (LEGACY_PID_FILE === null) return null;
+  if (LEGACY_PID_FILE === null || !legacyPidEnabled()) return null;
   const legacy = readPidFile(LEGACY_PID_FILE);
   if (legacy === null) return null;
   migrateLegacyPid(legacy, LEGACY_PID_FILE);
@@ -151,6 +160,7 @@ function readPid(): string | null {
 }
 
 function migrateLegacyPid(pid: string, legacyFile: string): void {
+  if (!legacyPidEnabled()) return;
   const pidNum = parsePid(pid);
   if (pidNum === null || !isProcessAlive(pidNum)) return;
   try {
@@ -168,7 +178,9 @@ function writePid(pid: number): void {
 }
 
 function deletePid(): void {
-  for (const file of [PID_FILE, LEGACY_PID_FILE]) {
+  // The legacy file is only ours to remove when the operator opted in.
+  const files = legacyPidEnabled() ? [PID_FILE, LEGACY_PID_FILE] : [PID_FILE];
+  for (const file of files) {
     if (file === null) continue;
     try {
       rmSync(file, { force: true });
