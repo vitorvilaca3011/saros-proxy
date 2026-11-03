@@ -9,7 +9,7 @@
  */
 
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
-import { existsSync, mkdirSync, writeFileSync, appendFileSync, readFileSync, rmSync, mkdtempSync, statSync, readlinkSync, readdirSync, closeSync, chmodSync, openSync, writeSync } from 'node:fs';
+import { existsSync, mkdirSync, writeFileSync, appendFileSync, readFileSync, rmSync, mkdtempSync, statSync, readlinkSync, readdirSync, closeSync, chmodSync, openSync, writeSync, symlinkSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { createServer } from 'node:http';
@@ -435,12 +435,16 @@ describe('daemonStop', () => {
     vi.spyOn(process, 'kill').mockImplementation(() => {
       throw errnoError('ESRCH');
     });
+    // `stop` without a handle probes /health now: keep it off the network so
+    // a real proxy on :3000 cannot decide the exit code.
+    stubHealthDown();
   });
 
   afterEach(() => {
     mockHomeRef.current = '';
     rmSync(tempHome, { recursive: true, force: true });
     vi.unstubAllEnvs();
+    vi.unstubAllGlobals();
     vi.restoreAllMocks();
     vi.useRealTimers();
     mockExecFileSync.mockImplementation(() => Buffer.from(''));
@@ -475,6 +479,20 @@ describe('daemonStop', () => {
     expect(exitSpy).toHaveBeenCalledWith(0);
   });
 
+  it('exits non-zero when no handle exists but something serves the port', async () => {
+    // Instance started outside `saros-proxy start`, or one whose pid file was
+    // never written: "no daemon" was a lie while /health answered.
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const exitSpy = mockProcessExitThrow();
+    stubHealthOk();
+
+    await expect(daemon.daemonStop()).rejects.toThrow('process.exit(1)');
+
+    const errors = errorSpy.mock.calls.map((c) => String(c[0])).join('\n');
+    expect(errors).toContain('still serving on port 3000');
+    expect(exitSpy).toHaveBeenCalledWith(1);
+  });
+
   it('cleans up a stale PID file without claiming to have stopped anything', async () => {
     const pidFile = writeDaemonPid(TEST_PID);
     const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
@@ -485,6 +503,23 @@ describe('daemonStop', () => {
     expect(output).toContain(`Daemon process (PID ${TEST_PID}) is not running.`);
     expect(output).not.toContain('stopped');
     expect(existsSync(pidFile)).toBe(false);
+  });
+
+  it('cleans an unreadable handle, then still reports a serving port', async () => {
+    mkdirSync(sarosDir, { recursive: true });
+    const pidFile = join(sarosDir, 'daemon.pid');
+    writeFileSync(pidFile, 'not-a-pid', 'utf-8');
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const exitSpy = mockProcessExitThrow();
+    stubHealthOk();
+
+    await expect(daemon.daemonStop()).rejects.toThrow('process.exit(1)');
+
+    expect(existsSync(pidFile)).toBe(false);
+    expect(errorSpy.mock.calls.map((c) => String(c[0])).join('\n')).toContain(
+      'still serving on port 3000',
+    );
+    expect(exitSpy).toHaveBeenCalledWith(1);
   });
 
   it('reports success once the process is gone and removes the PID file', async () => {
@@ -772,6 +807,36 @@ describe('legacy PID file is opt-in', () => {
     expect(readFileSync(legacyPidFile, 'utf-8')).toBe(String(TEST_PID));
   });
 
+  it('stale current handle with the port still serving reports instead of exiting 0', async () => {
+    // Cleaning a stale handle is not proof that nothing serves: a live legacy
+    // instance (or one started outside the daemon) keeps the port. Exiting 0
+    // here made the next `stop` the first honest answer.
+    mkdirSync(sarosDir, { recursive: true });
+    const currentPidFile = join(sarosDir, 'daemon.pid');
+    writeFileSync(currentPidFile, '999999', 'utf-8');
+    const legacyPidFile = writeLegacyPid(TEST_PID);
+    vi.spyOn(process, 'kill').mockImplementation((pid: number, signal?: string | number) => {
+      if (signal === 0 && pid === 999999) throw errnoError('ESRCH');
+      return true;
+    });
+    const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    mockProcessExitThrow();
+    stubHealthOk();
+
+    await expect(daemon.daemonStop()).rejects.toThrow('process.exit(1)');
+
+    const output = logSpy.mock.calls.map((call) => String(call[0])).join('\n');
+    expect(output).toContain('Daemon process (PID 999999) is not running.');
+    expect(output).toContain(legacyPidFile);
+    expect(output).toContain('SAROS_ALLOW_LEGACY_PID=1');
+    expect(errorSpy.mock.calls.map((call) => String(call[0])).join('\n')).toContain(
+      'still serving on port 3000',
+    );
+    expect(existsSync(currentPidFile)).toBe(false);
+    expect(readFileSync(legacyPidFile, 'utf-8')).toBe(String(TEST_PID));
+  });
+
   it('getDaemonState ignores a live legacy PID without the flag', async () => {
     writeLegacyPid(TEST_PID);
     stubHealthDown();
@@ -975,6 +1040,49 @@ describe('test-run guard', () => {
     expect(logSpy.mock.calls.map((c) => String(c[0])).join('\n')).toContain(
       'No running proxy daemon found',
     );
+  });
+
+  it('refuses a state dir reached through a symlink into the real home', async () => {
+    const realDir = stateDir(fakeHome);
+    mkdirSync(realDir, { recursive: true });
+    const pidFile = join(realDir, 'daemon.pid');
+    writeFileSync(pidFile, String(TEST_PID), 'utf-8');
+    // Same location, different spelling: the symlink's `saros` child IS the
+    // real state dir, so the lexical guard waved it through and the decoy died.
+    const link = join(fakeHome, 'state-link');
+    symlinkSync(dirname(realDir), link, process.platform === 'win32' ? 'junction' : 'dir');
+    vi.stubEnv(process.platform === 'win32' ? 'LOCALAPPDATA' : 'XDG_CONFIG_HOME', link);
+    const killSpy = vi.spyOn(process, 'kill').mockImplementation(() => true);
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    mockProcessExitThrow();
+    stubHealthDown();
+
+    const daemon = await importDaemon();
+    const state = await daemon.getDaemonState();
+
+    expect(state.pid).toBeNull();
+    expect(killSpy).not.toHaveBeenCalled();
+    expect(readFileSync(pidFile, 'utf-8')).toBe(String(TEST_PID));
+    expect(errorSpy.mock.calls.map((c) => String(c[0])).join('\n')).toContain('Refusing to read');
+  });
+
+  it('refuses to create the pid file or daemon.log under the real home', async () => {
+    const dir = stateDir(fakeHome);
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const exitSpy = mockProcessExitThrow();
+    mockSpawn.mockClear();
+    stubHealthDown();
+
+    const daemon = await importDaemon();
+    // Opening the log used to mkdir the real state dir and create daemon.log
+    // there; starting used to spawn a child and write its pid.
+    expect(daemon.openDaemonLog()).toBeNull();
+    await expect(daemon.daemonStart()).rejects.toThrow('process.exit(1)');
+
+    expect(existsSync(dir)).toBe(false);
+    expect(mockSpawn).not.toHaveBeenCalled();
+    expect(errorSpy.mock.calls.map((c) => String(c[0])).join('\n')).toContain('Refusing to write');
+    expect(exitSpy).toHaveBeenCalledWith(1);
   });
 });
 

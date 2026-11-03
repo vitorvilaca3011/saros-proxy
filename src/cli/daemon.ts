@@ -23,12 +23,14 @@
 
 import { spawn, execFileSync } from 'node:child_process';
 import chalk from 'chalk';
-import { existsSync, writeFileSync, readFileSync, rmSync, mkdirSync, copyFileSync, statSync, renameSync, openSync, closeSync, chmodSync, readSync, fstatSync } from 'node:fs';
+import { existsSync, writeFileSync, readFileSync, rmSync, mkdirSync, copyFileSync, statSync, renameSync, openSync, closeSync, chmodSync, readSync, fstatSync, realpathSync } from 'node:fs';
 import {
   resolve as pathResolve,
   join as pathJoin,
   relative as pathRelative,
   isAbsolute as pathIsAbsolute,
+  dirname as pathDirname,
+  basename as pathBasename,
   sep as pathSep,
 } from 'node:path';
 import { homedir } from 'node:os';
@@ -149,8 +151,8 @@ const TEST_RUN = process.env.NODE_ENV === 'test' || process.env.VITEST !== undef
  * re-registers `node:os` (`test/config.test.ts` did) or drops
  * XDG_CONFIG_HOME resolves the real home again. This makes the incident
  * structural: under test, a file in the real installation's state dir is
- * never read and never deleted, and a PID only reaches killProcess through
- * this read.
+ * never read, never removed and never written, and a PID only reaches
+ * killProcess through this read.
  *
  * The two dirs are the ones a real installation can use (`~/.config/saros`,
  * `~/AppData/Local/saros`), not "anything under $HOME": temp dirs can live
@@ -161,15 +163,63 @@ function pidPathRefused(file: string): boolean {
   if (!TEST_RUN) return false;
   const realHome = (globalThis as Record<string, unknown>)[REAL_HOME_GLOBAL];
   if (typeof realHome !== 'string' || realHome === '') return false;
-  const target = pathResolve(file);
+  // Compare real locations, not spellings: an XDG_CONFIG_HOME symlinked into
+  // the real install passed the lexical check and the test happily killed the
+  // live daemon.
+  const target = canonicalPath(file);
   const realDirs = [
     pathJoin(realHome, '.config', 'saros'),
     pathJoin(realHome, 'AppData', 'Local', 'saros'),
   ];
-  return realDirs.some((dir) => {
-    const rel = pathRelative(pathResolve(dir), target);
-    return rel !== '' && rel !== '..' && !rel.startsWith(`..${pathSep}`) && !pathIsAbsolute(rel);
-  });
+  return realDirs.some((dir) => isBelow(canonicalPath(dir), target));
+}
+
+/**
+ * `file` with symlinks resolved, or the longest existing prefix of it with
+ * the missing tail kept lexical. A pid or log file usually does not exist
+ * yet, and `realpathSync` throws on a missing file — but its directory does,
+ * and that is what a symlinked state dir hides behind.
+ */
+function canonicalPath(file: string): string {
+  let current = pathResolve(file);
+  let rest = '';
+  for (;;) {
+    try {
+      const real = realpathSync(current);
+      return rest === '' ? real : pathJoin(real, rest);
+    } catch {
+      const parent = pathDirname(current);
+      // The root always exists: a failure there means realpathSync refused
+      // for another reason (EACCES, ELOOP), so keep the lexical path instead
+      // of walking in circles.
+      if (parent === current) return pathResolve(file);
+      rest = rest === '' ? pathBasename(current) : pathJoin(pathBasename(current), rest);
+      current = parent;
+    }
+  }
+}
+
+/** Is `target` strictly below `dir`? Both are absolute, canonical paths. */
+function isBelow(dir: string, target: string): boolean {
+  const rel = pathRelative(dir, target);
+  return rel !== '' && rel !== '..' && !rel.startsWith(`..${pathSep}`) && !pathIsAbsolute(rel);
+}
+
+/**
+ * The one gate for every path this module touches — pid file, daemon.log,
+ * models.json, and the legacy pid file on the opt-in upgrade path. Read,
+ * remove and write all pass through here; returning false means the caller
+ * must leave the path alone and take its no-op branch (null, silent return or
+ * exit 1). Inert outside a test run, where pidPathRefused is always false.
+ */
+function assertStateDir(file: string, action: 'read' | 'remove' | 'write'): boolean {
+  if (!pidPathRefused(file)) return true;
+  console.error(
+    chalk.red(
+      `✗ Refusing to ${action} ${file}: a test run must never touch the real home. Point HOME and XDG_CONFIG_HOME at a temp dir.`,
+    ),
+  );
+  return false;
 }
 
 // ---------------------------------------------------------------------------
@@ -191,14 +241,7 @@ function parsePid(raw: string | null): number | null {
 
 function readPidFile(file: string | null): string | null {
   if (file === null) return null;
-  if (pidPathRefused(file)) {
-    console.error(
-      chalk.red(
-        `✗ Refusing to read ${file}: a test run must never touch the real home. Point HOME and XDG_CONFIG_HOME at a temp dir.`,
-      ),
-    );
-    return null;
-  }
+  if (!assertStateDir(file, 'read')) return null;
   try {
     return readFileSync(file, 'utf-8').trim() || null;
   } catch {
@@ -234,6 +277,9 @@ function readPid(): PidRecord | null {
  */
 function migrateLegacyPid(pid: string, legacyFile: string): string {
   if (!legacyPidEnabled()) return legacyFile;
+  if (!assertStateDir(PID_FILE, 'write') || !assertStateDir(legacyFile, 'remove')) {
+    return legacyFile;
+  }
   const pidNum = parsePid(pid);
   if (pidNum === null || !isProcessAlive(pidNum)) return legacyFile;
   try {
@@ -247,6 +293,7 @@ function migrateLegacyPid(pid: string, legacyFile: string): string {
 }
 
 function writePid(pid: number): void {
+  if (!assertStateDir(PID_FILE, 'write')) return;
   ensurePidDir();
   writeFileSync(PID_FILE, String(pid), 'utf-8');
 }
@@ -257,7 +304,7 @@ function writePid(pid: number): void {
  * the stale one.
  */
 function removePidFile(file: string | null): void {
-  if (file === null || pidPathRefused(file)) return;
+  if (file === null || !assertStateDir(file, 'remove')) return;
   try {
     rmSync(file, { force: true });
   } catch {
@@ -274,6 +321,7 @@ function removePidFile(file: string | null): void {
  * nothing but a runtime dependency.
  */
 function rotateDaemonLog(): void {
+  if (!assertStateDir(DAEMON_LOG, 'write')) return;
   try {
     if (!existsSync(DAEMON_LOG)) return;
     if (statSync(DAEMON_LOG).size < LOG_MAX_BYTES) return;
@@ -298,6 +346,7 @@ function rotateDaemonLog(): void {
  * single file. Exported so the wiring can be asserted in tests.
  */
 export function openDaemonLog(): number | null {
+  if (!assertStateDir(DAEMON_LOG, 'write')) return null;
   try {
     ensurePidDir();
     // mode only applies on create; an existing 0644 log from an older version
@@ -351,6 +400,7 @@ function readLogSince(offset: number): string {
  */
 function ensureModelsJson(): void {
   const modelsPath = getModelsJsonPath();
+  if (!assertStateDir(modelsPath, 'write')) return;
 
   const dir = pathJoin(homedir(), '.config', 'saros');
   if (!existsSync(dir)) {
@@ -535,6 +585,10 @@ function killRunningDaemon(): KillResult {
 // ---------------------------------------------------------------------------
 
 export async function daemonStart(port?: number, configPath?: string): Promise<void> {
+  // Before the first directory is created: under test a state dir in the real
+  // installation is not ours to populate — not the pid, not daemon.log, not
+  // models.json.
+  if (!assertStateDir(PID_FILE, 'write')) process.exit(1);
   ensurePidDir();
 
   const effectivePort = port ?? getConfigPort(configPath);
@@ -692,32 +746,37 @@ function awaitDaemonGone(result: KillResult, onGone: () => void): void {
 
 /**
  * Nothing to stop in the state dir. That is not the whole truth: a 0.10.x
- * installation keeps its PID under `~/.config/saros`, so `stop` used to print
- * "no daemon" and exit 0 while the old proxy was still serving. Name the file
- * and the flag (stat only), and exit non-zero when something answers /health.
+ * installation keeps its PID under `~/.config/saros`, and an instance started
+ * outside the daemon never writes a handle at all, so "no pid file" used to
+ * print "no daemon" and exit 0 while a proxy was still serving. Probe the
+ * configured port: when /health answers, report what is serving — naming the
+ * legacy file and the flag when one exists — and exit non-zero.
+ *
+ * `alreadyReported` is for a caller that just announced a stale handle: the
+ * header is redundant, but the port verdict is not.
  */
-async function reportNothingToStop(): Promise<void> {
+async function reportNothingToStop(alreadyReported = false): Promise<void> {
   const legacy = legacyPidFileToAdopt();
   if (legacy === null) {
-    console.log(chalk.yellow('No running proxy daemon found.'));
-    process.exit(0);
+    if (!alreadyReported) console.log(chalk.yellow('No running proxy daemon found.'));
+  } else {
+    if (!alreadyReported) {
+      console.log(chalk.yellow(`No running proxy daemon found in ${PID_DIR}.`));
+    }
+    console.log(chalk.yellow(`A pre-0.11 PID file exists at ${legacy}.`));
+    console.log(
+      chalk.cyan('Re-run with SAROS_ALLOW_LEGACY_PID=1 to let this command read and stop it.'),
+    );
   }
-  console.log(chalk.yellow(`No running proxy daemon found in ${PID_DIR}.`));
-  console.log(chalk.yellow(`A pre-0.11 PID file exists at ${legacy}.`));
-  console.log(
-    chalk.cyan('Re-run with SAROS_ALLOW_LEGACY_PID=1 to let this command read and stop it.'),
-  );
   const port = getConfigPort();
   const probe = await probeProxyHealth(port);
-  if (probe.ok) {
-    console.error(
-      chalk.red(
-        `✗ Something is still serving on port ${port} — the pre-0.11 instance was not stopped.`,
-      ),
-    );
-    process.exit(1);
-  }
-  process.exit(0);
+  if (!probe.ok) process.exit(0);
+  const detail =
+    legacy === null
+      ? 'it was started outside `saros-proxy start`'
+      : 'the pre-0.11 instance was not stopped';
+  console.error(chalk.red(`✗ Something is still serving on port ${port} — ${detail}.`));
+  process.exit(1);
 }
 
 export async function daemonStop(): Promise<void> {
@@ -730,7 +789,10 @@ export async function daemonStop(): Promise<void> {
     console.log(
       chalk.yellow(`Daemon process (PID ${result.pid}) is not running. Cleaning up PID file.`),
     );
-    process.exit(0);
+    // The stale handle was removed; something can still serve — a live legacy
+    // instance, or one started outside the daemon. Exiting 0 here hid that.
+    await reportNothingToStop(true);
+    return;
   }
   awaitDaemonGone(result, () => {
     console.log(chalk.green(`✓ Proxy (PID ${result.pid}) stopped.`));

@@ -134,6 +134,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `test/setup-env.ts` keeps it for the whole file lifetime, and a code-level
   guard refuses to read or delete a PID file inside a real installation's state
   dir while under test.
+- **The state-dir guard covers writes and symlinks, and `stop` without a handle
+  probes the port (#104).** The guard compared lexical paths, so an
+  `XDG_CONFIG_HOME` symlinked into the real install passed it, and it only
+  covered reads and deletes: `daemonStart`, `openDaemonLog`, log rotation, the
+  legacy migration and the models.json copy could still create files in a real
+  state dir (a test run did create `daemon.log` there). One gate now guards
+  reads, removals and writes against the realpath of the longest existing
+  prefix, so a symlinked state dir is refused too. `stop` with no handle (no
+  pid file, or an unreadable one) now probes `/health` like the legacy branch
+  already did: something serving on the configured port is reported by port —
+  plus the legacy path and `SAROS_ALLOW_LEGACY_PID=1` when that file exists —
+  and exits 1 instead of 0. A stale current pid file that is cleaned up takes
+  the same path, so a live legacy instance is no longer hidden behind exit 0.
 
 ## [0.10.2] - 2026-10-27
 
