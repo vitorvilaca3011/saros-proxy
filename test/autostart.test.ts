@@ -45,7 +45,7 @@ const mockHomedir = vi.hoisted(() => vi.fn());
 
 vi.mock('node:os', async (importOriginal) => {
   const actual = await importOriginal<typeof NodeOs>();
-  mockHomedir.mockImplementation(() => actual.homedir());
+  mockHomedir.mockImplementation(() => process.env.HOME || actual.homedir());
   return { ...actual, homedir: mockHomedir };
 });
 

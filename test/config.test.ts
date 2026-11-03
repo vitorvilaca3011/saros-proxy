@@ -23,10 +23,12 @@ vi.mock('../src/logger.js', () => ({
 
 // node:os / node:fs are wrapped with call-through spies so tests can control
 // homedir()/existsSync()/readFileSync() for specific error branches without
-// breaking the real filesystem usage in the rest of the suite.
+// breaking the real filesystem usage in the rest of the suite. homedir()
+// defaults to the temp home test/setup-env.ts installs, never the developer's:
+// a suite that resolves the real home is how #104's run reached a live daemon.
 vi.mock('node:os', async (importOriginal) => {
   const actual = await importOriginal<typeof NodeOs>();
-  return { ...actual, homedir: vi.fn(actual.homedir) };
+  return { ...actual, homedir: vi.fn(() => process.env.HOME || actual.homedir()) };
 });
 
 vi.mock('node:fs', async (importOriginal) => {
@@ -1021,9 +1023,9 @@ describe('getDefaultConfigPath', () => {
     it('falls back to ~/.config when XDG_CONFIG_HOME missing on Unix', () => {
       delete process.env.XDG_CONFIG_HOME;
       const result = getDefaultConfigPath();
-      // os.homedir() in the vitest worker does not reflect process.env.HOME
-      // (worker env snapshot vs OS user record), so just verify the path shape
-      expect(result).toMatch(/\/\.config\/saros\/config\.yaml$/);
+      // homedir() is the setup file's temp home, so this asserts the path
+      // itself — not just its shape — and would fail on the developer's home.
+      expect(result).toBe(join(os.homedir(), '.config', 'saros', 'config.yaml'));
     });
   }
 });

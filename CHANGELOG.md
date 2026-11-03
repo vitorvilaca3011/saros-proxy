@@ -114,6 +114,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   on the next start. Tests additionally resolve `HOME`/`USERPROFILE` and
   `homedir()` inside a per-file temp dir and scrub the flag from the
   environment, so no suite can reach a real installation.
+- **`stop` keeps the daemon it could not kill, and says so (#104).** The PID
+  file is removed only after a liveness re-check confirms the process is gone.
+  A failed stop keeps the handle and exits non-zero: a second `stop` used to
+  print "No running proxy daemon found." and exit 0 while the proxy was still
+  serving, `status` could only see it through `/health`, and `restart`
+  announced "stopped daemon" and then died with the port already in use.
+  `restart` now waits for the same confirmation before starting, and both
+  commands remove only the PID file they read — with `SAROS_ALLOW_LEGACY_PID=1`
+  the old `deletePid` also removed the legacy file, dropping another instance's
+  handle. An upgraded 0.10.x install whose pid sits in `~/.config/saros` is
+  reported instead of ignored: `stop`/`status` name that path and
+  `SAROS_ALLOW_LEGACY_PID=1` (stat only, never read or killed), and `stop`
+  exits non-zero when `/health` still answers on the configured port.
+  `taskkill`'s outcome now comes from its exit code (128, or 1 with no output)
+  instead of message text, which only matched English and Portuguese. Tests:
+  the suites that re-registered `node:os` back to the real home (`config`,
+  `opencode-config`, `autostart`) keep the setup file's temp home,
+  `test/setup-env.ts` keeps it for the whole file lifetime, and a code-level
+  guard refuses to read or delete a PID file inside a real installation's state
+  dir while under test.
 
 ## [0.10.2] - 2026-10-27
 

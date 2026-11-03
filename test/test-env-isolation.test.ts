@@ -26,4 +26,11 @@ describe('test environment isolation', () => {
   it('does not inherit a legacy PID opt-in from the operator shell', () => {
     expect(process.env.SAROS_ALLOW_LEGACY_PID).toBeUndefined();
   });
+
+  it('publishes the real home for the daemon PID-path guard', () => {
+    // src/cli/daemon.ts refuses any PID file inside a real installation's
+    // state dir while under test — the structural half of this isolation.
+    // Deleting this publish would silently disable that guard.
+    expect((globalThis as Record<string, unknown>).__SAROS_REAL_HOME__).toBe(userInfo().homedir);
+  });
 });

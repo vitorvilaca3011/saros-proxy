@@ -48,8 +48,20 @@ if (process.platform === 'win32') {
 // consult the legacy pid path, and a stray exported flag must not change that.
 delete process.env.SAROS_ALLOW_LEGACY_PID;
 
+// The account's real home, read from the passwd record (`userInfo` ignores
+// $HOME, so no env var and no `node:os` mock above can change it). Published
+// for the code-level guard in src/cli/daemon.ts: while under test, a PID file
+// in the real installation's state dir (`~/.config/saros`,
+// `~/AppData/Local/saros`) is never read or deleted, no matter which suite
+// re-registered `node:os` or dropped XDG_CONFIG_HOME. That is the incident
+// from #104 — a test with a temp config dir and the real HOME killed the live
+// daemon — made structurally impossible instead of merely unlikely.
+(globalThis as Record<string, unknown>).__SAROS_REAL_HOME__ = Os.userInfo().homedir;
+
 afterAll(() => {
-  homeRef.home = '';
+  // homeRef.home keeps pointing at the temp dir (now gone): teardown work that
+  // resolves homedir() must fail on a missing temp path, never reach the real
+  // home by resetting it to ''.
   try {
     rmSync(configHome, { recursive: true, force: true });
   } catch {

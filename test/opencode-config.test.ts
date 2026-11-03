@@ -27,13 +27,17 @@ import {
 import { loadModelsCatalog } from '../src/models-catalog.js';
 
 // Mock homedir so path-detection helpers can be pointed at a temp directory.
-// Defaults to the real home directory; tests that need control override it
-// via vi.mocked(homedir).mockReturnValue(...) and afterEach restores it.
+// The default is the temp home test/setup-env.ts installs — never the
+// developer's: a suite that resolves the real home is how #104's run reached a
+// live installation. Tests that need control override it via
+// vi.mocked(homedir).mockReturnValue(...) and afterEach restores the default.
+const fixtureHome = vi.hoisted(() => ({ path: '' }));
 vi.mock('node:os', async (importOriginal) => {
   const real = await importOriginal<typeof Os>();
+  fixtureHome.path = process.env.HOME || real.homedir();
   return {
     ...real,
-    homedir: vi.fn(real.homedir),
+    homedir: vi.fn(() => fixtureHome.path),
   };
 });
 
@@ -78,7 +82,8 @@ describe('OpenCode Config Integration', () => {
 
   afterEach(async () => {
     await removeTempDir(tmpDir);
-    vi.mocked(homedir).mockRestore();
+    // Restore the setup file's temp home, not whatever the test installed.
+    vi.mocked(homedir).mockImplementation(() => fixtureHome.path);
   });
 
   // -----------------------------------------------------------------------
@@ -88,9 +93,9 @@ describe('OpenCode Config Integration', () => {
   describe('getDefaultOpencodeConfigPath', () => {
     it('returns path within home directory', () => {
       const path = getDefaultOpencodeConfigPath();
-      expect(path).toContain('.config');
-      expect(path).toContain('opencode');
-      expect(path).toContain('opencode.json');
+      // The mocked homedir is the setup file's temp home: a path anywhere
+      // else would mean the real home was resolved.
+      expect(path).toBe(join(fixtureHome.path, '.config', 'opencode', 'opencode.jsonc'));
     });
 
     it('prefers opencode.jsonc when it exists', () => {
