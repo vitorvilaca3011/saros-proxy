@@ -63,11 +63,15 @@ Use the `question` tool to ask the user all of these **at once** (batch into one
       ]
     },
     {
-      "question": "Do you want to connect Saros to OpenCode after setup?",
-      "header": "OpenCode Integration",
+      "question": "Which harness(es) do you use? Saros can sync its model catalogue into each one — pick all that apply.",
+      "header": "Harnesses",
+      "multiSelect": true,
       "options": [
-        { "label": "Yes", "description": "Auto-configure opencode.json" },
-        { "label": "No", "description": "Skip OpenCode config" }
+        { "label": "OpenCode", "description": "~/.config/opencode/opencode.json (or .jsonc)" },
+        { "label": "oh-my-pi (omp)", "description": "~/.omp/agent/models.yml" },
+        { "label": "pi", "description": "~/.pi/agent/models.json" },
+        { "label": "dsh (DeepSeek Harness)", "description": "~/.dsh/profiles/web/cordis.patch.yml" },
+        { "label": "None", "description": "Skip harness config; I'll call the proxy myself" }
       ]
     },
     {
@@ -245,11 +249,25 @@ saros-proxy autostart
 Saros exposes one OpenAI-compatible endpoint — `http://127.0.0.1:{port}/zen/go/v1` — and every supported harness needs the same two things: a `saros-proxy` provider pointing at it, and the model list Saros writes on sync.
 
 ```bash
-# Add harnesses to the sync selection (accepted: oc|opencode, omp|ohmypi, pi, dsh)
+# Enable one flag per harness the user picked (accepted: oc|opencode, omp|ohmypi, pi, dsh)
 saros-proxy configharness oc
 saros-proxy configharness        # show the current selection
 saros-proxy sync-upstream        # pull the live model list into every selected harness
 ```
+
+Map the Phase 1 answer to the flags, and pass them in one call when more than one applies
+(`saros-proxy configharness oc omp`):
+
+| Answer | Flag | Config file |
+|---|---|---|
+| OpenCode | `oc` | `~/.config/opencode/opencode.json` (or `.jsonc`) |
+| oh-my-pi | `omp` | `~/.omp/agent/models.yml` |
+| pi | `pi` | `~/.pi/agent/models.json` |
+| dsh | `dsh` | `~/.dsh/profiles/web/cordis.patch.yml` |
+| None | — | skip this section entirely, do not run `configharness` |
+
+Only touch the harnesses the user named: `configharness` without flags shows the current selection, and running it with no
+flags must not be used to "reset" anything.
 
 `saros-proxy start` runs the same sync as `sync-upstream` on boot (live catalog, bundled models as the offline fallback), so a daemon install only needs `configharness`. **That sync never creates a harness config**: if the file below does not exist, ask the user to launch that harness once so it writes its own config, then sync. The exception is `saros-proxy setup`, which writes the OpenCode config path it is given — `opencode.jsonc` on new installs — and in non-interactive mode only updates a file that already exists.
 
