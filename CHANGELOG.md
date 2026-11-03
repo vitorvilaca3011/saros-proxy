@@ -92,6 +92,61 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **The proxy's own error entries carry the last key tried** instead of
   `keyLabel: null` — both the retries-exhausted 502 and a 503 raised after keys
   were tried; null now means no key was ever selected.
+- **`saros-proxy stop` and `status` tell the truth on Windows (#83).**
+  Liveness is `process.kill(pid, 0)` on every platform: `tasklist /FI "PID eq …"`
+  exits 0 even when no task matches, so any value in the PID file read as
+  running and `status` announced a proxy that was not listening. `stop` now
+  waits for the PID to disappear before printing `✓ stopped` (a real,
+  successful kill used to be reported as a failure), pipes taskkill's output so
+  its "not found" text no longer leaks into the console / PowerShell
+  `NativeCommandError`, and removes the PID file in both outcomes. The PID file
+  and `daemon.log` now live next to `config.yaml` (`%LOCALAPPDATA%\saros` on
+  Windows); a legacy `~/.config/saros/daemon.pid` is read only on explicit
+  opt-in (see below).
+- **The pre-0.11 pid file is inert unless the operator opts in (#104).**
+  `readPid()` fell back to `~/.config/saros/daemon.pid` whenever the new state
+  dir had no pid, and `stop` killed what it read. That path is in the user's
+  real home, so a vitest run with a temp `XDG_CONFIG_HOME` and the real `HOME`
+  signalled the developer's live daemon (systemd logged the SIGTERM). Reading,
+  migrating and deleting the legacy file now require `SAROS_ALLOW_LEGACY_PID=1`;
+  an installation started before 0.11.0 keeps its pid under `~/.config/saros`;
+  set `SAROS_ALLOW_LEGACY_PID=1` once to stop it, or the new layout takes over
+  on the next start. Tests additionally resolve `HOME`/`USERPROFILE` and
+  `homedir()` inside a per-file temp dir and scrub the flag from the
+  environment, so no suite can reach a real installation.
+- **`stop` keeps the daemon it could not kill, and says so (#104).** The PID
+  file is removed only after a liveness re-check confirms the process is gone.
+  A failed stop keeps the handle and exits non-zero: a second `stop` used to
+  print "No running proxy daemon found." and exit 0 while the proxy was still
+  serving, `status` could only see it through `/health`, and `restart`
+  announced "stopped daemon" and then died with the port already in use.
+  `restart` now waits for the same confirmation before starting, and both
+  commands remove only the PID file they read — with `SAROS_ALLOW_LEGACY_PID=1`
+  the old `deletePid` also removed the legacy file, dropping another instance's
+  handle. An upgraded 0.10.x install whose pid sits in `~/.config/saros` is
+  reported instead of ignored: `stop`/`status` name that path and
+  `SAROS_ALLOW_LEGACY_PID=1` (stat only, never read or killed), and `stop`
+  exits non-zero when `/health` still answers on the configured port.
+  `taskkill`'s outcome now comes from its exit code (128, or 1 with no output)
+  instead of message text, which only matched English and Portuguese. Tests:
+  the suites that re-registered `node:os` back to the real home (`config`,
+  `opencode-config`, `autostart`) keep the setup file's temp home,
+  `test/setup-env.ts` keeps it for the whole file lifetime, and a code-level
+  guard refuses to read or delete a PID file inside a real installation's state
+  dir while under test.
+- **The state-dir guard covers writes and symlinks, and `stop` without a handle
+  probes the port (#104).** The guard compared lexical paths, so an
+  `XDG_CONFIG_HOME` symlinked into the real install passed it, and it only
+  covered reads and deletes: `daemonStart`, `openDaemonLog`, log rotation, the
+  legacy migration and the models.json copy could still create files in a real
+  state dir (a test run did create `daemon.log` there). One gate now guards
+  reads, removals and writes against the realpath of the longest existing
+  prefix, so a symlinked state dir is refused too. `stop` with no handle (no
+  pid file, or an unreadable one) now probes `/health` like the legacy branch
+  already did: something serving on the configured port is reported by port —
+  plus the legacy path and `SAROS_ALLOW_LEGACY_PID=1` when that file exists —
+  and exits 1 instead of 0. A stale current pid file that is cleaned up takes
+  the same path, so a live legacy instance is no longer hidden behind exit 0.
 
 ## [0.10.2] - 2026-10-27
 

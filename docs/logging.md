@@ -9,7 +9,7 @@ without reading the source.
 | Mode | Destination | Format |
 |---|---|---|
 | `saros-proxy serve` (foreground) | stdout | pretty-printed unless `NODE_ENV=production` |
-| `saros-proxy start` (daemon) | `~/.config/saros/daemon.log` | NDJSON, pretty-printing off |
+| `saros-proxy start` (daemon) | `daemon.log` in the state dir (`~/.config/saros` on Linux/macOS, `%LOCALAPPDATA%\saros` on Windows) | NDJSON, pretty-printing off |
 | `saros-proxy start`, second stream | same file, same descriptor as stdout (no pipe) | NDJSON |
 
 - Level: `LOG_LEVEL` (default `info`). `debug` adds `key.selected`; per-attempt forwarding (`Forwarding request…`) is `info` because it is what a failed attempt needs in order to be reconstructible.

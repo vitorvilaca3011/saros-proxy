@@ -95,7 +95,7 @@ if (subcommand === 'start') {
   daemonStart(port, configPath);
   // daemonStart owns its own exit path via setTimeout
 } else if (subcommand === 'stop') {
-  daemonStop();
+  await daemonStop();
 } else if (subcommand === 'status') {
   daemonStatus();
 } else if (subcommand === 'restart') {
