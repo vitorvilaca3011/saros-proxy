@@ -34,9 +34,12 @@ const mockSpawn = vi.hoisted(() =>
     stderr: null,
   })),
 );
+const mockExecFileSync = vi.hoisted(() =>
+  vi.fn((..._args: unknown[]): Buffer => Buffer.from('')),
+);
 vi.mock('node:child_process', () => ({
   spawn: mockSpawn,
-  execFileSync: vi.fn(() => Buffer.from('')),
+  execFileSync: mockExecFileSync,
 }));
 
 // ---------------------------------------------------------------------------
@@ -94,6 +97,61 @@ function stubPidDead() {
 }
 
 /**
+ * State dir (config, pid, log) the daemon resolves for `home` on the current
+ * platform. Mirrors getDefaultConfigPath in src/config.ts.
+ */
+function stateDir(home: string): string {
+  return process.platform === 'win32'
+    ? join(home, 'AppData', 'Local', 'saros')
+    : join(home, '.config', 'saros');
+}
+
+/**
+ * State dir resolved for the current test's temp home. Set by stubStateDir
+ * before each daemon import; tests use it instead of rebuilding the path.
+ */
+let sarosDir = '';
+
+/**
+ * Point every state-dir input at `home` BEFORE importing daemon.js — the
+ * module resolves its pid/log paths at import time, exactly like the real
+ * CLI. Sets `sarosDir` to the dir daemon.js will use.
+ */
+function stubStateDir(home: string): void {
+  vi.stubEnv('XDG_CONFIG_HOME', join(home, '.config'));
+  vi.stubEnv('LOCALAPPDATA', join(home, 'AppData', 'Local'));
+  sarosDir = stateDir(home);
+}
+
+/** Run `fn` with a faked process.platform, restoring the real one after. */
+async function withPlatform<T>(
+  platform: NodeJS.Platform,
+  fn: () => T | Promise<T>,
+): Promise<T> {
+  const desc = Object.getOwnPropertyDescriptor(process, 'platform');
+  Object.defineProperty(process, 'platform', { value: platform, configurable: true });
+  try {
+    return await fn();
+  } finally {
+    if (desc) Object.defineProperty(process, 'platform', desc);
+  }
+}
+
+/** Errno-shaped failure from a syscall. */
+function errnoError(code: string): NodeJS.ErrnoException {
+  return Object.assign(new Error(code), { code });
+}
+
+/** execFileSync failure shape for a taskkill run that exited non-zero. */
+function taskkillError(status: number, output: string): NodeJS.ErrnoException {
+  return Object.assign(new Error(`Command failed: taskkill`), {
+    status,
+    stdout: Buffer.from(''),
+    stderr: Buffer.from(output),
+  });
+}
+
+/**
  * File descriptors this process holds on `target` (Linux only). /proc/self/fd
  * is the cheap identity check — same trick as the stdout wiring test.
  */
@@ -118,12 +176,14 @@ describe('probeProxyHealth', () => {
   beforeEach(async () => {
     tempHome = createTempHome();
     mockHomeRef.current = tempHome;
+    stubStateDir(tempHome);
     daemon = await importDaemon();
   });
 
   afterEach(() => {
     mockHomeRef.current = '';
     rmSync(tempHome, { recursive: true, force: true });
+    vi.unstubAllEnvs();
     vi.restoreAllMocks();
   });
 
@@ -165,6 +225,451 @@ describe('probeProxyHealth', () => {
 });
 
 // ---------------------------------------------------------------------------
+// isProcessAlive
+// ---------------------------------------------------------------------------
+
+describe('isProcessAlive', () => {
+  let tempHome: string;
+  let daemon: Daemon;
+
+  beforeEach(async () => {
+    tempHome = createTempHome();
+    mockHomeRef.current = tempHome;
+    stubStateDir(tempHome);
+    daemon = await importDaemon();
+  });
+
+  afterEach(() => {
+    mockHomeRef.current = '';
+    rmSync(tempHome, { recursive: true, force: true });
+    vi.unstubAllEnvs();
+    vi.restoreAllMocks();
+  });
+
+  it('reports a PID as alive when the liveness probe succeeds', () => {
+    const killSpy = vi.spyOn(process, 'kill').mockImplementation(() => true);
+
+    expect(daemon.isProcessAlive(4242)).toBe(true);
+    expect(killSpy).toHaveBeenCalledWith(4242, 0);
+  });
+
+  it('reports ESRCH as dead', () => {
+    vi.spyOn(process, 'kill').mockImplementation(() => {
+      throw errnoError('ESRCH');
+    });
+
+    expect(daemon.isProcessAlive(4242)).toBe(false);
+  });
+
+  it('reports EPERM as alive — the PID exists but is not ours to signal', () => {
+    vi.spyOn(process, 'kill').mockImplementation(() => {
+      throw errnoError('EPERM');
+    });
+
+    expect(daemon.isProcessAlive(4242)).toBe(true);
+  });
+
+  it('reports EACCES as alive — OpenProcess denied but the PID exists', () => {
+    vi.spyOn(process, 'kill').mockImplementation(() => {
+      throw errnoError('EACCES');
+    });
+
+    expect(daemon.isProcessAlive(4242)).toBe(true);
+  });
+
+  it('rejects an unusable PID without asking the OS', () => {
+    const killSpy = vi.spyOn(process, 'kill').mockImplementation(() => true);
+
+    for (const pid of [0, -1, 1.5, Number.NaN]) {
+      expect(daemon.isProcessAlive(pid)).toBe(false);
+    }
+    expect(killSpy).not.toHaveBeenCalled();
+  });
+
+  it('never trusts a tasklist exit code on win32 (#83)', async () => {
+    await withPlatform('win32', () => {
+      // tasklist exits 0 for a PID that does not exist, so the old probe
+      // reported every PID as alive.
+      vi.spyOn(process, 'kill').mockImplementation(() => {
+        throw errnoError('ESRCH');
+      });
+      mockExecFileSync.mockClear();
+
+      expect(daemon.isProcessAlive(999999)).toBe(false);
+      expect(mockExecFileSync).not.toHaveBeenCalled();
+    });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// killProcess
+// ---------------------------------------------------------------------------
+
+describe('killProcess', () => {
+  let tempHome: string;
+  let daemon: Daemon;
+
+  beforeEach(async () => {
+    tempHome = createTempHome();
+    mockHomeRef.current = tempHome;
+    stubStateDir(tempHome);
+    daemon = await importDaemon();
+    mockExecFileSync.mockClear();
+  });
+
+  afterEach(() => {
+    mockHomeRef.current = '';
+    rmSync(tempHome, { recursive: true, force: true });
+    vi.unstubAllEnvs();
+    vi.restoreAllMocks();
+    mockExecFileSync.mockImplementation(() => Buffer.from(''));
+  });
+
+  it('win32: runs taskkill and captures its output instead of leaking it', async () => {
+    await withPlatform('win32', () => {
+      expect(daemon.killProcess(4242)).toBe(true);
+      // stdio: 'pipe' keeps taskkill's "not found" text off our console; the
+      // exit code used to be the only signal, and it was ignored.
+      expect(mockExecFileSync).toHaveBeenCalledWith(
+        'taskkill',
+        ['/T', '/F', '/PID', '4242'],
+        expect.objectContaining({ stdio: 'pipe', windowsHide: true }),
+      );
+    });
+  });
+
+  it('win32: a non-zero taskkill exit is a failure', async () => {
+    await withPlatform('win32', () => {
+      mockExecFileSync.mockImplementationOnce(() => {
+        throw taskkillError(1, 'ERROR: Access is denied.');
+      });
+
+      expect(daemon.killProcess(4242)).toBe(false);
+    });
+  });
+
+  it('win32: "process not found" is not a failure', async () => {
+    await withPlatform('win32', () => {
+      // The process can die between isProcessAlive and taskkill.
+      mockExecFileSync.mockImplementationOnce(() => {
+        throw taskkillError(128, 'ERROR: The process "4242" not found.');
+      });
+
+      expect(daemon.killProcess(4242)).toBe(true);
+    });
+  });
+
+  it('win32: a taskkill that cannot even spawn is a failure', async () => {
+    await withPlatform('win32', () => {
+      mockExecFileSync.mockImplementationOnce(() => {
+        throw errnoError('ENOENT');
+      });
+
+      expect(daemon.killProcess(4242)).toBe(false);
+    });
+  });
+
+  it('posix: sends SIGKILL and reports success', async () => {
+    await withPlatform('linux', () => {
+      const killSpy = vi.spyOn(process, 'kill').mockImplementation(() => true);
+
+      expect(daemon.killProcess(4242)).toBe(true);
+      expect(killSpy).toHaveBeenCalledWith(4242, 'SIGKILL');
+    });
+  });
+
+  it('posix: ESRCH is success, EPERM is a failure', async () => {
+    await withPlatform('linux', () => {
+      const killSpy = vi.spyOn(process, 'kill');
+
+      killSpy.mockImplementationOnce(() => {
+        throw errnoError('ESRCH');
+      });
+      expect(daemon.killProcess(4242)).toBe(true);
+
+      killSpy.mockImplementationOnce(() => {
+        throw errnoError('EPERM');
+      });
+      expect(daemon.killProcess(4242)).toBe(false);
+    });
+  });
+});
+
+// ---------------------------------------------------------------------------
+// daemonStop
+// ---------------------------------------------------------------------------
+
+describe('daemonStop', () => {
+  const TEST_PID = 4242;
+  let tempHome: string;
+  let daemon: Daemon;
+
+  beforeEach(async () => {
+    tempHome = createTempHome();
+    mockHomeRef.current = tempHome;
+    stubStateDir(tempHome);
+    daemon = await importDaemon();
+    // Nothing in this suite may ever reach a real signal.
+    vi.spyOn(process, 'kill').mockImplementation(() => {
+      throw errnoError('ESRCH');
+    });
+  });
+
+  afterEach(() => {
+    mockHomeRef.current = '';
+    rmSync(tempHome, { recursive: true, force: true });
+    vi.unstubAllEnvs();
+    vi.restoreAllMocks();
+    vi.useRealTimers();
+    mockExecFileSync.mockImplementation(() => Buffer.from(''));
+  });
+
+  function writeDaemonPid(pid: number): string {
+    mkdirSync(sarosDir, { recursive: true });
+    const file = join(sarosDir, 'daemon.pid');
+    writeFileSync(file, String(pid), 'utf-8');
+    return file;
+  }
+
+  /** The PID stays alive until a kill lands, then reports ESRCH. */
+  function stubDyingProcess(state: { alive: boolean }): void {
+    vi.spyOn(process, 'kill').mockImplementation((_pid: number, signal?: string | number) => {
+      if (signal === 0) {
+        if (!state.alive) throw errnoError('ESRCH');
+        return true;
+      }
+      state.alive = false;
+      return true;
+    });
+  }
+
+  it('reports nothing to stop when no PID file exists', () => {
+    const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+    const exitSpy = mockProcessExitThrow();
+
+    expect(() => daemon.daemonStop()).toThrow('process.exit(0)');
+    const output = logSpy.mock.calls.map((c) => String(c[0])).join('\n');
+    expect(output).toContain('No running proxy daemon found.');
+    expect(exitSpy).toHaveBeenCalledWith(0);
+  });
+
+  it('cleans up a stale PID file without claiming to have stopped anything', () => {
+    const pidFile = writeDaemonPid(TEST_PID);
+    const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+    mockProcessExitThrow();
+
+    expect(() => daemon.daemonStop()).toThrow('process.exit(0)');
+    const output = logSpy.mock.calls.map((c) => String(c[0])).join('\n');
+    expect(output).toContain(`Daemon process (PID ${TEST_PID}) is not running.`);
+    expect(output).not.toContain('stopped');
+    expect(existsSync(pidFile)).toBe(false);
+  });
+
+  it('reports success once the process is gone and removes the PID file', async () => {
+    const pidFile = writeDaemonPid(TEST_PID);
+    stubDyingProcess({ alive: true });
+    const exitSpy = mockProcessExitRecord();
+    const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+    vi.useFakeTimers();
+
+    daemon.daemonStop();
+    // Nothing may be printed before the post-kill verification runs.
+    expect(logSpy).not.toHaveBeenCalled();
+
+    await vi.advanceTimersByTimeAsync(3000);
+
+    const output = logSpy.mock.calls.map((c) => String(c[0])).join('\n');
+    expect(output).toContain(`✓ Proxy (PID ${TEST_PID}) stopped.`);
+    expect(exitSpy).toHaveBeenCalledWith(0);
+    expect(existsSync(pidFile)).toBe(false);
+  });
+
+  it('reports failure only when the process is still alive after the wait', async () => {
+    const pidFile = writeDaemonPid(TEST_PID);
+    vi.spyOn(process, 'kill').mockImplementation(() => true); // never dies
+    const exitSpy = mockProcessExitRecord();
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    vi.useFakeTimers();
+
+    daemon.daemonStop();
+    await vi.advanceTimersByTimeAsync(3000);
+
+    const output = errorSpy.mock.calls.map((c) => String(c[0])).join('\n');
+    expect(output).toContain(`Failed to stop daemon (PID ${TEST_PID})`);
+    expect(exitSpy).toHaveBeenCalledWith(1);
+    expect(existsSync(pidFile)).toBe(false);
+  });
+
+  it('win32: taskkill success is reported as success (#83)', async () => {
+    const pidFile = writeDaemonPid(TEST_PID);
+    const state = { alive: true };
+    const exitSpy = mockProcessExitRecord();
+    const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+    vi.useFakeTimers();
+
+    await withPlatform('win32', async () => {
+      vi.spyOn(process, 'kill').mockImplementation((_pid: number, signal?: string | number) => {
+        if (signal === 0) {
+          if (!state.alive) throw errnoError('ESRCH');
+          return true;
+        }
+        return true;
+      });
+      mockExecFileSync.mockImplementation(() => {
+        state.alive = false; // taskkill /F terminated it
+        return Buffer.from('SUCCESS: sent termination signal');
+      });
+
+      daemon.daemonStop();
+      await vi.advanceTimersByTimeAsync(3000);
+    });
+
+    const output = logSpy.mock.calls.map((c) => String(c[0])).join('\n');
+    expect(output).toContain(`✓ Proxy (PID ${TEST_PID}) stopped.`);
+    expect(exitSpy).toHaveBeenCalledWith(0);
+    expect(existsSync(pidFile)).toBe(false);
+  });
+
+  it('win32: a PID that died before taskkill still counts as stopped', async () => {
+    writeDaemonPid(TEST_PID);
+    let probes = 0;
+    const exitSpy = mockProcessExitRecord();
+    const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    vi.useFakeTimers();
+
+    await withPlatform('win32', async () => {
+      vi.spyOn(process, 'kill').mockImplementation((_pid: number, signal?: string | number) => {
+        if (signal !== 0) return true;
+        probes += 1;
+        if (probes > 1) throw errnoError('ESRCH');
+        return true;
+      });
+      mockExecFileSync.mockImplementation(() => {
+        throw taskkillError(128, 'ERROR: The process "4242" not found.');
+      });
+
+      daemon.daemonStop();
+      await vi.advanceTimersByTimeAsync(3000);
+    });
+
+    const output = logSpy.mock.calls.map((c) => String(c[0])).join('\n');
+    expect(output).toContain(`✓ Proxy (PID ${TEST_PID}) stopped.`);
+    // taskkill's "not found" text must not reach the operator's console.
+    expect(errorSpy).not.toHaveBeenCalled();
+    expect(exitSpy).toHaveBeenCalledWith(0);
+  });
+
+  it('win32: a surviving process after a failed taskkill is a failure', async () => {
+    const pidFile = writeDaemonPid(TEST_PID);
+    const exitSpy = mockProcessExitRecord();
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    vi.useFakeTimers();
+
+    await withPlatform('win32', async () => {
+      vi.spyOn(process, 'kill').mockImplementation(() => true); // liveness never clears
+      mockExecFileSync.mockImplementation(() => {
+        throw taskkillError(1, 'ERROR: Access is denied.');
+      });
+
+      daemon.daemonStop();
+      await vi.advanceTimersByTimeAsync(3000);
+    });
+
+    const output = errorSpy.mock.calls.map((c) => String(c[0])).join('\n');
+    expect(output).toContain(`Failed to stop daemon (PID ${TEST_PID})`);
+    expect(exitSpy).toHaveBeenCalledWith(1);
+    expect(existsSync(pidFile)).toBe(false);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// State directory — pid/log next to config.yaml (#83, defect 5)
+// ---------------------------------------------------------------------------
+
+describe('daemon state directory', () => {
+  let tempHome: string;
+
+  beforeEach(() => {
+    tempHome = createTempHome();
+    mockHomeRef.current = tempHome;
+  });
+
+  afterEach(() => {
+    mockHomeRef.current = '';
+    rmSync(tempHome, { recursive: true, force: true });
+    vi.unstubAllEnvs();
+    vi.unstubAllGlobals();
+    vi.restoreAllMocks();
+  });
+
+  /** Import daemon.js with a live PID file placed in `dir`; return its state. */
+  async function stateWithPidIn(dir: string): Promise<Daemon.DaemonState> {
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, 'daemon.pid'), String(process.pid), 'utf-8');
+    vi.spyOn(process, 'kill').mockImplementation(() => true);
+    stubHealthDown();
+    const daemon = await importDaemon();
+    return daemon.getDaemonState();
+  }
+
+  it('win32: keeps the PID file under LOCALAPPDATA, next to config.yaml', async () => {
+    const localAppData = join(tempHome, 'AppData', 'Local');
+    vi.stubEnv('LOCALAPPDATA', localAppData);
+
+    await withPlatform('win32', async () => {
+      const state = await stateWithPidIn(join(localAppData, 'saros'));
+
+      expect(state.pid).toBe(String(process.pid));
+      expect(state.stalePid).toBe(false);
+    });
+  });
+
+  it('posix: keeps the PID file under XDG_CONFIG_HOME', async () => {
+    const xdg = join(tempHome, 'xdg');
+    vi.stubEnv('XDG_CONFIG_HOME', xdg);
+
+    await withPlatform('linux', async () => {
+      const state = await stateWithPidIn(join(xdg, 'saros'));
+
+      expect(state.pid).toBe(String(process.pid));
+    });
+  });
+
+  it('posix: falls back to ~/.config without XDG_CONFIG_HOME', async () => {
+    vi.stubEnv('XDG_CONFIG_HOME', '');
+
+    await withPlatform('linux', async () => {
+      const state = await stateWithPidIn(join(tempHome, '.config', 'saros'));
+
+      expect(state.pid).toBe(String(process.pid));
+    });
+  });
+
+  it('win32: reads a legacy ~/.config/saros/daemon.pid and migrates it', async () => {
+    const localAppData = join(tempHome, 'AppData', 'Local');
+    vi.stubEnv('LOCALAPPDATA', localAppData);
+    mkdirSync(join(tempHome, '.config', 'saros'), { recursive: true });
+    const legacyPidFile = join(tempHome, '.config', 'saros', 'daemon.pid');
+    writeFileSync(legacyPidFile, String(process.pid), 'utf-8');
+    vi.spyOn(process, 'kill').mockImplementation(() => true);
+    stubHealthDown();
+
+    await withPlatform('win32', async () => {
+      const daemon = await importDaemon();
+      const state = await daemon.getDaemonState();
+
+      expect(state.pid).toBe(String(process.pid));
+      expect(state.stalePid).toBe(false);
+    });
+
+    const migrated = join(localAppData, 'saros', 'daemon.pid');
+    expect(readFileSync(migrated, 'utf-8')).toBe(String(process.pid));
+    expect(existsSync(legacyPidFile)).toBe(false);
+  });
+});
+
+// ---------------------------------------------------------------------------
 // daemonStatus
 // ---------------------------------------------------------------------------
 
@@ -175,6 +680,7 @@ describe('daemonStatus', () => {
   beforeEach(async () => {
     tempHome = createTempHome();
     mockHomeRef.current = tempHome;
+    stubStateDir(tempHome);
     daemon = await importDaemon();
   });
 
@@ -182,6 +688,7 @@ describe('daemonStatus', () => {
     mockHomeRef.current = '';
     rmSync(tempHome, { recursive: true, force: true });
     vi.unstubAllGlobals();
+    vi.unstubAllEnvs();
     vi.restoreAllMocks();
   });
 
@@ -208,9 +715,8 @@ describe('daemonStatus', () => {
   });
 
   it('reports running with the PID when the PID file is alive', async () => {
-    const pidDir = join(tempHome, '.config', 'saros');
-    mkdirSync(pidDir, { recursive: true });
-    writeFileSync(join(pidDir, 'daemon.pid'), String(process.pid), 'utf-8');
+    mkdirSync(sarosDir, { recursive: true });
+    writeFileSync(join(sarosDir, 'daemon.pid'), String(process.pid), 'utf-8');
     mockProcessExitThrow();
     const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
 
@@ -220,10 +726,32 @@ describe('daemonStatus', () => {
     expect(output).toContain('Enabled harnesses: opencode');
   });
 
+  it('win32: a dead PID is not running and the stale file is removed (#83)', async () => {
+    mkdirSync(sarosDir, { recursive: true });
+    writeFileSync(join(sarosDir, 'daemon.pid'), '999999', 'utf-8');
+    stubHealthDown();
+    const exitSpy = mockProcessExitThrow();
+    const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    vi.spyOn(process, 'kill').mockImplementation(() => {
+      throw errnoError('ESRCH');
+    });
+
+    await withPlatform('win32', async () => {
+      await expect(daemon.daemonStatus()).rejects.toThrow('process.exit(1)');
+    });
+
+    const output = logSpy.mock.calls.map((c) => String(c[0])).join('\n');
+    expect(output).toContain('Daemon is not running (stale PID cleaned up).');
+    expect(output).not.toContain('Proxy is running');
+    expect(errorSpy).not.toHaveBeenCalled();
+    expect(exitSpy).toHaveBeenCalledTimes(1);
+    expect(existsSync(join(sarosDir, 'daemon.pid'))).toBe(false);
+  });
+
   it('reports running when the PID file is stale but the port still serves', async () => {
-    const pidDir = join(tempHome, '.config', 'saros');
-    mkdirSync(pidDir, { recursive: true });
-    writeFileSync(join(pidDir, 'daemon.pid'), '999999999', 'utf-8'); // dead PID
+    mkdirSync(sarosDir, { recursive: true });
+    writeFileSync(join(sarosDir, 'daemon.pid'), '999999999', 'utf-8'); // dead PID
     stubPidDead();
     stubHealthOk();
     mockProcessExitThrow();
@@ -232,15 +760,14 @@ describe('daemonStatus', () => {
     await expect(daemon.daemonStatus()).rejects.toThrow('process.exit(0)');
     const output = logSpy.mock.calls.map((c) => c[0] as string).join('\n');
     expect(output).toContain('Proxy is running on port 3000');
-    expect(existsSync(join(pidDir, 'daemon.pid'))).toBe(false); // stale cleaned up
+    expect(existsSync(join(sarosDir, 'daemon.pid'))).toBe(false); // stale cleaned up
   });
 
   it('prints the configured harness selection', async () => {
     // Explicit selection instead of the implicit opencode default.
-    const pidDir = join(tempHome, '.config', 'saros');
-    mkdirSync(pidDir, { recursive: true });
+    mkdirSync(sarosDir, { recursive: true });
     writeFileSync(
-      join(pidDir, 'harnesses.json'),
+      join(sarosDir, 'harnesses.json'),
       JSON.stringify({ harnesses: ['omp', 'pi'] }),
       'utf-8',
     );
@@ -274,6 +801,7 @@ describe('daemonStart', () => {
   beforeEach(async () => {
     tempHome = createTempHome();
     mockHomeRef.current = tempHome;
+    stubStateDir(tempHome);
     daemon = await importDaemon();
   });
 
@@ -283,10 +811,12 @@ describe('daemonStart', () => {
     // can still refuse a recursive delete while a just-closed handle is reaped.
     rmSync(tempHome, { recursive: true, force: true, maxRetries: 5, retryDelay: 50 });
     vi.unstubAllGlobals();
+    vi.unstubAllEnvs();
     vi.restoreAllMocks();
     vi.useRealTimers();
-    // restoreAllMocks may reset plain vi.fn()s — re-assert the spawn default.
+    // restoreAllMocks may reset plain vi.fn()s — re-assert the defaults.
     mockSpawn.mockImplementation(() => ({ pid: 12345, unref: vi.fn(), stderr: null }));
+    mockExecFileSync.mockImplementation(() => Buffer.from(''));
   });
 
   it('refuses to start when the port is already serving', async () => {
@@ -314,7 +844,7 @@ describe('daemonStart', () => {
     expect(mockSpawn).toHaveBeenCalled();
     expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining('exited shortly after starting'));
     expect(exitSpy).toHaveBeenCalledWith(1);
-    expect(existsSync(join(tempHome, '.config', 'saros', 'daemon.pid'))).toBe(false);
+    expect(existsSync(join(sarosDir, 'daemon.pid'))).toBe(false);
   });
 
   it('wires both child streams to daemon.log instead of a stderr pipe', async () => {
@@ -346,7 +876,7 @@ describe('daemonStart', () => {
     mockSpawn.mockClear();
     mockProcessExitRecord();
     vi.useFakeTimers();
-    const logPath = join(tempHome, '.config', 'saros', 'daemon.log');
+    const logPath = join(sarosDir, 'daemon.log');
     // The child inherits both descriptors; writing through them here is what
     // pino (stdout) and node's uncaught-exception reporter (stderr) do.
     mockSpawn.mockImplementationOnce((...args: unknown[]) => {
@@ -371,7 +901,7 @@ describe('daemonStart', () => {
     vi.spyOn(console, 'log').mockImplementation(() => {});
     vi.spyOn(process, 'kill').mockImplementation(() => true); // child stays alive
     vi.useFakeTimers();
-    const logPath = join(tempHome, '.config', 'saros', 'daemon.log');
+    const logPath = join(sarosDir, 'daemon.log');
     // Emulates the descriptor the child inherits. The parent closes its own
     // copy right after spawn, so this is the only writer left.
     let childStderrFd = -1;
@@ -408,7 +938,7 @@ describe('daemonStart', () => {
     const exitSpy = mockProcessExitRecord();
     const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
     vi.useFakeTimers();
-    const logPath = join(tempHome, '.config', 'saros', 'daemon.log');
+    const logPath = join(sarosDir, 'daemon.log');
     mockSpawn.mockImplementationOnce(() => {
       appendFileSync(logPath, 'Error: listen EADDRINUSE: address already in use :::3100\n');
       return { pid: 12345, unref: vi.fn(), stderr: null };
@@ -429,7 +959,7 @@ describe('daemonStart', () => {
     const exitSpy = mockProcessExitRecord();
     const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
     vi.useFakeTimers();
-    const logPath = join(tempHome, '.config', 'saros', 'daemon.log');
+    const logPath = join(sarosDir, 'daemon.log');
     mockSpawn.mockImplementationOnce(() => {
       appendFileSync(logPath, '✗ No valid API keys configured\n');
       return { pid: 12345, unref: vi.fn(), stderr: null };
@@ -450,7 +980,7 @@ describe('daemonStart', () => {
     mockProcessExitRecord();
     const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
     vi.useFakeTimers();
-    const logPath = join(tempHome, '.config', 'saros', 'daemon.log');
+    const logPath = join(sarosDir, 'daemon.log');
     mockSpawn.mockImplementationOnce(() => {
       appendFileSync(logPath, 'Error: Cannot find module \'./dist/index.js\'\n    at boot\n');
       return { pid: 12345, unref: vi.fn(), stderr: null };
@@ -471,9 +1001,8 @@ describe('daemonStart', () => {
     mockProcessExitRecord();
     const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
     vi.useFakeTimers();
-    const dir = join(tempHome, '.config', 'saros');
-    mkdirSync(dir, { recursive: true });
-    const logPath = join(dir, 'daemon.log');
+    mkdirSync(sarosDir, { recursive: true });
+    const logPath = join(sarosDir, 'daemon.log');
     writeFileSync(logPath, 'Error: listen EADDRINUSE: address already in use :::3000\n');
 
     await daemon.daemonStart();
@@ -492,7 +1021,7 @@ describe('daemonStart', () => {
     mockProcessExitRecord();
     vi.spyOn(console, 'error').mockImplementation(() => {});
     vi.useFakeTimers();
-    const logPath = join(tempHome, '.config', 'saros', 'daemon.log');
+    const logPath = join(sarosDir, 'daemon.log');
 
     await daemon.daemonStart();
     await vi.advanceTimersByTimeAsync(2000);
@@ -510,7 +1039,7 @@ describe('daemonStart', () => {
     vi.spyOn(console, 'log').mockImplementation(() => {});
     vi.spyOn(process, 'kill').mockImplementation(() => true); // child stays alive
     vi.useFakeTimers();
-    const logPath = join(tempHome, '.config', 'saros', 'daemon.log');
+    const logPath = join(sarosDir, 'daemon.log');
 
     await daemon.daemonStart();
     await vi.advanceTimersByTimeAsync(2000);
@@ -527,8 +1056,8 @@ describe('daemonStart', () => {
     mockSpawn.mockClear();
     mockProcessExitRecord();
     vi.useFakeTimers();
-    const logPath = join(tempHome, '.config', 'saros', 'daemon.log');
-    mkdirSync(join(tempHome, '.config', 'saros'), { recursive: true });
+    const logPath = join(sarosDir, 'daemon.log');
+    mkdirSync(sarosDir, { recursive: true });
     writeFileSync(logPath, Buffer.alloc(11 * 1024 * 1024, 'x'));
 
     await daemon.daemonStart();
@@ -545,9 +1074,8 @@ describe('daemonStart', () => {
     mockSpawn.mockClear();
     mockProcessExitRecord();
     vi.useFakeTimers();
-    const dir = join(tempHome, '.config', 'saros');
-    mkdirSync(dir, { recursive: true });
-    const logPath = join(dir, 'daemon.log');
+    mkdirSync(sarosDir, { recursive: true });
+    const logPath = join(sarosDir, 'daemon.log');
     writeFileSync(logPath, Buffer.alloc(11 * 1024 * 1024, 'x'));
     for (let i = 1; i <= 5; i++) writeFileSync(`${logPath}.${i}`, `gen-${i}`);
 
@@ -563,9 +1091,8 @@ describe('daemonStart', () => {
 
   it('tightens an existing world-readable daemon.log to 0600', async () => {
     if (process.platform === 'win32') return; // POSIX modes only
-    const dir = join(tempHome, '.config', 'saros');
-    mkdirSync(dir, { recursive: true });
-    const logPath = join(dir, 'daemon.log');
+    mkdirSync(sarosDir, { recursive: true });
+    const logPath = join(sarosDir, 'daemon.log');
     writeFileSync(logPath, 'old boot\n');
     chmodSync(logPath, 0o644);
 
@@ -580,7 +1107,7 @@ describe('daemonStart', () => {
     const fd = daemon.openDaemonLog();
     expect(fd).not.toBeNull();
     const target = readlinkSync(`/proc/self/fd/${fd}`);
-    expect(target).toBe(join(tempHome, '.config', 'saros', 'daemon.log'));
+    expect(target).toBe(join(sarosDir, 'daemon.log'));
     expect(statSync(target).mode & 0o777).toBe(0o600);
     closeSync(fd as number);
   });
@@ -591,8 +1118,8 @@ describe('daemonStart', () => {
     mockSpawn.mockClear();
     mockProcessExitRecord();
     vi.useFakeTimers();
-    const logPath = join(tempHome, '.config', 'saros', 'daemon.log');
-    mkdirSync(join(tempHome, '.config', 'saros'), { recursive: true });
+    const logPath = join(sarosDir, 'daemon.log');
+    mkdirSync(sarosDir, { recursive: true });
     writeFileSync(logPath, 'previous boot\n');
 
     await daemon.daemonStart();
@@ -623,62 +1150,26 @@ describe('daemonStart', () => {
 });
 
 // ---------------------------------------------------------------------------
-// Original lifecycle tests (PID file mechanics)
+// Status payload rendering
 // ---------------------------------------------------------------------------
 
-describe('daemon PID lifecycle', () => {
-  const OENV = process.env;
+describe('daemon status key reporting', () => {
   let tempHome: string;
 
   beforeEach(() => {
     tempHome = createTempHome();
-    // Point the user's home to our temp so the PID file goes there
-    vi.stubEnv('HOME', tempHome);
-    vi.stubEnv('USERPROFILE', tempHome); // Windows compat
+    mockHomeRef.current = tempHome;
+    stubStateDir(tempHome);
   });
 
   afterEach(() => {
+    mockHomeRef.current = '';
     rmSync(tempHome, { recursive: true, force: true });
-    process.env = { ...OENV };
-  });
-
-  it('daemon start creates PID file and daemon stop cleans it up', async () => {
-    mockHomeRef.current = tempHome;
-
-    // We can't call daemonStart directly (it spawns + exits) so we replicate
-    // the PID file logic that the real daemon uses.
-    const pidDir = join(tempHome, '.config', 'saros');
-    const pidFile = join(pidDir, 'daemon.pid');
-
-    // Ensure dir exists (like ensurePidDir does)
-    mkdirSync(pidDir, { recursive: true });
-
-    // Simulate writing PID (like writePid does)
-    writeFileSync(pidFile, String(process.pid), 'utf-8');
-    expect(existsSync(pidFile)).toBe(true);
-    expect(readFileSync(pidFile, 'utf-8').trim()).toBe(String(process.pid));
-
-    // Simulate deletion (like deletePid does)
-    rmSync(pidFile);
-    expect(existsSync(pidFile)).toBe(false);
-  });
-
-  it('daemon stop on non-existing PID file reports cleanly', async () => {
-    // Just verify the exported functions don't throw on missing files
-    const daemon = await import('../src/cli/daemon.js');
-    expect(daemon.daemonStop).toBeDefined();
-    expect(daemon.daemonRestart).toBeDefined();
-    expect(daemon.daemonStatus).toBeDefined();
-    // These call process.exit — we can't safely call them in tests
-  });
-
-  it('daemon status shows correct information', async () => {
-    const daemon = await import('../src/cli/daemon.js');
-    expect(daemon.daemonStatus).toBeDefined();
+    vi.unstubAllEnvs();
+    vi.restoreAllMocks();
   });
 
   it('daemon status explains why a key is out of rotation', async () => {
-    mockHomeRef.current = tempHome;
     vi.spyOn(globalThis, 'fetch').mockResolvedValue(
       new Response(
         JSON.stringify({

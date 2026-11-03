@@ -27,7 +27,7 @@ import { fileURLToPath } from 'node:url';
 import { getModelsJsonPath } from './opencode-config.js';
 import { formatKeyBlock } from './key-state.js';
 import { checkForUpdate } from './update-check.js';
-import { loadConfig } from '../config.js';
+import { loadConfig, getSarosDir } from '../config.js';
 import { DAEMON_SYNC_TIMEOUT_MS } from '../constants.js';
 import { syncModelsInAllHarnesses, readHarnessSettings } from './harness-sync.js';
 
@@ -35,9 +35,35 @@ import { syncModelsInAllHarnesses, readHarnessSettings } from './harness-sync.js
 // Constants
 // ---------------------------------------------------------------------------
 
-const PID_DIR = pathJoin(homedir(), '.config', 'saros');
+/**
+ * State dir: same resolver as config.yaml, so on Windows everything (config,
+ * pid, log) lives under %LOCALAPPDATA%\saros — the pid file used to sit in
+ * ~/.config/saros there while the config sat elsewhere.
+ */
+function resolveStateDir(): string {
+  try {
+    return getSarosDir();
+  } catch {
+    // No determinable home (headless test env): the legacy shape keeps the
+    // CLI importable instead of failing before it can report anything.
+    return pathJoin(homedir(), '.config', 'saros');
+  }
+}
+
+const PID_DIR = resolveStateDir();
 const PID_FILE = pathJoin(PID_DIR, 'daemon.pid');
 const DAEMON_LOG = pathJoin(PID_DIR, 'daemon.log');
+/**
+ * Pre-0.11 location. Read-only transition path: a daemon started by an older
+ * CLI is still stoppable, and the PID is migrated to PID_FILE on first read.
+ * null when the state dir already *is* that location (POSIX default).
+ */
+const LEGACY_PID_FILE = resolveLegacyPidFile();
+
+function resolveLegacyPidFile(): string | null {
+  const legacy = pathJoin(homedir(), '.config', 'saros', 'daemon.pid');
+  return pathResolve(legacy) === pathResolve(PID_FILE) ? null : legacy;
+}
 /** daemon.log is rotated at start: 10 MB per file, 5 kept. */
 const LOG_MAX_BYTES = 10 * 1024 * 1024;
 const LOG_KEEP = 5;
@@ -93,11 +119,46 @@ function ensurePidDir(): void {
   }
 }
 
-function readPid(): string | null {
+/** PID digits, or null when the file is missing/empty/unusable. */
+function parsePid(raw: string | null): number | null {
+  if (raw === null) return null;
+  const pid = Number(raw);
+  return Number.isInteger(pid) && pid > 0 ? pid : null;
+}
+
+function readPidFile(file: string | null): string | null {
+  if (file === null) return null;
   try {
-    return readFileSync(PID_FILE, 'utf-8').trim();
+    return readFileSync(file, 'utf-8').trim() || null;
   } catch {
     return null;
+  }
+}
+
+/**
+ * The running PID: the current state dir first, then the pre-0.11 path so a
+ * daemon started by an older CLI is still visible and stoppable. A live
+ * legacy PID is migrated into the state dir; stop/status clean a dead one.
+ */
+function readPid(): string | null {
+  const current = readPidFile(PID_FILE);
+  if (current !== null) return current;
+  if (LEGACY_PID_FILE === null) return null;
+  const legacy = readPidFile(LEGACY_PID_FILE);
+  if (legacy === null) return null;
+  migrateLegacyPid(legacy, LEGACY_PID_FILE);
+  return legacy;
+}
+
+function migrateLegacyPid(pid: string, legacyFile: string): void {
+  const pidNum = parsePid(pid);
+  if (pidNum === null || !isProcessAlive(pidNum)) return;
+  try {
+    ensurePidDir();
+    writeFileSync(PID_FILE, pid, 'utf-8');
+    rmSync(legacyFile, { force: true });
+  } catch {
+    // Read-only state dir: the legacy file still works for this run.
   }
 }
 
@@ -107,10 +168,13 @@ function writePid(pid: number): void {
 }
 
 function deletePid(): void {
-  try {
-    rmSync(PID_FILE);
-  } catch {
-    // ignore
+  for (const file of [PID_FILE, LEGACY_PID_FILE]) {
+    if (file === null) continue;
+    try {
+      rmSync(file, { force: true });
+    } catch {
+      // ignore
+    }
   }
 }
 
@@ -217,42 +281,66 @@ function ensureModelsJson(): void {
 // Process management
 // ---------------------------------------------------------------------------
 
-/** Check if a process is alive by PID. Cross-platform. */
-function isProcessAlive(pid: number): boolean {
+/**
+ * Check if a process is alive by PID.
+ *
+ * `process.kill(pid, 0)` is the portable liveness probe: Node maps it to
+ * OpenProcess on Windows, so a dead PID fails with ESRCH and an EPERM/EACCES
+ * answer means "the PID exists, it is just not ours to signal" → alive.
+ *
+ * The previous win32 path ran `tasklist /FI "PID eq <pid>"`, which exits 0
+ * even when no task matches — every PID looked alive (#83).
+ */
+export function isProcessAlive(pid: number): boolean {
+  if (!Number.isInteger(pid) || pid <= 0) return false;
   try {
-    if (process.platform === 'win32') {
-      execFileSync('tasklist', ['/FI', `PID eq ${pid}`, '/NH'], {
-        windowsHide: true,
-        timeout: 5000,
-        stdio: 'pipe',
-      });
-      return true;
-    }
     process.kill(pid, 0);
     return true;
-  } catch {
-    return false;
+  } catch (err) {
+    const code = (err as NodeJS.ErrnoException).code;
+    return code === 'EPERM' || code === 'EACCES';
   }
 }
 
-/** Kill a process and all its children. Cross-platform. */
-function killProcess(pid: number): void {
-  if (process.platform === 'win32') {
-    try {
+/** taskkill's exit code for "no process with that PID". */
+const TASKKILL_NOT_FOUND = 128;
+
+/**
+ * Kill a process and all its children. Returns whether the target is gone.
+ *
+ * Output is piped (never inherited): taskkill's "not found" text used to land
+ * in the caller's console and PowerShell surfaced it as a NativeCommandError.
+ */
+export function killProcess(pid: number): boolean {
+  try {
+    if (process.platform === 'win32') {
       execFileSync('taskkill', ['/T', '/F', '/PID', String(pid)], {
         windowsHide: true,
         timeout: 10000,
+        stdio: 'pipe',
       });
-    } catch {
-      // Process may already be dead — ignore
-    }
-  } else {
-    try {
+    } else {
       process.kill(pid, 'SIGKILL');
-    } catch {
-      // Process may already be dead — ignore
     }
+    return true;
+  } catch (err) {
+    // Dying between the liveness check and the kill is success, not failure.
+    return isAlreadyExited(err);
   }
+}
+
+function isAlreadyExited(err: unknown): boolean {
+  const failure = err as NodeJS.ErrnoException & {
+    status?: number | null;
+    stdout?: Buffer | string;
+    stderr?: Buffer | string;
+  };
+  if (failure?.code === 'ESRCH') return true;
+  if (failure?.status === TASKKILL_NOT_FOUND) return true;
+  const output = `${failure?.stdout ?? ''}${failure?.stderr ?? ''}`.toLowerCase();
+  // Localized taskkill ("não foi encontrado") keeps its exit code, but a
+  // wrapper may surface only the text.
+  return output.includes('not found') || output.includes('encontrado');
 }
 
 // ---------------------------------------------------------------------------
@@ -306,9 +394,15 @@ function printHarnesses(): void {
  * running (killed) or the PID file was stale (cleaned up).
  */
 function killRunningDaemon(): { pid: string | null; wasRunning: boolean; wasStale: boolean } {
-  const pid = readPid();
-  if (!pid) return { pid: null, wasRunning: false, wasStale: false };
-  const pidNum = Number(pid);
+  const rawPid = readPid();
+  const pidNum = parsePid(rawPid);
+  if (pidNum === null) {
+    // No PID file, or one holding garbage — nothing to kill, but the file is
+    // not evidence of a running daemon either.
+    if (rawPid !== null) deletePid();
+    return { pid: null, wasRunning: false, wasStale: false };
+  }
+  const pid = String(pidNum);
   if (!isProcessAlive(pidNum)) {
     // Stale PID file — clean it up
     deletePid();
@@ -446,6 +540,9 @@ export async function daemonStart(port?: number, configPath?: string): Promise<v
   }, 2000);
 }
 
+/** How long `stop` waits for the killed process to disappear. */
+const STOP_VERIFY_MS = 2000;
+
 export function daemonStop(): void {
   const { pid, wasStale } = killRunningDaemon();
   if (pid === null) {
@@ -456,18 +553,20 @@ export function daemonStop(): void {
     console.log(chalk.yellow(`Daemon process (PID ${pid}) is not running. Cleaning up PID file.`));
     process.exit(0);
   }
-  // wasRunning === true — killRunningDaemon already killed the process and
-  // deleted the PID file. Now verify it's actually gone.
+  // The kill has been issued; the re-check is the only thing that can tell a
+  // real stop from a failed one — taskkill's own exit code used to be trusted.
   const pidNum = Number(pid);
   setTimeout(() => {
-    if (isProcessAlive(pidNum)) {
-      console.error(chalk.red(`✗ Failed to stop daemon (PID ${pid}). Try: taskkill /F /PID ${pid}`));
-      process.exit(1);
-    } else {
+    const alive = isProcessAlive(pidNum);
+    if (!alive) {
       console.log(chalk.green(`✓ Proxy (PID ${pid}) stopped.`));
       process.exit(0);
+      return;
     }
-  }, 1000);
+    const hint = process.platform === 'win32' ? `taskkill /T /F /PID ${pid}` : `kill -9 ${pid}`;
+    console.error(chalk.red(`✗ Failed to stop daemon (PID ${pid}). Try: ${hint}`));
+    process.exit(1);
+  }, STOP_VERIFY_MS);
 }
 
 /**
@@ -507,14 +606,15 @@ export interface DaemonState {
  */
 export async function getDaemonState(): Promise<DaemonState> {
   const port = getConfigPort();
-  const pid = readPid();
-  const pidAlive = pid !== null && isProcessAlive(Number(pid));
-  const stalePid = pid !== null && !pidAlive;
+  const rawPid = readPid();
+  const pidNum = parsePid(rawPid);
+  const pidAlive = pidNum !== null && isProcessAlive(pidNum);
+  const stalePid = rawPid !== null && !pidAlive;
   if (stalePid) deletePid();
   const probe = await probeProxyHealth(port);
   return {
     running: pidAlive || probe.ok,
-    pid: pidAlive ? pid : null,
+    pid: pidAlive ? String(pidNum) : null,
     port,
     stalePid,
     health: probe.ok ? probe.body : undefined,

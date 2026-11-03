@@ -92,6 +92,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **The proxy's own error entries carry the last key tried** instead of
   `keyLabel: null` — both the retries-exhausted 502 and a 503 raised after keys
   were tried; null now means no key was ever selected.
+- **`saros-proxy stop` and `status` tell the truth on Windows (#83).**
+  Liveness is `process.kill(pid, 0)` on every platform: `tasklist /FI "PID eq …"`
+  exits 0 even when no task matches, so any value in the PID file read as
+  running and `status` announced a proxy that was not listening. `stop` now
+  waits for the PID to disappear before printing `✓ stopped` (a real,
+  successful kill used to be reported as a failure), pipes taskkill's output so
+  its "not found" text no longer leaks into the console / PowerShell
+  `NativeCommandError`, and removes the PID file in both outcomes. The PID file
+  and `daemon.log` now live next to `config.yaml` (`%LOCALAPPDATA%\saros` on
+  Windows); a legacy `~/.config/saros/daemon.pid` is still read and migrated.
 
 ## [0.10.2] - 2026-10-27
 
