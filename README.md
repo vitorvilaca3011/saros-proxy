@@ -101,23 +101,28 @@ Here's how Saros picks which API key to use:
 
 #### Usage-Weighted Rotation
 
-Saros polls the upstream usage API for each key (5h / weekly / monthly windows)
-and weights rotation by **remaining** quota. If key X is 30% used and key Y is
-70% used, 10 requests are distributed 7 → X and 3 → Y — proportional balancing,
-not hard cutoffs, so neither key absorbs the full load when the other runs low.
+Saros polls each key's quota endpoint and weights rotation by **remaining**
+quota. If key X is 30% used and key Y is 70% used, 10 requests are distributed
+7 → X and 3 → Y — proportional balancing, not hard cutoffs, so neither key
+absorbs the full load when the other runs low.
 
-> **This only applies to providers that publish a quota API, which today means
-> OpenCode Go.** CommandCode exposes none: its Provider API documents
-> `chat/completions`, `responses`, `messages`, `models` and `systemone` and
-> nothing else. `GET /v1/account/usage`, `/provider/v1/usage` and
-> `/alpha/billing/usage` answer `404`, and `/alpha/billing/subscriptions` — the
-> route Saros uses to validate a CommandCode key and read its plan — returns
-> subscription metadata only (`planId`, `status`, billing period, quantity):
-> no percentages, no credit balance. CommandCode keys therefore always fall back
-> to even round-robin, and their only consumption signal is the token counts each
-> response reports, booked per key in `token-usage.json` (see
-> [Token Accounting](#token-accounting)). The example above is about OpenCode Go
-> keys.
+The number Saros compares is always a percentage of that key's **own provider
+budget**, never absolute capacity:
+
+| provider | endpoint | what it reports |
+| --- | --- | --- |
+| OpenCode Go | `GET /zen/go/v1/usage` | `rolling` (5h) / `weekly` / `monthly` as percents |
+| CommandCode | `GET /alpha/billing/credits` | `fiveHour` and `weekly` as `used`/`cap` in credits, plus reset timestamps |
+
+CommandCode's parser turns `used/cap` into the same 0-100 percent scale, so a
+mixed pool compares like with like. Two consequences worth knowing:
+
+- **Percent is all there is.** OpenCode Go publishes percents only — no counts,
+  no caps — so "remaining capacity" in tokens or dollars cannot be derived, and
+  the monthly window has no CommandCode counterpart (the credits payload carries
+  no monthly cap, so it stays 0 there).
+- **Exhausted means 100.** A key whose tightest window is at (or past) its cap
+  weighs 0 and is not selected while another key still has room.
 
 - Refreshed in the background every 60s (stale data keeps working).
 - Without usage data, falls back to even round-robin.
@@ -135,9 +140,9 @@ object for non-streaming bodies — is booked against the key that served the
 request. Totals are persisted to `~/.config/saros/token-usage.json` (debounced
 atomic writes) and shown by `saros-proxy usage`.
 
-This is the only consumption signal available for providers without a
-queryable quota API (CommandCode): their keys report no percentages, but
-`saros-proxy usage` shows absolute token totals and request counts per key.
+This is the fallback signal: when a provider has no quota endpoint, or its usage
+call fails, absolute token totals and request counts per key are what
+`saros-proxy usage` can still show.
 
 #### Circuit Breaker
 
@@ -743,7 +748,7 @@ The model list written to each harness comes from the live provider catalogs (op
 Two kinds of upstream quota are visible in the provider documentation but are **not** modelled by Saros, on purpose — the proxy rotates keys and reasons about keys, not about what a single model or plan allows:
 
 - **Model-level free tiers (CommandCode).** `glyph-cluster:free` is capped at 100 requests/day, `beam:free` has no daily cap, and the `laguna-s-2.1-free` tiers cost no credits. Saros counts tokens per key (`token-usage.json`) and per model, but it does not refuse a request because a *model* reached its daily free quota — the upstream returns the error and the key's circuit breaker decides what happens next.
-- **Plan windows (OpenCode Go).** The Go plan meters each model against `5-hour — 20% of the monthly limit`, `weekly — 50%` and `monthly — 100%`. Those windows belong to the subscription: `/zen/go/v1/usage` reports what was consumed, and Saros surfaces it, but the proxy does not predict window exhaustion or re-route on it.
+- **Plan windows (OpenCode Go).** The Go plan meters each model against `5-hour — 20% of the monthly limit`, `weekly — 50%` and `monthly — 100%`. What was consumed is what feeds weighted rotation (see [Usage-Weighted Rotation](#usage-weighted-rotation)), but the proxy does not refuse a request because a model crossed a window: the upstream returns the error and that is what the client sees.
 
 Both are documented here so the behaviour is not mistaken for a bug. Requests through the alternate OpenAI/Anthropic surfaces (`/v1/responses`, `/v1/messages`) and through the decision endpoint (`/v1/systemone`) are forwarded and counted: streamed usage nested under `response.usage` (Responses), the counts Anthropic splits between `message_start.message.usage` and `message_delta.usage` (Messages), and the `input_tokens`/`output_tokens` shape are booked like any other call — with one exception: Anthropic **cache** counters (`cache_read_input_tokens`, `cache_creation_input_tokens`) are not counted, so prompt-cached Messages traffic is under-booked on the prompt side.
 
@@ -812,6 +817,7 @@ Disable it with `SAROS_DEBUG_BUFFER=0`: the endpoint answers `404` and no entry 
 | `ECONNREFUSED` on startup | Port already in use | Change port or kill the existing process |
 | `504 Gateway Timeout` | Upstream too slow | Increase `requestTimeoutMs` |
 | `All API keys are temporarily unavailable` | All keys disabled by circuit breaker | Wait for cooldown or check upstream status |
+| Upstream `403` with `error code: 1010` | Cloudflare in front of the provider rejected the `User-Agent` the client sent | Saros sets the provider's own identity (`cli`); if you see this, the request bypassed the proxy or a provider lost its `extraUpstreamHeaders` |
 | CORS error | Client origin not allowed | Add it to `allowedOrigins` in config |
 
 ---
