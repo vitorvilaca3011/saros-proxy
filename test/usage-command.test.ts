@@ -64,6 +64,18 @@ function usageBody(percent: number, resetsAt?: string | null): Response {
   return new Response(JSON.stringify({ usage: windows }), { status: 200 });
 }
 
+/** Real /alpha/billing/credits payload shape (verified live 2026-11-05). */
+function creditsBody(): Response {
+  return new Response(JSON.stringify({
+    credits: { monthlyCredits: 62.2914806211, purchasedCredits: 0, freeCredits: 0 },
+    windowLimits: {
+      limited: true,
+      fiveHour: { used: 0.1300584138, cap: 14, exceeded: false, resetAt: 1793914043720 },
+      weekly: { used: 4.0825104096, cap: 35, exceeded: false, resetAt: 1794307589031 },
+    },
+  }), { status: 200 });
+}
+
 describe('runUsageCommand', () => {
   let tmpDir: string;
 
@@ -208,29 +220,53 @@ describe('runUsageCommand', () => {
     expect(log).toHaveBeenCalledWith(expect.stringContaining('failed to fetch'));
   });
 
-  it('reports n/a for providers without a queryable usage API', async () => {
-    // commandcode has no usage endpoint; the command must not call fetch.
+  it('fetches commandcode credits with CLI identity alongside opencode-go usage', async () => {
     mockConfigRef.config = makeConfig([
       { label: 'cc', key: 'user_cc-key-abcdefghijklmnop', provider: 'commandcode' },
       { label: 'oc', key: 'sk-oc-key-abcdefghijklmnop', provider: 'opencode-go' },
     ]);
-    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockResolvedValue(usageBody(25));
+    const fetchSpy = vi.spyOn(globalThis, 'fetch').mockImplementation(async (url) =>
+      String(url).endsWith('/alpha/billing/credits') ? creditsBody() : usageBody(25),
+    );
     const log = vi.spyOn(console, 'log').mockImplementation(() => {});
 
     const code = await runUsageCommand();
     expect(code).toBe(0);
-    expect(log).toHaveBeenCalledWith(expect.stringContaining('(commandcode)'));
+    const out = log.mock.calls.map((c) => String(c[0])).join('\n');
+    expect(out).toContain('(commandcode)');
+    expect(out).toContain('(opencode-go)');
+    // Credits → used/cap: 0.1301/14 = 0.93% (5h), 4.0825/35 = 11.66% (weekly).
+    expect(out).toContain('5h: 1%  Weekly: 12%  Monthly: 0%');
+    expect(out).toContain('25%');
+    expect(fetchSpy).toHaveBeenCalledTimes(2);
+    const creditsCall = fetchSpy.mock.calls.find(([url]) =>
+      String(url).endsWith('/alpha/billing/credits'));
+    // Cloudflare gates the route on the CLI identity headers.
+    expect((creditsCall?.[1] as RequestInit).headers).toMatchObject({
+      'User-Agent': expect.stringMatching(/^CommandCodeCLI\//),
+    });
+  });
+
+  it('reports n/a for an unknown provider id', async () => {
+    mockConfigRef.config = makeConfig([
+      { label: 'ghost', key: 'sk-ghost', provider: 'unknown' as never },
+    ]);
+    const fetchSpy = vi.spyOn(globalThis, 'fetch');
+    const log = vi.spyOn(console, 'log').mockImplementation(() => {});
+
+    const code = await runUsageCommand();
+    expect(code).toBe(0);
     expect(log).toHaveBeenCalledWith(
       expect.stringContaining('usage: n/a — provider has no queryable usage API'),
     );
-    // opencode-go key still fetched its usage.
-    expect(fetchSpy).toHaveBeenCalledTimes(1);
-    fetchSpy.mockRestore();
+    expect(fetchSpy).not.toHaveBeenCalled();
   });
-  it('shows token totals for a provider without a quota API', async () => {
+
+  it('appends token totals to the commandcode credits line', async () => {
     mockConfigRef.config = makeConfig([
       { label: 'cc', key: 'user_cc-key-abcdefghijklmnop', provider: 'commandcode' },
     ]);
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue(creditsBody());
     mkdirSync(tmpDir, { recursive: true });
     writeFileSync(
       join(tmpDir, 'token-usage.json'),
@@ -253,7 +289,8 @@ describe('runUsageCommand', () => {
     const code = await runUsageCommand();
     expect(code).toBe(0);
     const out = log.mock.calls.map((c) => String(c[0])).join('\n');
-    expect(out).toContain('usage: n/a — tokens: 12.3k (9k in / 3.3k out, 12 requests)');
+    expect(out).toContain('Weekly: 12%');
+    expect(out).toContain('· tokens: 12.3k (9k in / 3.3k out, 12 requests)');
     expect(out).toContain('token totals since 2026-09-01');
   });
 
@@ -294,6 +331,7 @@ describe('runUsageCommand', () => {
     mockConfigRef.config = makeConfig([
       { label: 'cc', key: 'user_cc-key-abcdefghijklmnop', provider: 'commandcode' },
     ]);
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue(creditsBody());
     mkdirSync(tmpDir, { recursive: true });
     writeFileSync(join(tmpDir, 'token-usage.json'), '{broken json', 'utf-8');
     const log = vi.spyOn(console, 'log').mockImplementation(() => {});
@@ -301,7 +339,9 @@ describe('runUsageCommand', () => {
     const code = await runUsageCommand();
     expect(code).toBe(0);
     const out = log.mock.calls.map((c) => String(c[0])).join('\n');
-    expect(out).toContain('usage: n/a — provider has no queryable usage API');
+    expect(out).toContain('(commandcode)');
+    expect(out).toContain('Weekly: 12%');
+    expect(out).not.toContain('failed to fetch');
   });
 
   it('formats large and partial token totals', async () => {

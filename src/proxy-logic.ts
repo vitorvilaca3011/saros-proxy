@@ -315,8 +315,14 @@ function pickWeighted(state: ProxyState, candidates: ApiKey[]): ApiKey {
 }
 
 /**
- * Update per-key usage data (worst-window used percent, 0-100).
- * Keys absent from the map keep their previous value.
+ * Update per-key usage data (tightest-window used percent, 0-100).
+ *
+ * The value is a percentage of the key's **own provider budget**, not
+ * absolute capacity: a mixed pool feeds every provider's number into
+ * `pickWeighted`, where only this normalized percent is comparable
+ * (opencode-go publishes percentages alone — no counts or caps). 100 means
+ * exhausted, so its weight is 0. Keys absent from the map keep their previous
+ * value.
  */
 export function updateKeyUsage(state: ProxyState, usage: Map<string, number>): void {
   for (const key of state.keys) {

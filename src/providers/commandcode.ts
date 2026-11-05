@@ -9,6 +9,8 @@
  * spend; 200 with planId = valid, 401 = invalid. Requests must carry
  * CLI-identity headers (the server gates on client version, verified live:
  * without them /alpha/generate returns 403 upgrade_required).
+ * Usage: GET /alpha/billing/credits (5-hour and weekly windows + credits),
+ * also gated behind the CLI-identity headers.
  */
 import { MIN_KEY_LENGTH } from '../constants.js';
 import type { KeyProvider, KeyUsage, PrefixMatch, SmokeResult } from './types.js';
@@ -78,11 +80,75 @@ export function parsePlanId(body: string): string | undefined {
 }
 
 /**
- * CommandCode has no per-key usage-percent API saros can query without
- * browser session cookies (verified: /v1/account/usage is not a registered
- * route on api.commandcode.ai). Usage-based weighted rotation is opencode-go
- * only; commandcode keys report no usage data.
+ * Per-key quota endpoint (undocumented but live, verified 2026-11-05):
+ * GET /alpha/billing/credits returns credits plus the 5-hour and weekly
+ * caps. It answers only when the request carries the CLI identity headers,
+ * so `fetchKeyUsage` forwards `extraUpstreamHeaders()`.
  */
+export const COMMANDCODE_CREDITS_PATH = '/alpha/billing/credits';
+
+interface CreditsWindow {
+  used?: unknown;
+  cap?: unknown;
+  resetAt?: unknown;
+}
+
+interface CreditsBody {
+  windowLimits?: {
+    fiveHour?: CreditsWindow;
+    weekly?: CreditsWindow;
+    monthly?: CreditsWindow;
+  };
+}
+
+/** Percent consumed in one window; 0 when the payload has no usable cap. */
+function windowPercent(window: CreditsWindow | undefined): number {
+  const used = window?.used;
+  const cap = window?.cap;
+  if (typeof used !== 'number' || typeof cap !== 'number') return 0;
+  if (!Number.isFinite(used) || !Number.isFinite(cap) || cap <= 0) return 0;
+  return Math.min(100, Math.max(0, (used / cap) * 100));
+}
+
+/** Epoch-ms reset timestamp → ISO; undefined when absent or invalid. */
+function resetIso(epochMs: unknown): string | undefined {
+  if (typeof epochMs !== 'number' || !Number.isFinite(epochMs)) return undefined;
+  const date = new Date(epochMs);
+  return Number.isNaN(date.getTime()) ? undefined : date.toISOString();
+}
+
+/**
+ * Parse a /alpha/billing/credits body into KeyUsage. The payload exposes
+ * `fiveHour` (saros' rolling window) and `weekly` caps only — there is no
+ * monthly cap to derive, so `monthlyPercent` stays 0 instead of inventing
+ * one. A body without `windowLimits` yields zeroed windows rather than null:
+ * the request still succeeded, it just reported no caps.
+ */
+export function parseCommandcodeUsage(body: string): KeyUsage | null {
+  let parsed: CreditsBody;
+  try {
+    parsed = JSON.parse(body) as CreditsBody;
+  } catch {
+    return null;
+  }
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return null;
+  const limits = parsed.windowLimits && typeof parsed.windowLimits === 'object'
+    ? parsed.windowLimits
+    : {};
+  const rolling = windowPercent(limits.fiveHour);
+  const weekly = windowPercent(limits.weekly);
+  const monthly = windowPercent(limits.monthly);
+  return {
+    rollingPercent: rolling,
+    weeklyPercent: weekly,
+    monthlyPercent: monthly,
+    usedPercent: Math.max(rolling, weekly, monthly),
+    rollingResetsAt: resetIso(limits.fiveHour?.resetAt),
+    weeklyResetsAt: resetIso(limits.weekly?.resetAt),
+    monthlyResetsAt: resetIso(limits.monthly?.resetAt),
+  };
+}
+
 export const COMMANDCODE_PROVIDER_MODELS_PATH = '/provider/v1/models';
 
 /** Bare-name index of the live catalog (last path segment of vendor ids). */
@@ -162,11 +228,11 @@ export const commandcodeProvider: KeyProvider = {
   },
 
   usagePath(): string {
-    return ''; // no queryable per-key usage API without a Studio session cookie
+    return COMMANDCODE_CREDITS_PATH;
   },
 
-  parseUsageResponse(_body: string): KeyUsage | null {
-    return null;
+  parseUsageResponse(body: string): KeyUsage | null {
+    return parseCommandcodeUsage(body);
   },
 
   // Documented contract (commandcode.ai/docs/provider §Streaming): every

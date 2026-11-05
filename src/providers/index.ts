@@ -12,14 +12,16 @@ import type { KeyProvider, ProviderId, SmokeResult } from './types.js';
 
 export * from './types.js';
 export { inferProvider, type KeyEntry } from './infer.js';
-export { opencodeGoProvider, parseOpencodeUsage } from './opencode-go.js';
+export { opencodeGoProvider, parseOpencodeUsage, OPENCODE_GO_USER_AGENT } from './opencode-go.js';
 export {
   commandcodeProvider,
   commandcodeClientHeaders,
   resolveClientVersion,
   parsePlanId,
+  parseCommandcodeUsage,
   COMMANDCODE_BASE_URL,
   COMMANDCODE_BILLING_PATH,
+  COMMANDCODE_CREDITS_PATH,
 } from './commandcode.js';
 
 const ALL_PROVIDERS: readonly KeyProvider[] = [opencodeGoProvider, commandcodeProvider];

@@ -23,6 +23,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the larger of the reported total and the sum. Events of other types that
   carry a business `message.usage` (streamed decision payloads) no longer feed
   the token counters.
+- **opencode-go requests no longer inherit the client's `User-Agent`.** The
+  zen upstream sits behind Cloudflare, which answers known browser signatures
+  with `403 error code: 1010`; every request routed through an opencode-go key
+  died there while the client UA was forwarded verbatim. The provider now
+  sends the CLI identity (`User-Agent: cli`, verified live) on chat requests,
+  smoke tests and usage fetches.
+- **CommandCode per-key usage is queryable again.** `GET
+  /alpha/billing/credits` (undocumented but live; requires the CLI identity
+  headers) reports the 5-hour and weekly caps, so `commandcode.usagePath()`
+  points there and its parser maps `used / cap` to `rollingPercent` /
+  `weeklyPercent` with ISO reset times. There is no monthly cap in the payload,
+  so `monthlyPercent` stays 0 instead of being invented. `fetchKeyUsage` now
+  takes the provider, sends its `extraUpstreamHeaders()` and parses with its
+  `parseUsageResponse()` (the duplicated opencode-go parser in
+  `usage-client.ts` is gone), which restores usage-weighted rotation for
+  CommandCode keys. The console rounds fractional percentages.
 
 ## [0.11.0] - 2026-11-03
 

@@ -6,9 +6,9 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import {
   fetchKeyUsage,
   maybeRefreshUsage,
-  parseUsageResponse,
   resetUsageRefreshState,
 } from '../src/usage-client.js';
+import { commandcodeProvider, opencodeGoProvider } from '../src/providers/index.js';
 import { createProxyState, type ProxyState } from '../src/proxy-logic.js';
 import type { ProxyConfig } from '../src/config.js';
 
@@ -17,6 +17,16 @@ const VALID_BODY = JSON.stringify({
     rolling: { status: 'ok', percent: 12, resetsAt: '2026-08-22T19:00:00Z' },
     weekly: { status: 'ok', percent: 44, resetsAt: '2026-08-24T00:00:00Z' },
     monthly: { status: 'ok', percent: 92, resetsAt: '2026-08-27T00:00:00Z' },
+  },
+});
+
+/** Real /alpha/billing/credits payload (verified live 2026-11-05). */
+const CREDITS_BODY = JSON.stringify({
+  credits: { monthlyCredits: 62.2914806211, purchasedCredits: 0, freeCredits: 0 },
+  windowLimits: {
+    limited: true,
+    fiveHour: { used: 0.1300584138, cap: 14, exceeded: false, resetAt: 1793914043720 },
+    weekly: { used: 4.0825104096, cap: 35, exceeded: false, resetAt: 1794307589031 },
   },
 });
 
@@ -39,37 +49,6 @@ function makeConfig(): ProxyConfig {
     allowedOrigins: [],
   };
 }
-
-describe('parseUsageResponse', () => {
-  it('parses windows and picks the worst one for usedPercent', () => {
-    const usage = parseUsageResponse(VALID_BODY);
-    expect(usage).toEqual({
-      usedPercent: 92,
-      rollingPercent: 12,
-      weeklyPercent: 44,
-      monthlyPercent: 92,
-      rollingResetsAt: '2026-08-22T19:00:00Z',
-      weeklyResetsAt: '2026-08-24T00:00:00Z',
-      monthlyResetsAt: '2026-08-27T00:00:00Z',
-    });
-  });
-
-  it('clamps out-of-range percents', () => {
-    const body = JSON.stringify({
-      usage: { rolling: { percent: 150 }, weekly: { percent: -5 }, monthly: {} },
-    });
-    const usage = parseUsageResponse(body);
-    expect(usage.rollingPercent).toBe(100);
-    expect(usage.weeklyPercent).toBe(0);
-    expect(usage.monthlyPercent).toBe(0);
-    expect(usage.usedPercent).toBe(100);
-  });
-
-  it('throws on invalid JSON and on missing usage object', () => {
-    expect(() => parseUsageResponse('not json')).toThrow();
-    expect(() => parseUsageResponse('{}')).toThrow(/missing "usage"/);
-  });
-});
 
 describe('fetchKeyUsage', () => {
   afterEach(() => vi.restoreAllMocks());
@@ -124,6 +103,64 @@ describe('fetchKeyUsage', () => {
     expect(String(spy.mock.calls[0][0])).toBe('https://example.com/zen/go/v1/usage');
     expect((spy.mock.calls[0][1] as RequestInit).headers).toMatchObject({
       Authorization: 'Bearer sk-abc',
+    });
+  });
+
+  it('sends the provider identity headers to the CommandCode credits endpoint', async () => {
+    const spy = vi
+      .spyOn(globalThis, 'fetch')
+      .mockResolvedValue(new Response(CREDITS_BODY, { status: 200 }));
+
+    const result = await fetchKeyUsage(
+      'https://api.commandcode.ai',
+      'user_abc',
+      commandcodeProvider,
+    );
+
+    expect(String(spy.mock.calls[0][0])).toBe('https://api.commandcode.ai/alpha/billing/credits');
+    const headers = (spy.mock.calls[0][1] as RequestInit).headers as Record<string, string>;
+    // Without the CLI identity Cloudflare answers 403 on this route.
+    expect(headers['User-Agent']).toMatch(/^CommandCodeCLI\/\d+\.\d+\.\d+$/);
+    expect(headers['X-CommandCode-Client']).toBe('cli');
+    expect(headers.Authorization).toBe('Bearer user_abc');
+    expect(headers.Accept).toBe('application/json');
+    expect(result.usage?.weeklyPercent).toBeCloseTo(11.6643, 3);
+  });
+
+  it('sends the opencode-go CLI User-Agent so Cloudflare does not reject the probe', async () => {
+    const spy = vi
+      .spyOn(globalThis, 'fetch')
+      .mockResolvedValue(new Response(VALID_BODY, { status: 200 }));
+
+    await fetchKeyUsage('https://opencode.ai', 'oc_sk_test', opencodeGoProvider);
+
+    const headers = (spy.mock.calls[0][1] as RequestInit).headers as Record<string, string>;
+    expect(headers['User-Agent']).toBe('cli');
+  });
+
+  it('skips providers with no usage endpoint without calling fetch', async () => {
+    const noUsage = { ...opencodeGoProvider, usagePath: () => '' };
+    const spy = vi.spyOn(globalThis, 'fetch');
+
+    await expect(fetchKeyUsage('https://example.com', 'sk', noUsage)).resolves.toEqual({
+      usage: null,
+      noEntitlement: false,
+    });
+    expect(spy).not.toHaveBeenCalled();
+  });
+
+  it('treats a throwing provider parser as a failed parse', async () => {
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response('{}', { status: 200 }));
+    const broken = {
+      ...opencodeGoProvider,
+      parseUsageResponse: () => {
+        throw new Error('bad contract');
+      },
+    };
+
+    await expect(fetchKeyUsage('https://example.com', 'sk', broken)).resolves.toEqual({
+      usage: null,
+      noEntitlement: false,
     });
   });
 });

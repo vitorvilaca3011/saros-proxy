@@ -15,9 +15,12 @@ import {
   describeKeys,
   keyRetryAfterMs,
   setKeyEntitlement,
+  updateKeyUsage,
   type ProxyState,
   type ErrorType,
 } from '../src/proxy-logic.js';
+import { parseOpencodeUsage } from '../src/providers/opencode-go.js';
+import { parseCommandcodeUsage } from '../src/providers/commandcode.js';
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -820,8 +823,6 @@ describe('Failover edge cases', () => {
 // Usage-Weighted Rotation
 // ---------------------------------------------------------------------------
 
-import { updateKeyUsage } from '../src/proxy-logic.js';
-
 describe('updateKeyUsage + weighted selection', () => {
   it('distributes requests proportionally to remaining quota (30/70 → 7/3)', () => {
     const state = makeState();
@@ -906,6 +907,97 @@ describe('updateKeyUsage + weighted selection', () => {
       completeRequest(state, `req-${i}`, true);
       expect(key.label).toBe('y');
     }
+  });
+});
+
+// Real payload shapes: the numbers below come out of the provider parsers,
+// not hand-written percentages, so a unit change in a parser breaks rotation.
+const OPENCODE_USAGE_BODY = JSON.stringify({
+  usage: { rolling: { percent: 30 }, weekly: { percent: 10 }, monthly: { percent: 5 } },
+});
+const COMMANDCODE_USAGE_BODY = JSON.stringify({
+  windowLimits: { fiveHour: { used: 9.8, cap: 14 }, weekly: { used: 7, cap: 35 } },
+});
+
+/** Run `rounds` picks, completing each, and count selections per label. */
+function countSelections(state: ProxyState, rounds: number): Record<string, number> {
+  const counts: Record<string, number> = {};
+  for (const key of state.keys) counts[key.label] = 0;
+  for (let i = 0; i < rounds; i++) {
+    const picked = selectKeyForRequest(state, `req-${i}`);
+    expect(picked).not.toBeNull();
+    completeRequest(state, `req-${i}`, true);
+    counts[picked!.label]++;
+  }
+  return counts;
+}
+
+describe('weighted selection fed by the provider usage parsers', () => {
+  it('rotates 7/3 from the opencode-go and commandcode parser outputs', () => {
+    const opencode = parseOpencodeUsage(OPENCODE_USAGE_BODY);
+    const commandcode = parseCommandcodeUsage(COMMANDCODE_USAGE_BODY);
+    // opencode-go: worst window 30%. commandcode: 9.8/14 = 70% (weekly 20%).
+    expect(opencode).not.toBeNull();
+    expect(opencode!.usedPercent).toBe(30);
+    expect(commandcode).not.toBeNull();
+    expect(commandcode!.usedPercent).toBeCloseTo(70, 10);
+
+    const state = createProxyState([
+      { label: 'oc', key: 'oc_sk_' + 'a'.repeat(40) },
+      { label: 'cc', key: 'user_' + 'a'.repeat(40) },
+    ]);
+    updateKeyUsage(state, new Map([
+      ['oc', opencode!.usedPercent],
+      ['cc', commandcode!.usedPercent],
+    ]));
+
+    expect(countSelections(state, 10)).toEqual({ oc: 7, cc: 3 });
+  });
+
+  it('gives a key without usage the median weight when the others come from parsers', () => {
+    const opencode = parseOpencodeUsage(OPENCODE_USAGE_BODY)!;
+    const commandcode = parseCommandcodeUsage(COMMANDCODE_USAGE_BODY)!;
+    const state = createProxyState([
+      { label: 'oc', key: 'oc_sk_' + 'a'.repeat(40) },
+      { label: 'cc', key: 'user_' + 'a'.repeat(40) },
+      { label: 'spare', key: 'sk-spare' },
+    ]);
+    updateKeyUsage(state, new Map([
+      ['oc', opencode.usedPercent],
+      ['cc', commandcode.usedPercent],
+    ]));
+
+    // Remaining weights: oc 70, cc 30 → median 70 for the key with no data.
+    expect(countSelections(state, 10)).toEqual({ oc: 4, cc: 2, spare: 4 });
+  });
+
+  it('never selects a 100%-used key parsed from used >= cap', () => {
+    const exhausted = parseCommandcodeUsage(JSON.stringify({
+      windowLimits: { fiveHour: { used: 14, cap: 14 } },
+    }))!;
+    const opencode = parseOpencodeUsage(OPENCODE_USAGE_BODY)!;
+    expect(exhausted.usedPercent).toBe(100);
+
+    const state = createProxyState([
+      { label: 'full', key: 'user_' + 'a'.repeat(40) },
+      { label: 'oc', key: 'oc_sk_' + 'a'.repeat(40) },
+    ]);
+    updateKeyUsage(state, new Map([
+      ['full', exhausted.usedPercent],
+      ['oc', opencode.usedPercent],
+    ]));
+
+    const counts = countSelections(state, 10);
+    expect(counts.full).toBe(0);
+    expect(counts.oc).toBe(10);
+  });
+
+  it('clamps used > cap to 100, never above', () => {
+    const usage = parseCommandcodeUsage(JSON.stringify({
+      windowLimits: { fiveHour: { used: 20, cap: 14 } },
+    }));
+    expect(usage?.rollingPercent).toBe(100);
+    expect(usage?.usedPercent).toBe(100);
   });
 });
 

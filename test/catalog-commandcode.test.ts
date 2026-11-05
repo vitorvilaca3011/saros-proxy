@@ -157,9 +157,11 @@ describe('commandcode model catalog & affinity', () => {
     expect(await commandcodeProvider.fetchCatalog()).toBeNull();
   });
 
-  it('usagePath is empty and parseUsageResponse always null (no usage API)', () => {
-    expect(commandcodeProvider.usagePath()).toBe('');
-    expect(commandcodeProvider.parseUsageResponse('{}')).toBeNull();
+  it('usagePath points at the credits endpoint and parses its payload', () => {
+    expect(commandcodeProvider.usagePath()).toBe('/alpha/billing/credits');
+    expect(commandcodeProvider.parseUsageResponse('not json')).toBeNull();
+    expect(commandcodeProvider.parseUsageResponse('{"windowLimits":{"fiveHour":{"used":7,"cap":14}}}'))
+      .toMatchObject({ rollingPercent: 50 });
   });
 
   it('extraUpstreamHeaders carries CLI identity without authorization', () => {

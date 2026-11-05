@@ -15,6 +15,7 @@ import {
 import {
   commandcodeProvider,
   commandcodeClientHeaders,
+  parseCommandcodeUsage,
   parsePlanId,
 } from '../src/providers/commandcode.js';
 import { identifyKey, extractKeys, isPlausibleKey, allProviders } from '../src/providers/index.js';
@@ -66,6 +67,67 @@ describe('parsePlanId', () => {
   });
 });
 
+// Real GET /alpha/billing/credits payload (verified live 2026-11-05).
+const CREDITS_BODY = JSON.stringify({
+  credits: { monthlyCredits: 62.2914806211, purchasedCredits: 0, freeCredits: 0 },
+  windowLimits: {
+    limited: true,
+    fiveHour: { used: 0.1300584138, cap: 14, exceeded: false, resetAt: 1793914043720 },
+    weekly: { used: 4.0825104096, cap: 35, exceeded: false, resetAt: 1794307589031 },
+  },
+});
+
+describe('parseCommandcodeUsage', () => {
+  it('maps the live credits payload to window percentages and resets', () => {
+    const usage = parseCommandcodeUsage(CREDITS_BODY);
+    expect(usage).not.toBeNull();
+    expect(usage?.rollingPercent).toBeCloseTo(0.92898867, 6);
+    expect(usage?.weeklyPercent).toBeCloseTo(11.664315456, 6);
+    // No monthly cap in the payload: 0, not an invented percentage.
+    expect(usage?.monthlyPercent).toBe(0);
+    expect(usage?.usedPercent).toBeCloseTo(11.664315456, 6);
+    expect(usage?.rollingResetsAt).toBe('2026-11-05T21:27:23.720Z');
+    expect(usage?.weeklyResetsAt).toBe('2026-11-10T10:46:29.031Z');
+    expect(usage?.monthlyResetsAt).toBeUndefined();
+  });
+
+  it('returns zeroed windows when windowLimits is absent', () => {
+    const usage = parseCommandcodeUsage(
+      '{"credits":{"monthlyCredits":62.29,"purchasedCredits":0,"freeCredits":0}}',
+    );
+    expect(usage).toEqual({
+      rollingPercent: 0,
+      weeklyPercent: 0,
+      monthlyPercent: 0,
+      usedPercent: 0,
+      rollingResetsAt: undefined,
+      weeklyResetsAt: undefined,
+      monthlyResetsAt: undefined,
+    });
+  });
+
+  it('clamps ratios and ignores caps that cannot produce a percentage', () => {
+    const usage = parseCommandcodeUsage(JSON.stringify({
+      windowLimits: {
+        fiveHour: { used: 20, cap: 10, resetAt: 'not-a-number' },
+        weekly: { used: 1, cap: 0 },
+        monthly: { used: 'nope', cap: 5 },
+      },
+    }));
+    expect(usage?.rollingPercent).toBe(100);
+    expect(usage?.weeklyPercent).toBe(0);
+    expect(usage?.monthlyPercent).toBe(0);
+    expect(usage?.usedPercent).toBe(100);
+    expect(usage?.rollingResetsAt).toBeUndefined();
+  });
+
+  it('returns null for non-JSON and non-object bodies', () => {
+    expect(parseCommandcodeUsage('nope')).toBeNull();
+    expect(parseCommandcodeUsage('null')).toBeNull();
+    expect(parseCommandcodeUsage('[]')).toBeNull();
+  });
+});
+
 describe('quickMatch', () => {
   it('user_ prefix uniquely identifies commandcode', () => {
     expect(commandcodeProvider.quickMatch('user_' + 'a'.repeat(40))).toBe('yes');
@@ -97,6 +159,16 @@ describe('commandcodeClientHeaders', () => {
     expect(h['X-CommandCode-Client']).toBe('cli');
     expect(h['X-CLI-Environment']).toBe('production');
     expect(h.Authorization).toBeUndefined();
+  });
+});
+
+describe('provider identity headers', () => {
+  it('opencode-go overrides the User-Agent with the CLI identity Cloudflare accepts', () => {
+    expect(opencodeGoProvider.extraUpstreamHeaders?.()).toEqual({ 'User-Agent': 'cli' });
+  });
+
+  it('opencode-go usage endpoint is unchanged', () => {
+    expect(opencodeGoProvider.usagePath()).toBe('/zen/go/v1/usage');
   });
 });
 
@@ -248,6 +320,9 @@ describe('smokeTest (mock upstream)', () => {
     const result = await opencodeGoProvider.smokeTest('sk-testkeyabcdefghijklmnop');
     Object.defineProperty(opencodeGoProvider, 'baseUrl', { value: original, configurable: true });
     expect(result.status).toBe('valid');
+    // Cloudflare rejects browser-like signatures, so even the probe must
+    // identify as the CLI.
+    expect(lastHeaders['user-agent']).toBe('cli');
   });
 });
 
