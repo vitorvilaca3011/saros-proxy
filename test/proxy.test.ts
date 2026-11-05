@@ -462,6 +462,28 @@ describe('createProxyApp — standard proxy pipeline', () => {
     expect(headers.get('authorization')).toBe('Bearer sk-alpha-key-0001');
   });
 
+  it('replaces a client browser User-Agent with the opencode-go CLI identity', async () => {
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockImplementation(async () =>
+      new Response('{"ok":true}', { status: 200 }),
+    );
+    const app = createProxyApp(makeConfig({
+      keys: [{ label: 'oc', key: 'oc_sk_' + 'a'.repeat(40), provider: 'opencode-go' }],
+    }));
+
+    const res = await app.request('/v1/chat/completions', {
+      method: 'POST',
+      body: JSON.stringify({ model: 'm', messages: [] }),
+      headers: { 'content-type': 'application/json', 'user-agent': 'Python-urllib/3.14' },
+    });
+    await res.text();
+
+    const chatCall = fetchMock.mock.calls.find(([url]) => String(url).endsWith('/chat/completions'));
+    expect(chatCall).toBeDefined();
+    const headers = (chatCall![1] as RequestInit).headers as Headers;
+    // Cloudflare answers `403 error code: 1010` for forwarded browser UAs.
+    expect(headers.get('user-agent')).toBe('cli');
+  });
+
   it('leaves non-streaming bodies byte-identical (no usage option injected)', async () => {
     const fetchMock = vi.spyOn(globalThis, 'fetch').mockResolvedValue(
       new Response('{"ok":true}', { status: 200 }),

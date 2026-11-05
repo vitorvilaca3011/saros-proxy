@@ -12,6 +12,15 @@ import {
 } from '../constants.js';
 import type { KeyProvider, KeyUsage, PrefixMatch, SmokeResult } from './types.js';
 
+/**
+ * Identity the zen upstream expects. Cloudflare in front of opencode.ai
+ * rejects browser-like signatures with `403 error code: 1010` (verified live
+ * 2026-11-05: no UA, `Python-urllib/3.14` and `node` all 403; `cli` reaches
+ * the API). Forwarding the client's UA therefore killed every request made
+ * with an opencode-go key, so the provider overrides it.
+ */
+export const OPENCODE_GO_USER_AGENT = 'cli';
+
 /** Bare-name index of the live opencode-go catalog. */
 let catalogCache: { bareNames: Set<string> } | null = null;
 /** Ensures the background refresh fires at most once per process. */
@@ -108,7 +117,7 @@ export const opencodeGoProvider: KeyProvider = {
     const timer = setTimeout(() => controller.abort(), timeoutMs);
     try {
       const res = await fetch(`${this.baseUrl}${USAGE_PATH}`, {
-        headers: { Authorization: `Bearer ${key}` },
+        headers: { Authorization: `Bearer ${key}`, 'User-Agent': OPENCODE_GO_USER_AGENT },
         signal: controller.signal,
       });
       if (res.ok) {
@@ -135,6 +144,11 @@ export const opencodeGoProvider: KeyProvider = {
 
   usagePath(): string {
     return USAGE_PATH;
+  },
+
+  /** Cloudflare rejects forwarded browser UAs; always identify as the CLI. */
+  extraUpstreamHeaders(): Record<string, string> {
+    return { 'User-Agent': OPENCODE_GO_USER_AGENT };
   },
 
   parseUsageResponse(body: string): KeyUsage | null {
