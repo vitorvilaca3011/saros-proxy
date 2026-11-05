@@ -38,7 +38,9 @@ describe('parseOpencodeUsage', () => {
     expect(usage?.rollingPercent).toBe(12);
     expect(usage?.weeklyPercent).toBe(40);
     expect(usage?.monthlyPercent).toBe(5);
-    expect(usage?.usedPercent).toBe(40);
+    // The rotation metric is the monthly window, not the worst window.
+    expect(usage?.usedPercent).toBe(5);
+    expect(usage?.exhausted).toBe(false);
     expect(usage?.rollingResetsAt).toBe('2026-08-29T00:00:00Z');
   });
 
@@ -48,10 +50,13 @@ describe('parseOpencodeUsage', () => {
     expect(parseOpencodeUsage('{"usage":"nope"}')).toBeNull();
   });
 
-  it('clamps out-of-range percentages', () => {
+  it('clamps out-of-range percentages and flags an exhausted window', () => {
     const usage = parseOpencodeUsage('{"usage":{"rolling":{"percent":150},"weekly":{"percent":-3},"monthly":{"percent":0}}}');
     expect(usage?.rollingPercent).toBe(100);
     expect(usage?.weeklyPercent).toBe(0);
+    expect(usage?.usedPercent).toBe(0);
+    // The rolling window is at 100% even though the month is untouched.
+    expect(usage?.exhausted).toBe(true);
   });
 });
 
@@ -67,28 +72,59 @@ describe('parsePlanId', () => {
   });
 });
 
-// Real GET /alpha/billing/credits payload (verified live 2026-11-05).
+// Real GET /alpha/billing/credits payload, measured 2026-11-05.
 const CREDITS_BODY = JSON.stringify({
-  credits: { monthlyCredits: 62.2914806211, purchasedCredits: 0, freeCredits: 0 },
+  credits: { monthlyCredits: 62.1003565047, purchasedCredits: 0, freeCredits: 0 },
   windowLimits: {
     limited: true,
-    fiveHour: { used: 0.1300584138, cap: 14, exceeded: false, resetAt: 1793914043720 },
-    weekly: { used: 4.0825104096, cap: 35, exceeded: false, resetAt: 1794307589031 },
+    fiveHour: { used: 0.3212, cap: 14, exceeded: false, resetAt: 1793914043720 },
+    weekly: { used: 4.2736, cap: 35, exceeded: false, resetAt: 1794307589031 },
   },
 });
 
 describe('parseCommandcodeUsage', () => {
-  it('maps the live credits payload to window percentages and resets', () => {
+  it('derives the monthly rotation metric from the live credits payload', () => {
     const usage = parseCommandcodeUsage(CREDITS_BODY);
     expect(usage).not.toBeNull();
-    expect(usage?.rollingPercent).toBeCloseTo(0.92898867, 6);
-    expect(usage?.weeklyPercent).toBeCloseTo(11.664315456, 6);
-    // No monthly cap in the payload: 0, not an invented percentage.
-    expect(usage?.monthlyPercent).toBe(0);
-    expect(usage?.usedPercent).toBeCloseTo(11.664315456, 6);
+    expect(usage?.rollingPercent).toBeCloseTo(2.294285714, 6);
+    expect(usage?.weeklyPercent).toBeCloseTo(12.210285714, 6);
+    // Monthly cap = 2 × weekly.cap = 70; consumed = 70 − remaining credits.
+    expect(usage?.monthlyPercent).toBeCloseTo(11.285204993, 6);
+    expect(usage?.usedPercent).toBe(usage?.monthlyPercent);
+    expect(usage?.exhausted).toBe(false);
     expect(usage?.rollingResetsAt).toBe('2026-11-05T21:27:23.720Z');
     expect(usage?.weeklyResetsAt).toBe('2026-11-10T10:46:29.031Z');
     expect(usage?.monthlyResetsAt).toBeUndefined();
+  });
+
+  it('falls back to 5 × fiveHour.cap when weekly.cap is absent', () => {
+    const usage = parseCommandcodeUsage(JSON.stringify({
+      credits: { monthlyCredits: 35 },
+      windowLimits: { fiveHour: { used: 7, cap: 14 } },
+    }));
+    // Cap = 5 × 14 = 70; 35 credits remain → 50% consumed.
+    expect(usage?.monthlyPercent).toBeCloseTo(50, 10);
+    expect(usage?.usedPercent).toBeCloseTo(50, 10);
+    expect(usage?.exhausted).toBe(false);
+  });
+
+  it('leaves the monthly metric at 0 without monthlyCredits or a usable cap', () => {
+    const withoutCredits = parseCommandcodeUsage(JSON.stringify({
+      windowLimits: { fiveHour: { used: 7, cap: 14 }, weekly: { used: 7, cap: 35 } },
+    }));
+    expect(withoutCredits?.monthlyPercent).toBe(0);
+    expect(withoutCredits?.usedPercent).toBe(0);
+    expect(withoutCredits?.exhausted).toBe(false);
+
+    // A non-numeric remaining value is not a number to derive from.
+    const nonNumeric = parseCommandcodeUsage(
+      '{"credits":{"monthlyCredits":"62"},"windowLimits":{"weekly":{"cap":35}}}',
+    );
+    expect(nonNumeric?.monthlyPercent).toBe(0);
+
+    // No cap anywhere → nothing to derive, even with remaining credits.
+    const noCaps = parseCommandcodeUsage('{"credits":{"monthlyCredits":62}}');
+    expect(noCaps?.monthlyPercent).toBe(0);
   });
 
   it('returns zeroed windows when windowLimits is absent', () => {
@@ -100,25 +136,35 @@ describe('parseCommandcodeUsage', () => {
       weeklyPercent: 0,
       monthlyPercent: 0,
       usedPercent: 0,
+      exhausted: false,
       rollingResetsAt: undefined,
       weeklyResetsAt: undefined,
       monthlyResetsAt: undefined,
     });
   });
 
-  it('clamps ratios and ignores caps that cannot produce a percentage', () => {
+  it('clamps ratios and flags exhaustion from any window', () => {
     const usage = parseCommandcodeUsage(JSON.stringify({
       windowLimits: {
         fiveHour: { used: 20, cap: 10, resetAt: 'not-a-number' },
         weekly: { used: 1, cap: 0 },
-        monthly: { used: 'nope', cap: 5 },
       },
     }));
     expect(usage?.rollingPercent).toBe(100);
     expect(usage?.weeklyPercent).toBe(0);
     expect(usage?.monthlyPercent).toBe(0);
-    expect(usage?.usedPercent).toBe(100);
+    expect(usage?.usedPercent).toBe(0);
+    expect(usage?.exhausted).toBe(true);
     expect(usage?.rollingResetsAt).toBeUndefined();
+  });
+
+  it('flags exhaustion when the monthly allowance is spent', () => {
+    const usage = parseCommandcodeUsage(
+      '{"credits":{"monthlyCredits":0},"windowLimits":{"weekly":{"used":0,"cap":35}}}',
+    );
+    expect(usage?.monthlyPercent).toBe(100);
+    expect(usage?.usedPercent).toBe(100);
+    expect(usage?.exhausted).toBe(true);
   });
 
   it('returns null for non-JSON and non-object bodies', () => {

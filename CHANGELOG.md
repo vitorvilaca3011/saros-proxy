@@ -29,16 +29,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   died there while the client UA was forwarded verbatim. The provider now
   sends the CLI identity (`User-Agent: cli`, verified live) on chat requests,
   smoke tests and usage fetches.
-- **CommandCode per-key usage is queryable again.** `GET
-  /alpha/billing/credits` (undocumented but live; requires the CLI identity
-  headers) reports the 5-hour and weekly caps, so `commandcode.usagePath()`
-  points there and its parser maps `used / cap` to `rollingPercent` /
-  `weeklyPercent` with ISO reset times. There is no monthly cap in the payload,
-  so `monthlyPercent` stays 0 instead of being invented. `fetchKeyUsage` now
-  takes the provider, sends its `extraUpstreamHeaders()` and parses with its
-  `parseUsageResponse()` (the duplicated opencode-go parser in
-  `usage-client.ts` is gone), which restores usage-weighted rotation for
-  CommandCode keys. The console rounds fractional percentages.
+- **CommandCode per-key usage is queryable again, with a derived monthly
+  metric.** `GET /alpha/billing/credits` (undocumented but live; requires the
+  CLI identity headers) reports the 5-hour and weekly caps plus
+  `credits.monthlyCredits` (what remains of the monthly allowance), so
+  `commandcode.usagePath()` points there and its parser maps `used / cap` to
+  `rollingPercent` / `weeklyPercent` with ISO reset times. The payload has no
+  explicit monthly cap: it is derived from the plan ladder as
+  `2 × weekly.cap` (falling back to `5 × fiveHour.cap`), and monthly
+  consumption is `cap − monthlyCredits`, clamped to 0-100 and left at 0 when
+  either value is unusable. `fetchKeyUsage` now takes the provider, sends its
+  `extraUpstreamHeaders()` and parses with its `parseUsageResponse()` (the
+  duplicated opencode-go parser in `usage-client.ts` is gone), which restores
+  usage-weighted rotation for CommandCode keys. The console rounds fractional
+  percentages.
+- **Rotation now weighs the monthly window, and a spent window excludes the
+  key.** `KeyUsage.usedPercent` is the monthly percentage of the key's own
+  provider budget, and the new `KeyUsage.exhausted` is true when any window
+  (5h, weekly or monthly) reaches 100%. `pickWeighted` gives an exhausted key
+  weight 0 even when the month still has room — without it, a key at 50% of the
+  month but 100% of the week would keep receiving traffic and failing upstream.
+  Keys without usage data keep the median-weight fallback.
 
 ## [0.11.0] - 2026-11-03
 

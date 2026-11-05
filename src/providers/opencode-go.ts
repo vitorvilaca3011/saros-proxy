@@ -91,7 +91,10 @@ export function parseOpencodeUsage(body: string): KeyUsage | null {
     rollingPercent: rolling,
     weeklyPercent: weekly,
     monthlyPercent: monthly,
-    usedPercent: Math.max(rolling, weekly, monthly),
+    // The monthly window is the budget measure; any window at 100% pulls the
+    // key out of rotation before the upstream rejects it.
+    usedPercent: monthly,
+    exhausted: rolling >= 100 || weekly >= 100 || monthly >= 100,
     rollingResetsAt: typeof usage.rolling?.resetsAt === 'string' ? usage.rolling.resetsAt : undefined,
     weeklyResetsAt: typeof usage.weekly?.resetsAt === 'string' ? usage.weekly.resetsAt : undefined,
     monthlyResetsAt: typeof usage.monthly?.resetsAt === 'string' ? usage.monthly.resetsAt : undefined,

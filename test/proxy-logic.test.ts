@@ -824,10 +824,13 @@ describe('Failover edge cases', () => {
 // ---------------------------------------------------------------------------
 
 describe('updateKeyUsage + weighted selection', () => {
-  it('distributes requests proportionally to remaining quota (30/70 → 7/3)', () => {
+  it('distributes requests proportionally to remaining monthly quota (30/70 → 7/3)', () => {
     const state = makeState();
-    // alpha: 30% used, beta: 70% used, gamma: no usage data
-    updateKeyUsage(state, new Map([['alpha', 30], ['beta', 70]]));
+    // alpha: 30% of the month used, beta: 70%; gamma: no usage data
+    updateKeyUsage(state, new Map([
+      ['alpha', { usedPercent: 30, exhausted: false }],
+      ['beta', { usedPercent: 70, exhausted: false }],
+    ]));
 
     const counts: Record<string, number> = { alpha: 0, beta: 0, gamma: 0 };
     for (let i = 0; i < 10; i++) {
@@ -843,7 +846,10 @@ describe('updateKeyUsage + weighted selection', () => {
     const state = createProxyState(
       [{ label: 'x', key: 'sk-x' }, { label: 'y', key: 'sk-y' }],
     );
-    updateKeyUsage(state, new Map([['x', 30], ['y', 70]]));
+    updateKeyUsage(state, new Map([
+      ['x', { usedPercent: 30, exhausted: false }],
+      ['y', { usedPercent: 70, exhausted: false }],
+    ]));
 
     const counts: Record<string, number> = { x: 0, y: 0 };
     for (let i = 0; i < 10; i++) {
@@ -871,7 +877,10 @@ describe('updateKeyUsage + weighted selection', () => {
     const state = createProxyState(
       [{ label: 'x', key: 'sk-x' }, { label: 'y', key: 'sk-y' }],
     );
-    updateKeyUsage(state, new Map([['x', 100], ['y', 100]]));
+    updateKeyUsage(state, new Map([
+      ['x', { usedPercent: 100, exhausted: true }],
+      ['y', { usedPercent: 100, exhausted: true }],
+    ]));
     const counts: Record<string, number> = { x: 0, y: 0 };
     for (let i = 0; i < 10; i++) {
       const key = selectKeyForRequest(state, `req-${i}`)!;
@@ -885,23 +894,32 @@ describe('updateKeyUsage + weighted selection', () => {
     const state = createProxyState(
       [{ label: 'x', key: 'sk-x' }, { label: 'y', key: 'sk-y' }],
     );
-    updateKeyUsage(state, new Map([['x', 10], ['y', 90]]));
+    updateKeyUsage(state, new Map([
+      ['x', { usedPercent: 10, exhausted: false }],
+      ['y', { usedPercent: 90, exhausted: false }],
+    ]));
     const first = selectKeyForRequest(state, 'a')!;
     completeRequest(state, 'a', true);
     expect(first.label).toBe('x');
 
     // y frees up, x fills up — next pick flips
-    updateKeyUsage(state, new Map([['x', 95], ['y', 10]]));
+    updateKeyUsage(state, new Map([
+      ['x', { usedPercent: 95, exhausted: false }],
+      ['y', { usedPercent: 10, exhausted: false }],
+    ]));
     const second = selectKeyForRequest(state, 'b')!;
     completeRequest(state, 'b', true);
     expect(second.label).toBe('y');
   });
 
-  it('never selects an exhausted key over one with remaining quota', () => {
+  it('never selects a key with a spent window over one with room', () => {
     const state = createProxyState(
       [{ label: 'x', key: 'sk-x' }, { label: 'y', key: 'sk-y' }],
     );
-    updateKeyUsage(state, new Map([['x', 100], ['y', 20]]));
+    updateKeyUsage(state, new Map([
+      ['x', { usedPercent: 100, exhausted: true }],
+      ['y', { usedPercent: 20, exhausted: false }],
+    ]));
     for (let i = 0; i < 6; i++) {
       const key = selectKeyForRequest(state, `req-${i}`)!;
       completeRequest(state, `req-${i}`, true);
@@ -912,11 +930,16 @@ describe('updateKeyUsage + weighted selection', () => {
 
 // Real payload shapes: the numbers below come out of the provider parsers,
 // not hand-written percentages, so a unit change in a parser breaks rotation.
-const OPENCODE_USAGE_BODY = JSON.stringify({
-  usage: { rolling: { percent: 30 }, weekly: { percent: 10 }, monthly: { percent: 5 } },
+const OPENCODE_NORMAL_BODY = JSON.stringify({
+  usage: { rolling: { percent: 5 }, weekly: { percent: 10 }, monthly: { percent: 20 } },
 });
-const COMMANDCODE_USAGE_BODY = JSON.stringify({
-  windowLimits: { fiveHour: { used: 9.8, cap: 14 }, weekly: { used: 7, cap: 35 } },
+const OPENCODE_SPENT_WEEKLY_BODY = JSON.stringify({
+  usage: { rolling: { percent: 0 }, weekly: { percent: 100 }, monthly: { percent: 50 } },
+});
+// Monthly cap = 2 × weekly.cap = 70; monthlyCredits 21 → 49/70 = 70% used.
+const COMMANDCODE_70_BODY = JSON.stringify({
+  credits: { monthlyCredits: 21 },
+  windowLimits: { fiveHour: { used: 1, cap: 14 }, weekly: { used: 2, cap: 35 } },
 });
 
 /** Run `rounds` picks, completing each, and count selections per label. */
@@ -933,71 +956,81 @@ function countSelections(state: ProxyState, rounds: number): Record<string, numb
 }
 
 describe('weighted selection fed by the provider usage parsers', () => {
-  it('rotates 7/3 from the opencode-go and commandcode parser outputs', () => {
-    const opencode = parseOpencodeUsage(OPENCODE_USAGE_BODY);
-    const commandcode = parseCommandcodeUsage(COMMANDCODE_USAGE_BODY);
-    // opencode-go: worst window 30%. commandcode: 9.8/14 = 70% (weekly 20%).
+  it('rotates by the monthly parser outputs, not by other windows', () => {
+    const opencode = parseOpencodeUsage(OPENCODE_NORMAL_BODY);
+    const commandcode = parseCommandcodeUsage(COMMANDCODE_70_BODY);
+    // opencode-go monthly: 20%. commandcode monthly: (70 − 21)/70 = 70%.
     expect(opencode).not.toBeNull();
-    expect(opencode!.usedPercent).toBe(30);
+    expect(opencode!.usedPercent).toBe(20);
+    expect(opencode!.exhausted).toBe(false);
     expect(commandcode).not.toBeNull();
     expect(commandcode!.usedPercent).toBeCloseTo(70, 10);
+    expect(commandcode!.exhausted).toBe(false);
 
     const state = createProxyState([
       { label: 'oc', key: 'oc_sk_' + 'a'.repeat(40) },
       { label: 'cc', key: 'user_' + 'a'.repeat(40) },
     ]);
     updateKeyUsage(state, new Map([
-      ['oc', opencode!.usedPercent],
-      ['cc', commandcode!.usedPercent],
+      ['oc', { usedPercent: opencode!.usedPercent, exhausted: opencode!.exhausted }],
+      ['cc', { usedPercent: commandcode!.usedPercent, exhausted: commandcode!.exhausted }],
     ]));
 
+    // Remaining monthly weights are 80 and 30 → 7.27/2.73 over 10 picks.
     expect(countSelections(state, 10)).toEqual({ oc: 7, cc: 3 });
   });
 
   it('gives a key without usage the median weight when the others come from parsers', () => {
-    const opencode = parseOpencodeUsage(OPENCODE_USAGE_BODY)!;
-    const commandcode = parseCommandcodeUsage(COMMANDCODE_USAGE_BODY)!;
+    const opencode = parseOpencodeUsage(OPENCODE_NORMAL_BODY)!;
+    const commandcode = parseCommandcodeUsage(COMMANDCODE_70_BODY)!;
     const state = createProxyState([
       { label: 'oc', key: 'oc_sk_' + 'a'.repeat(40) },
       { label: 'cc', key: 'user_' + 'a'.repeat(40) },
       { label: 'spare', key: 'sk-spare' },
     ]);
     updateKeyUsage(state, new Map([
-      ['oc', opencode.usedPercent],
-      ['cc', commandcode.usedPercent],
+      ['oc', { usedPercent: opencode.usedPercent, exhausted: opencode.exhausted }],
+      ['cc', { usedPercent: commandcode.usedPercent, exhausted: commandcode.exhausted }],
     ]));
 
-    // Remaining weights: oc 70, cc 30 → median 70 for the key with no data.
+    // Remaining weights: oc 80, cc 30 → median 80 for the key with no data.
     expect(countSelections(state, 10)).toEqual({ oc: 4, cc: 2, spare: 4 });
   });
 
-  it('never selects a 100%-used key parsed from used >= cap', () => {
-    const exhausted = parseCommandcodeUsage(JSON.stringify({
-      windowLimits: { fiveHour: { used: 14, cap: 14 } },
-    }))!;
-    const opencode = parseOpencodeUsage(OPENCODE_USAGE_BODY)!;
-    expect(exhausted.usedPercent).toBe(100);
+  it('never selects a key whose weekly window is spent, even with 50% of the month left', () => {
+    const spent = parseOpencodeUsage(OPENCODE_SPENT_WEEKLY_BODY)!;
+    const opencode = parseOpencodeUsage(OPENCODE_NORMAL_BODY)!;
+    expect(spent.usedPercent).toBe(50);
+    expect(spent.exhausted).toBe(true);
 
     const state = createProxyState([
-      { label: 'full', key: 'user_' + 'a'.repeat(40) },
-      { label: 'oc', key: 'oc_sk_' + 'a'.repeat(40) },
+      { label: 'spent', key: 'oc_sk_' + 'a'.repeat(40) },
+      { label: 'oc', key: 'oc_sk_' + 'b'.repeat(40) },
     ]);
     updateKeyUsage(state, new Map([
-      ['full', exhausted.usedPercent],
-      ['oc', opencode.usedPercent],
+      ['spent', { usedPercent: spent.usedPercent, exhausted: spent.exhausted }],
+      ['oc', { usedPercent: opencode.usedPercent, exhausted: opencode.exhausted }],
     ]));
 
     const counts = countSelections(state, 10);
-    expect(counts.full).toBe(0);
+    expect(counts.spent).toBe(0);
     expect(counts.oc).toBe(10);
   });
 
-  it('clamps used > cap to 100, never above', () => {
-    const usage = parseCommandcodeUsage(JSON.stringify({
+  it('clamps window and monthly ratios to 100, never above', () => {
+    const windowOverCap = parseCommandcodeUsage(JSON.stringify({
       windowLimits: { fiveHour: { used: 20, cap: 14 } },
     }));
-    expect(usage?.rollingPercent).toBe(100);
-    expect(usage?.usedPercent).toBe(100);
+    expect(windowOverCap?.rollingPercent).toBe(100);
+    expect(windowOverCap?.rollingPercent).toBeLessThanOrEqual(100);
+    expect(windowOverCap?.exhausted).toBe(true);
+
+    const creditsOverdrawn = parseCommandcodeUsage(
+      '{"credits":{"monthlyCredits":-10},"windowLimits":{"weekly":{"cap":35}}}',
+    );
+    expect(creditsOverdrawn?.monthlyPercent).toBe(100);
+    expect(creditsOverdrawn?.usedPercent).toBe(100);
+    expect(creditsOverdrawn?.exhausted).toBe(true);
   });
 });
 

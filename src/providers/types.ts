@@ -140,9 +140,14 @@ export interface KeyProvider {
  */
 export type ModelAffinity = 'yes' | 'no' | 'maybe';
 
-/** Shared usage shape used across providers (mirrors usage-client KeyUsage). */
+/**
+ * Shared usage shape used across providers (mirrors usage-client KeyUsage).
+ * `usedPercent` is the monthly percentage of the key's own provider budget;
+ * `exhausted` means any window is at 100% and the key must not serve traffic.
+ */
 export interface KeyUsage {
   usedPercent: number;
+  exhausted: boolean;
   rollingPercent: number;
   weeklyPercent: number;
   monthlyPercent: number;

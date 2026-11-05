@@ -101,28 +101,34 @@ Here's how Saros picks which API key to use:
 
 #### Usage-Weighted Rotation
 
-Saros polls each key's quota endpoint and weights rotation by **remaining**
-quota. If key X is 30% used and key Y is 70% used, 10 requests are distributed
-7 → X and 3 → Y — proportional balancing, not hard cutoffs, so neither key
-absorbs the full load when the other runs low.
+Saros polls each key's quota endpoint and weights rotation by **remaining
+monthly** quota. If key X is 30% into its monthly allowance and key Y is 70%,
+10 requests are distributed 7 → X and 3 → Y — proportional balancing, not hard
+cutoffs, so neither key absorbs the full load when the other runs low.
 
 The number Saros compares is always a percentage of that key's **own provider
-budget**, never absolute capacity:
+monthly budget**, never absolute capacity:
 
 | provider | endpoint | what it reports |
 | --- | --- | --- |
 | OpenCode Go | `GET /zen/go/v1/usage` | `rolling` (5h) / `weekly` / `monthly` as percents |
-| CommandCode | `GET /alpha/billing/credits` | `fiveHour` and `weekly` as `used`/`cap` in credits, plus reset timestamps |
+| CommandCode | `GET /alpha/billing/credits` | `fiveHour` and `weekly` as `used`/`cap` in credits, `credits.monthlyCredits` (remaining) and reset timestamps |
 
-CommandCode's parser turns `used/cap` into the same 0-100 percent scale, so a
-mixed pool compares like with like. Two consequences worth knowing:
+CommandCode's payload has no explicit monthly cap, so the parser derives it
+from the plan ladder (`5-hour — 20%`, `weekly — 50%`, `monthly — 100%`):
+monthly cap = 2 × `weekly.cap` (5 × `fiveHour.cap` when the weekly window is
+absent), and monthly consumption = `cap − credits.monthlyCredits`. A payload
+without a usable cap or `monthlyCredits` leaves the monthly metric at 0 rather
+than inventing one. Both parsers emit the same 0-100 percent scale, so a mixed
+pool compares like with like. Two consequences worth knowing:
 
+- **Monthly is the weight; a spent window still excludes the key.** A key with
+  50% of the month left but a 5-hour or weekly window at 100% weighs 0 and is
+  not selected while another key has room — otherwise it would keep receiving
+  traffic and failing upstream. `/health`'s `usagePercent` is the monthly
+  number.
 - **Percent is all there is.** OpenCode Go publishes percents only — no counts,
-  no caps — so "remaining capacity" in tokens or dollars cannot be derived, and
-  the monthly window has no CommandCode counterpart (the credits payload carries
-  no monthly cap, so it stays 0 there).
-- **Exhausted means 100.** A key whose tightest window is at (or past) its cap
-  weighs 0 and is not selected while another key still has room.
+  no caps — so "remaining capacity" in tokens or dollars cannot be derived.
 
 - Refreshed in the background every 60s (stale data keeps working).
 - Without usage data, falls back to even round-robin.
@@ -395,7 +401,7 @@ OPENCODE_GO_KEYS="account1:sk-xxx,cc:user_yyy"
 - The `/health` endpoint reports per-provider key counts under `providers`, and a `keys` array with each key's state: `enabled`, `entitled`, `consecutiveFailures`, `disabledAt`, `retryAfterMs`, and `lastError` (`status` + `reason`: `auth`, `quota`, `rate_limit`, `server`). The credential is never part of the response.
 - When no key can serve a request, the `503` body says which keys are out and why — `keys[]` with `reason`/`lastStatus`/`retryAfterMs`, plus a `causes[]` list (revoked key, exhausted quota, rate limit, missing plan, or a `@provider` pin with no usable key). The legacy `error` field (`All API keys are temporarily unavailable`) is still present.
 - OpenCode-Go requires a stable per-conversation session id (`x-opencode-session`, used for routing and prompt caching). Saros forwards a client-supplied value untouched and derives one from the conversation (model + first user turn) when the client sends none — harnesses that only attach the header on some request paths would otherwise get `400 MissingSessionID`.
-- Usage-based weighted rotation applies to providers with a queryable usage API (OpenCode-Go). CommandCode keys participate in rotation without usage data, but their token consumption is tracked per key and shown by `saros-proxy usage` (see [Token Accounting](#token-accounting)).
+- Usage-based weighted rotation uses each provider's queryable usage endpoint (OpenCode-Go `GET /zen/go/v1/usage`, CommandCode `GET /alpha/billing/credits`). Both contribute a monthly percentage of their own budget; token consumption stays tracked per key and shown by `saros-proxy usage` (see [Usage-Weighted Rotation](#usage-weighted-rotation) and [Token Accounting](#token-accounting)).
 
 #### Smoke test (key identification)
 

@@ -93,12 +93,15 @@ interface CreditsWindow {
   resetAt?: unknown;
 }
 
+interface CreditsLimits {
+  fiveHour?: CreditsWindow;
+  weekly?: CreditsWindow;
+}
+
 interface CreditsBody {
-  windowLimits?: {
-    fiveHour?: CreditsWindow;
-    weekly?: CreditsWindow;
-    monthly?: CreditsWindow;
-  };
+  /** `monthlyCredits` is what remains of the monthly allowance. */
+  credits?: { monthlyCredits?: unknown };
+  windowLimits?: CreditsLimits;
 }
 
 /** Percent consumed in one window; 0 when the payload has no usable cap. */
@@ -110,6 +113,32 @@ function windowPercent(window: CreditsWindow | undefined): number {
   return Math.min(100, Math.max(0, (used / cap) * 100));
 }
 
+/**
+ * The payload does not carry the monthly cap. Verified against the dashboard
+ * (2026-11-05): the windows are 20% / 50% / 100% of the monthly allowance, so
+ * monthly = 2 × weekly.cap, falling back to 5 × fiveHour.cap when the weekly
+ * window is absent. 0 when neither cap is usable — never invent one.
+ */
+function deriveMonthlyCap(limits: CreditsLimits): number {
+  const weeklyCap = limits.weekly?.cap;
+  if (typeof weeklyCap === 'number' && Number.isFinite(weeklyCap) && weeklyCap > 0) {
+    return weeklyCap * 2;
+  }
+  const fiveHourCap = limits.fiveHour?.cap;
+  if (typeof fiveHourCap === 'number' && Number.isFinite(fiveHourCap) && fiveHourCap > 0) {
+    return fiveHourCap * 5;
+  }
+  return 0;
+}
+
+/** Monthly percent consumed from the remaining credits; 0 when underivable. */
+function monthlyPercent(limits: CreditsLimits, credits: CreditsBody['credits']): number {
+  const cap = deriveMonthlyCap(limits);
+  const remaining = credits?.monthlyCredits;
+  if (cap <= 0 || typeof remaining !== 'number' || !Number.isFinite(remaining)) return 0;
+  return Math.min(100, Math.max(0, ((cap - remaining) / cap) * 100));
+}
+
 /** Epoch-ms reset timestamp → ISO; undefined when absent or invalid. */
 function resetIso(epochMs: unknown): string | undefined {
   if (typeof epochMs !== 'number' || !Number.isFinite(epochMs)) return undefined;
@@ -119,10 +148,12 @@ function resetIso(epochMs: unknown): string | undefined {
 
 /**
  * Parse a /alpha/billing/credits body into KeyUsage. The payload exposes
- * `fiveHour` (saros' rolling window) and `weekly` caps only — there is no
- * monthly cap to derive, so `monthlyPercent` stays 0 instead of inventing
- * one. A body without `windowLimits` yields zeroed windows rather than null:
- * the request still succeeded, it just reported no caps.
+ * `fiveHour` (saros' rolling window) and `weekly` as `used`/`cap`, plus the
+ * remaining `credits.monthlyCredits`; the monthly cap is derived from the
+ * window ladder (see `deriveMonthlyCap`). `usedPercent` is the monthly
+ * measure; `exhausted` turns true when any window reaches 100%. A body
+ * without `windowLimits` yields zeroed windows rather than null: the request
+ * still succeeded, it just reported no caps.
  */
 export function parseCommandcodeUsage(body: string): KeyUsage | null {
   let parsed: CreditsBody;
@@ -132,20 +163,21 @@ export function parseCommandcodeUsage(body: string): KeyUsage | null {
     return null;
   }
   if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return null;
-  const limits = parsed.windowLimits && typeof parsed.windowLimits === 'object'
+  const limits: CreditsLimits = parsed.windowLimits && typeof parsed.windowLimits === 'object'
     ? parsed.windowLimits
     : {};
   const rolling = windowPercent(limits.fiveHour);
   const weekly = windowPercent(limits.weekly);
-  const monthly = windowPercent(limits.monthly);
+  const monthly = monthlyPercent(limits, parsed.credits);
   return {
     rollingPercent: rolling,
     weeklyPercent: weekly,
     monthlyPercent: monthly,
-    usedPercent: Math.max(rolling, weekly, monthly),
+    usedPercent: monthly,
+    exhausted: rolling >= 100 || weekly >= 100 || monthly >= 100,
     rollingResetsAt: resetIso(limits.fiveHour?.resetAt),
     weeklyResetsAt: resetIso(limits.weekly?.resetAt),
-    monthlyResetsAt: resetIso(limits.monthly?.resetAt),
+    monthlyResetsAt: undefined,
   };
 }
 

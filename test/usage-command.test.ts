@@ -64,14 +64,14 @@ function usageBody(percent: number, resetsAt?: string | null): Response {
   return new Response(JSON.stringify({ usage: windows }), { status: 200 });
 }
 
-/** Real /alpha/billing/credits payload shape (verified live 2026-11-05). */
+/** Real /alpha/billing/credits payload shape, measured 2026-11-05. */
 function creditsBody(): Response {
   return new Response(JSON.stringify({
-    credits: { monthlyCredits: 62.2914806211, purchasedCredits: 0, freeCredits: 0 },
+    credits: { monthlyCredits: 62.1003565047, purchasedCredits: 0, freeCredits: 0 },
     windowLimits: {
       limited: true,
-      fiveHour: { used: 0.1300584138, cap: 14, exceeded: false, resetAt: 1793914043720 },
-      weekly: { used: 4.0825104096, cap: 35, exceeded: false, resetAt: 1794307589031 },
+      fiveHour: { used: 0.3212, cap: 14, exceeded: false, resetAt: 1793914043720 },
+      weekly: { used: 4.2736, cap: 35, exceeded: false, resetAt: 1794307589031 },
     },
   }), { status: 200 });
 }
@@ -235,8 +235,9 @@ describe('runUsageCommand', () => {
     const out = log.mock.calls.map((c) => String(c[0])).join('\n');
     expect(out).toContain('(commandcode)');
     expect(out).toContain('(opencode-go)');
-    // Credits → used/cap: 0.1301/14 = 0.93% (5h), 4.0825/35 = 11.66% (weekly).
-    expect(out).toContain('5h: 1%  Weekly: 12%  Monthly: 0%');
+    // 0.3212/14 = 2.29% (5h), 4.2736/35 = 12.21% (weekly),
+    // (70 − 62.1003565047)/70 = 11.29% (monthly, derived).
+    expect(out).toContain('5h: 2%  Weekly: 12%  Monthly: 11%');
     expect(out).toContain('25%');
     expect(fetchSpy).toHaveBeenCalledTimes(2);
     const creditsCall = fetchSpy.mock.calls.find(([url]) =>

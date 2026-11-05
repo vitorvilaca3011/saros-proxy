@@ -26,8 +26,14 @@ interface ApiKey {
   consecutiveFailures: number;
   lastUsed: number | null;
   disabledAt: number | null; // C1: timestamp when key was disabled for cooldown
-  /** Worst-window used percent (0-100) reported by the upstream usage API. */
+  /** Monthly used percent (0-100) reported by the upstream usage API. */
   usagePercent: number | null;
+  /**
+   * True when any quota window (5h, weekly or monthly) is at 100%. Weight 0
+   * in rotation: a month with room does not help when the upstream already
+   * rejects the key for a spent shorter window.
+   */
+  exhausted: boolean;
   /**
    * False when the upstream rejected this key for lack of plan
    * (403 EntitlementError / upgrade_required): the account cannot use the
@@ -82,6 +88,7 @@ export interface KeyHealthReport {
   disabledAt: string | null;
   retryAfterMs: number | null;
   lastError: { status: number | null; reason: KeyFailureReason; at: string } | null;
+  /** Monthly used percent (0-100) of this key's provider budget. */
   usagePercent: number | null;
 }
 
@@ -169,6 +176,7 @@ export function createProxyState(
       lastUsed: null,
       disabledAt: null,
       usagePercent: null,
+      exhausted: false,
       entitled: true,
       currentWeight: 0,
       lastError: null,
@@ -253,9 +261,11 @@ function buildBookedLabels(state: ProxyState): Set<string> {
  *
  * Selection strategy (smooth weighted round-robin, nginx-style):
  *  - When usage data is known for the candidates, keys with more remaining
- *    quota are proportionally preferred. E.g. key X at 30% used and key Y at
- *    70% used receive ~70%/30% of requests — exact proportions over a cycle,
- *    not random sampling.
+ *    **monthly** budget are proportionally preferred. E.g. key X at 30% of its
+ *    monthly allowance and key Y at 70% receive ~70%/30% of requests — exact
+ *    proportions over a cycle, not random sampling.
+ *  - A key with any exhausted window weighs 0, so it is not selected while
+ *    another candidate still has room.
  *  - Without usage data (or when every candidate is exhausted), falls back to
  *    plain round-robin ordering.
  */
@@ -285,26 +295,35 @@ function findNextKey(
 
 /**
  * Internal: smooth weighted round-robin over the candidates.
+ *
+ * Weight is the remaining **monthly** budget (`100 - usedPercent`), except
+ * that a key with any exhausted window weighs 0 — the upstream would reject it
+ * even while the month still has room.
+ *
  * Falls back to the first candidate (round-robin order) when usage data is
- * missing for any candidate or when no candidate has remaining capacity.
+ * missing for every candidate or when no candidate has remaining capacity.
  */
 function pickWeighted(state: ProxyState, candidates: ApiKey[]): ApiKey {
-  const known = candidates.filter((k) => k.usagePercent !== null);
-  if (known.length === 0) return candidates[0];
+  const weights: Array<number | null> = candidates.map((k) => {
+    if (k.usagePercent === null) return null;
+    return k.exhausted ? 0 : Math.max(0, 100 - k.usagePercent);
+  });
+  const knownWeights = weights
+    .filter((w): w is number => w !== null)
+    .sort((a, b) => a - b);
+  if (knownWeights.length === 0) return candidates[0];
 
-  let weights = candidates.map((k) => Math.max(0, 100 - (k.usagePercent ?? 0)));
   // Keys missing usage data get the median of the known weights — neutral,
   // so one flaky key no longer disables weighting for the whole pool.
-  const sorted = known.map((k) => 100 - (k.usagePercent ?? 0)).sort((a, b) => a - b);
-  const median = sorted[Math.floor(sorted.length / 2)] ?? 0;
-  weights = weights.map((w, i) => (candidates[i].usagePercent === null ? median : w));
-  const totalWeight = weights.reduce((sum, w) => sum + w, 0);
+  const median = knownWeights[Math.floor(knownWeights.length / 2)] ?? 0;
+  const finalWeights = weights.map((w) => w ?? median);
+  const totalWeight = finalWeights.reduce((sum, w) => sum + w, 0);
   if (totalWeight === 0) return candidates[0];
 
   let best = candidates[0];
   let bestWeight = -Infinity;
   for (let i = 0; i < candidates.length; i++) {
-    candidates[i].currentWeight += weights[i];
+    candidates[i].currentWeight += finalWeights[i];
     if (candidates[i].currentWeight > bestWeight) {
       bestWeight = candidates[i].currentWeight;
       best = candidates[i];
@@ -314,20 +333,29 @@ function pickWeighted(state: ProxyState, candidates: ApiKey[]): ApiKey {
   return best;
 }
 
+/** Usage snapshot applied to one key. */
+export interface KeyUsageMetrics {
+  /** Monthly used percent, 0-100, of the key's own provider budget. */
+  usedPercent: number;
+  /** True when any quota window is at 100%. */
+  exhausted: boolean;
+}
+
 /**
- * Update per-key usage data (tightest-window used percent, 0-100).
- *
- * The value is a percentage of the key's **own provider budget**, not
- * absolute capacity: a mixed pool feeds every provider's number into
- * `pickWeighted`, where only this normalized percent is comparable
- * (opencode-go publishes percentages alone — no counts or caps). 100 means
- * exhausted, so its weight is 0. Keys absent from the map keep their previous
- * value.
+ * Update per-key usage data. `usedPercent` is the **monthly** percentage of
+ * the key's **own provider budget**, not absolute capacity: a mixed pool
+ * feeds every provider's number into `pickWeighted`, where only this
+ * normalized percent is comparable (opencode-go publishes percentages alone —
+ * no counts or caps). `exhausted` means a shorter window already hit its cap,
+ * so the key weighs 0 even when the month has room. Keys absent from the map
+ * keep their previous values.
  */
-export function updateKeyUsage(state: ProxyState, usage: Map<string, number>): void {
+export function updateKeyUsage(state: ProxyState, usage: Map<string, KeyUsageMetrics>): void {
   for (const key of state.keys) {
-    const percent = usage.get(key.label);
-    if (typeof percent === 'number') key.usagePercent = percent;
+    const metrics = usage.get(key.label);
+    if (!metrics) continue;
+    key.usagePercent = metrics.usedPercent;
+    key.exhausted = metrics.exhausted;
   }
 }
 

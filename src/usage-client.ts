@@ -15,29 +15,40 @@
 
 import { logger } from './logger.js';
 import { USAGE_FETCH_TIMEOUT_MS, USAGE_REFRESH_TTL_MS } from './constants.js';
-import { updateKeyUsage, setKeyEntitlement, type ProxyState } from './proxy-logic.js';
+import {
+  updateKeyUsage,
+  setKeyEntitlement,
+  type KeyUsageMetrics,
+  type ProxyState,
+} from './proxy-logic.js';
 import type { ProxyConfig } from './config.js';
 import { getProvider, inferProvider, opencodeGoProvider } from './providers/index.js';
 import type { KeyProvider, ProviderId } from './providers/index.js';
 
 /**
  * Per-key quota usage, normalized as a percentage *of the provider's own
- * budget* — never absolute capacity. `usedPercent` is the worst (tightest)
- * window: 0 = untouched, 100 = exhausted.
+ * budget* — never absolute capacity. `usedPercent` is the **monthly** window:
+ * 0 = untouched, 100 = monthly allowance spent. `exhausted` is true when any
+ * window (5h, weekly or monthly) reached 100%, which takes the key out of
+ * rotation regardless of how much of the month remains — otherwise a key with
+ * 50% monthly and a spent weekly window would keep receiving traffic and
+ * failing upstream.
  *
  * This normalization is the contract mixed-provider pools rely on:
  * `pickWeighted` (`proxy-logic.ts`) compares the numbers from every provider
- * directly, so "30%" must always mean "30% of that provider's budget".
+ * directly, so "30%" must always mean "30% of that provider's monthly budget".
  * Percent is the most saros can honestly compare — opencode-go's
  * `/zen/go/v1/usage` publishes only percentages
  * (`{"usage":{"rolling":{"percent":1},"weekly":{"percent":15},
  * "monthly":{"percent":19}}}`), with no token counts or absolute caps, while
- * CommandCode publishes `used`/`cap` per window and its parser converts them
- * to the same percent scale.
+ * CommandCode publishes `used`/`cap` per window plus the remaining monthly
+ * credits, and its parser converts them to the same percent scale.
  */
 export interface KeyUsage {
-  /** Tightest-window used percent, 0-100, of this provider's own budget. */
+  /** Monthly used percent, 0-100, of this provider's own budget. */
   usedPercent: number;
+  /** True when any window is at 100% — rotation weighs the key 0. */
+  exhausted: boolean;
   rollingPercent: number;
   weeklyPercent: number;
   monthlyPercent: number;
@@ -155,11 +166,14 @@ export function maybeRefreshUsage(state: ProxyState, config: ProxyConfig): void 
           return [k.label, usage] as const;
         }),
       );
-      const percents = new Map<string, number>();
+      const metrics = new Map<string, KeyUsageMetrics>();
       for (const [label, result] of entries) {
         if (!result) continue;
         if (result.usage) {
-          percents.set(label, result.usage.usedPercent);
+          metrics.set(label, {
+            usedPercent: result.usage.usedPercent,
+            exhausted: result.usage.exhausted,
+          });
           // A key that answers the usage API is entitled again.
           setKeyEntitlement(state, label, true);
         } else if (result.noEntitlement) {
@@ -167,9 +181,9 @@ export function maybeRefreshUsage(state: ProxyState, config: ProxyConfig): void 
         }
         // Transient failures leave the previous entitlement untouched.
       }
-      if (percents.size > 0) {
-        updateKeyUsage(state, percents);
-        logger.debug({ keys: [...percents.keys()] }, 'key usage refreshed');
+      if (metrics.size > 0) {
+        updateKeyUsage(state, metrics);
+        logger.debug({ keys: [...metrics.keys()] }, 'key usage refreshed');
       }
     } catch (err) {
       logger.debug({ err }, 'usage refresh failed');
