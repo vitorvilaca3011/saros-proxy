@@ -11,6 +11,7 @@ import {
   type UnavailableKey,
 } from '../src/proxy.js';
 import { opencodeGoProvider } from '../src/providers/opencode-go.js';
+import { commandcodeProvider } from '../src/providers/commandcode.js';
 import type { KeyProvider } from '../src/providers/index.js';
 import { resetModelsFetcherState } from '../src/models-fetcher.js';
 import { getKeyTokenUsage, resetTokenUsage } from '../src/token-usage.js';
@@ -1589,6 +1590,12 @@ describe('createProxyApp — provider mapping & extra headers', () => {
     const fetchMock = vi.spyOn(globalThis, 'fetch').mockImplementation(async () =>
       new Response('{"ok":true}', { status: 200, headers: { 'content-type': 'application/json' } }),
     );
+    // The background catalog warm-up fetches `/provider/v1/models` on this
+    // same client; seed it explicitly so the call list really contains a URL
+    // that a `/provider/v1/` prefix filter would match first. Without this the
+    // catalog never fires here (`modelAffinity` answers directly for these
+    // models) and the route assertion below proves nothing.
+    await commandcodeProvider.fetchCatalog?.();
     const app = createProxyApp(makeConfig({
       keys: [{ label: 'cc', key: 'user_cc-key-0001', provider: 'commandcode' }],
     }));
