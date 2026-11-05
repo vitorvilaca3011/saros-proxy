@@ -25,13 +25,12 @@ describe('opencode-go catalog & affinity', () => {
     null, // non-object entry -> skipped
   ];
 
-  it('parsePercent treats non-numeric percents as 0', () => {
+  it('parsePercent rejects windows without numeric percents', () => {
     const usage = parseOpencodeUsage(
       '{"usage":{"rolling":{"percent":"high"},"weekly":{},"monthly":{}}}',
     );
-    expect(usage?.rollingPercent).toBe(0);
-    expect(usage?.weeklyPercent).toBe(0);
-    expect(usage?.monthlyPercent).toBe(0);
+    // No numeric window at all → not data; the previous state must survive.
+    expect(usage).toBeNull();
   });
 
   it('modelAffinity / modelAffinityByName stay non-committal before the catalog loads', async () => {
@@ -53,12 +52,14 @@ describe('opencode-go catalog & affinity', () => {
   });
 
   it('fetchCatalog returns the raw list and indexes bare names', async () => {
-    vi.stubGlobal(
-      'fetch',
-      vi.fn(async () => new Response(JSON.stringify({ data: CATALOG }), { status: 200 })),
-    );
+    const fetchMock = vi.fn(async () => new Response(JSON.stringify({ data: CATALOG }), { status: 200 }));
+    vi.stubGlobal('fetch', fetchMock);
     const list = await opencodeGoProvider.fetchCatalog();
     expect(list).toHaveLength(7); // edge entries are returned raw by the second fetch
+    // Both the indexing fetch and the raw re-fetch identify as the CLI.
+    for (const call of fetchMock.mock.calls) {
+      expect((call[1] as RequestInit).headers).toMatchObject({ 'User-Agent': 'cli' });
+    }
   });
 
   it('after catalog load, affinity and native ids resolve from the index', () => {

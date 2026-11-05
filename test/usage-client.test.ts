@@ -6,9 +6,9 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import {
   fetchKeyUsage,
   maybeRefreshUsage,
-  parseUsageResponse,
   resetUsageRefreshState,
 } from '../src/usage-client.js';
+import { commandcodeProvider, opencodeGoProvider } from '../src/providers/index.js';
 import { createProxyState, type ProxyState } from '../src/proxy-logic.js';
 import type { ProxyConfig } from '../src/config.js';
 
@@ -17,6 +17,16 @@ const VALID_BODY = JSON.stringify({
     rolling: { status: 'ok', percent: 12, resetsAt: '2026-08-22T19:00:00Z' },
     weekly: { status: 'ok', percent: 44, resetsAt: '2026-08-24T00:00:00Z' },
     monthly: { status: 'ok', percent: 92, resetsAt: '2026-08-27T00:00:00Z' },
+  },
+});
+
+/** Real /alpha/billing/credits payload, measured 2026-11-05. */
+const CREDITS_BODY = JSON.stringify({
+  credits: { monthlyCredits: 62.1003565047, purchasedCredits: 0, freeCredits: 0 },
+  windowLimits: {
+    limited: true,
+    fiveHour: { used: 0.3212, cap: 14, exceeded: false, resetAt: 1793914043720 },
+    weekly: { used: 4.2736, cap: 35, exceeded: false, resetAt: 1794307589031 },
   },
 });
 
@@ -40,37 +50,6 @@ function makeConfig(): ProxyConfig {
   };
 }
 
-describe('parseUsageResponse', () => {
-  it('parses windows and picks the worst one for usedPercent', () => {
-    const usage = parseUsageResponse(VALID_BODY);
-    expect(usage).toEqual({
-      usedPercent: 92,
-      rollingPercent: 12,
-      weeklyPercent: 44,
-      monthlyPercent: 92,
-      rollingResetsAt: '2026-08-22T19:00:00Z',
-      weeklyResetsAt: '2026-08-24T00:00:00Z',
-      monthlyResetsAt: '2026-08-27T00:00:00Z',
-    });
-  });
-
-  it('clamps out-of-range percents', () => {
-    const body = JSON.stringify({
-      usage: { rolling: { percent: 150 }, weekly: { percent: -5 }, monthly: {} },
-    });
-    const usage = parseUsageResponse(body);
-    expect(usage.rollingPercent).toBe(100);
-    expect(usage.weeklyPercent).toBe(0);
-    expect(usage.monthlyPercent).toBe(0);
-    expect(usage.usedPercent).toBe(100);
-  });
-
-  it('throws on invalid JSON and on missing usage object', () => {
-    expect(() => parseUsageResponse('not json')).toThrow();
-    expect(() => parseUsageResponse('{}')).toThrow(/missing "usage"/);
-  });
-});
-
 describe('fetchKeyUsage', () => {
   afterEach(() => vi.restoreAllMocks());
 
@@ -78,6 +57,7 @@ describe('fetchKeyUsage', () => {
     vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response(VALID_BODY, { status: 200 }));
     const result = await fetchKeyUsage('https://example.com', 'sk-test');
     expect(result.usage?.usedPercent).toBe(92);
+    expect(result.usage?.exhausted).toBe(false);
     expect(result.noEntitlement).toBe(false);
   });
 
@@ -126,6 +106,67 @@ describe('fetchKeyUsage', () => {
       Authorization: 'Bearer sk-abc',
     });
   });
+
+  it('sends the provider identity headers to the CommandCode credits endpoint', async () => {
+    const spy = vi
+      .spyOn(globalThis, 'fetch')
+      .mockResolvedValue(new Response(CREDITS_BODY, { status: 200 }));
+
+    const result = await fetchKeyUsage(
+      'https://api.commandcode.ai',
+      'user_abc',
+      commandcodeProvider,
+    );
+
+    expect(String(spy.mock.calls[0][0])).toBe('https://api.commandcode.ai/alpha/billing/credits');
+    const headers = (spy.mock.calls[0][1] as RequestInit).headers as Record<string, string>;
+    // Without the CLI identity Cloudflare answers 403 on this route.
+    expect(headers['User-Agent']).toMatch(/^CommandCodeCLI\/\d+\.\d+\.\d+$/);
+    expect(headers['X-CommandCode-Client']).toBe('cli');
+    expect(headers.Authorization).toBe('Bearer user_abc');
+    expect(headers.Accept).toBe('application/json');
+    expect(result.usage?.weeklyPercent).toBeCloseTo(12.210285714, 6);
+    // Monthly is derived: (2 × 35 − 62.1003565047) / 70.
+    expect(result.usage?.monthlyPercent).toBeCloseTo(11.285204993, 6);
+    expect(result.usage?.usedPercent).toBe(result.usage?.monthlyPercent);
+  });
+
+  it('sends the opencode-go CLI User-Agent so Cloudflare does not reject the probe', async () => {
+    const spy = vi
+      .spyOn(globalThis, 'fetch')
+      .mockResolvedValue(new Response(VALID_BODY, { status: 200 }));
+
+    await fetchKeyUsage('https://opencode.ai', 'oc_sk_test', opencodeGoProvider);
+
+    const headers = (spy.mock.calls[0][1] as RequestInit).headers as Record<string, string>;
+    expect(headers['User-Agent']).toBe('cli');
+  });
+
+  it('skips providers with no usage endpoint without calling fetch', async () => {
+    const noUsage = { ...opencodeGoProvider, usagePath: () => '' };
+    const spy = vi.spyOn(globalThis, 'fetch');
+
+    await expect(fetchKeyUsage('https://example.com', 'sk', noUsage)).resolves.toEqual({
+      usage: null,
+      noEntitlement: false,
+    });
+    expect(spy).not.toHaveBeenCalled();
+  });
+
+  it('treats a throwing provider parser as a failed parse', async () => {
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response('{}', { status: 200 }));
+    const broken = {
+      ...opencodeGoProvider,
+      parseUsageResponse: () => {
+        throw new Error('bad contract');
+      },
+    };
+
+    await expect(fetchKeyUsage('https://example.com', 'sk', broken)).resolves.toEqual({
+      usage: null,
+      noEntitlement: false,
+    });
+  });
 });
 
 describe('maybeRefreshUsage', () => {
@@ -142,12 +183,12 @@ describe('maybeRefreshUsage', () => {
     ]);
   }
 
-  function mockPerKeyFetch(): ReturnType<typeof vi.spyOn> {
+  function mockPerKeyFetch() {
     return vi.spyOn(globalThis, 'fetch').mockImplementation(async (_url, init) => {
       const auth = (init as RequestInit).headers as Record<string, string>;
       const percent = auth.Authorization.includes('sk-a') ? 30 : 70;
       return new Response(
-        JSON.stringify({ usage: { rolling: { percent }, weekly: {}, monthly: {} } }),
+        JSON.stringify({ usage: { rolling: {}, weekly: {}, monthly: { percent } } }),
         { status: 200 },
       );
     });
@@ -163,6 +204,103 @@ describe('maybeRefreshUsage', () => {
 
     expect(state.keys.find((k) => k.label === 'a')?.usagePercent).toBe(30);
     expect(state.keys.find((k) => k.label === 'b')?.usagePercent).toBe(70);
+    expect(state.keys.every((k) => k.exhausted === false)).toBe(true);
+  });
+
+  it('keeps the previous usage when a 200 carries no numeric window', async () => {
+    const state = makeState();
+    const config = makeConfig();
+
+    // Seed: 'a' has a spent weekly window, 'b' a normal month.
+    vi.spyOn(globalThis, 'fetch').mockImplementation(async (_url, init) => {
+      const auth = (init as RequestInit).headers as Record<string, string>;
+      const isA = auth.Authorization.includes('sk-a');
+      return new Response(
+        JSON.stringify({
+          usage: {
+            rolling: { percent: isA ? 100 : 0 },
+            weekly: {},
+            monthly: { percent: isA ? 50 : 10 },
+          },
+        }),
+        { status: 200 },
+      );
+    });
+    maybeRefreshUsage(state, config);
+    await settleMacrotasks();
+    await settleMacrotasks();
+
+    const a = state.keys.find((k) => k.label === 'a')!;
+    expect(a.usagePercent).toBe(50);
+    expect(a.exhausted).toBe(true);
+
+    // Empty usage shape must not reset the key to 0% / non-exhausted.
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response('{"usage":{}}', { status: 200 }));
+    resetUsageRefreshState();
+    maybeRefreshUsage(state, config);
+    await settleMacrotasks();
+    await settleMacrotasks();
+
+    expect(a.usagePercent).toBe(50);
+    expect(a.exhausted).toBe(true);
+  });
+
+  it('keeps the previous monthly percent when a 200 omits only the monthly window', async () => {
+    const state = makeState();
+    const config = makeConfig();
+
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response(
+      JSON.stringify({ usage: { rolling: {}, weekly: {}, monthly: { percent: 70 } } }),
+      { status: 200 },
+    ));
+    maybeRefreshUsage(state, config);
+    await settleMacrotasks();
+    await settleMacrotasks();
+    expect(state.keys.find((k) => k.label === 'a')?.usagePercent).toBe(70);
+
+    // Windows are present, but the monthly metric is missing: the previous
+    // monthly value must survive rather than become 0% (maximum weight).
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response(
+      JSON.stringify({ usage: { rolling: { percent: 10 }, weekly: { percent: 20 }, monthly: {} } }),
+      { status: 200 },
+    ));
+    resetUsageRefreshState();
+    maybeRefreshUsage(state, config);
+    await settleMacrotasks();
+    await settleMacrotasks();
+
+    const a = state.keys.find((k) => k.label === 'a')!;
+    expect(a.usagePercent).toBe(70);
+    expect(a.exhausted).toBe(false);
+  });
+
+  it('propagates a spent window into state even when the month has room', async () => {
+    vi.spyOn(globalThis, 'fetch').mockImplementation(async (_url, init) => {
+      const auth = (init as RequestInit).headers as Record<string, string>;
+      const isA = auth.Authorization.includes('sk-a');
+      return new Response(
+        JSON.stringify({
+          usage: {
+            rolling: { percent: isA ? 100 : 0 },
+            weekly: {},
+            monthly: { percent: isA ? 20 : 10 },
+          },
+        }),
+        { status: 200 },
+      );
+    });
+    const state = makeState();
+
+    maybeRefreshUsage(state, makeConfig());
+    await settleMacrotasks();
+    await settleMacrotasks();
+
+    const a = state.keys.find((k) => k.label === 'a')!;
+    const b = state.keys.find((k) => k.label === 'b')!;
+    expect(a.usagePercent).toBe(20);
+    expect(a.exhausted).toBe(true);
+    expect(b.usagePercent).toBe(10);
+    expect(b.exhausted).toBe(false);
   });
 
   it('deduplicates concurrent calls within the TTL window', async () => {
@@ -187,7 +325,7 @@ describe('maybeRefreshUsage', () => {
     // Seed known-good data
     vi.spyOn(globalThis, 'fetch').mockResolvedValue(
       new Response(
-        JSON.stringify({ usage: { rolling: { percent: 42 }, weekly: {}, monthly: {} } }),
+        JSON.stringify({ usage: { rolling: {}, weekly: {}, monthly: { percent: 42 } } }),
         { status: 200 },
       ),
     );
@@ -221,7 +359,7 @@ describe('maybeRefreshUsage', () => {
         );
       }
       return new Response(
-        JSON.stringify({ usage: { rolling: { percent: 20 }, weekly: {}, monthly: {} } }),
+        JSON.stringify({ usage: { rolling: {}, weekly: {}, monthly: { percent: 20 } } }),
         { status: 200 },
       );
     });
@@ -236,7 +374,7 @@ describe('maybeRefreshUsage', () => {
     // Later the account is fixed → the next refresh puts it back in rotation.
     vi.spyOn(globalThis, 'fetch').mockResolvedValue(
       new Response(
-        JSON.stringify({ usage: { rolling: { percent: 5 }, weekly: {}, monthly: {} } }),
+        JSON.stringify({ usage: { rolling: {}, weekly: {}, monthly: { percent: 5 } } }),
         { status: 200 },
       ),
     );

@@ -57,6 +57,7 @@ describe('fetchModelsFromUpstream', () => {
       'https://example.com/zen/go/v1/models',
       expect.objectContaining({
         method: 'GET',
+        headers: { 'User-Agent': 'cli' },
         signal: expect.any(AbortSignal),
       }),
     );

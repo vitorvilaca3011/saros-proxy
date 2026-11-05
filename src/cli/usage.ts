@@ -71,9 +71,12 @@ function formatTokenTotals(usage: KeyTokenUsage | undefined): string {
 }
 
 function formatWindow(percent: number): string {
-  if (percent >= 90) return chalk.red(`${percent}%`);
-  if (percent >= 70) return chalk.yellow(`${percent}%`);
-  return chalk.green(`${percent}%`);
+  // Provider ratios can be fractional (CommandCode reports used/cap); the
+  // console shows whole percents.
+  const rounded = Math.round(percent);
+  if (rounded >= 90) return chalk.red(`${rounded}%`);
+  if (rounded >= 70) return chalk.yellow(`${rounded}%`);
+  return chalk.green(`${rounded}%`);
 }
 
 function formatResetsAt(resetsAt: string | undefined): string {
@@ -169,12 +172,12 @@ export async function runUsageCommand(): Promise<number> {
     config.keys.map(async ({ label, key, provider }) => {
       const providerId = provider ?? inferProvider({ label, key });
       const p = getProvider(providerId);
-      // Providers without a queryable usage API report 'n/a' instead of an error.
+      // Providers without a usage endpoint report 'n/a' instead of an error.
       if (!p || !p.usagePath()) {
         return { label, provider: providerId, usage: null, noEntitlement: false, noUsageApi: true };
       }
       const base = config.upstreams?.[p.id] ?? (p.id === 'opencode-go' ? config.upstreamBaseUrl : p.baseUrl);
-      const result = await fetchKeyUsage(base, key, p.usagePath());
+      const result = await fetchKeyUsage(base, key, p);
       return {
         label,
         provider: providerId,
@@ -191,8 +194,8 @@ export async function runUsageCommand(): Promise<number> {
     if (noUsageApi) {
       console.log(
         `  ${chalk.yellow('·')} ${label.padEnd(16)}${chalk.dim(` (${provider})`)}`
-        // CommandCode exposes no quota API; token totals recorded from the
-        // upstream's usage chunks are the only consumption signal available.
+        // Reached only for a provider without a usage endpoint; token totals
+        // recorded from usage chunks are then the only consumption signal.
         + chalk.dim(totals ? `  usage: n/a — ${totals}` : '  usage: n/a — provider has no queryable usage API'),
       );
       continue;
@@ -212,7 +215,7 @@ export async function runUsageCommand(): Promise<number> {
     console.log(
       `  ${chalk.green('•')} ${label.padEnd(16)}${chalk.dim(` (${provider})`)} 5h: ${formatWindow(usage.rollingPercent)}`
       + `  Weekly: ${formatWindow(usage.weeklyPercent)}`
-      + `  Monthly: ${formatWindow(usage.monthlyPercent)}`
+      + `  Monthly: ${usage.monthlyAvailable ? formatWindow(usage.monthlyPercent) : chalk.dim('n/a')}`
       + chalk.dim(`  (tightest resets ${earliestReset(usage)})`)
       + (totals ? chalk.dim(`  · ${totals}`) : ''),
     );

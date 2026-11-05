@@ -23,6 +23,44 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the larger of the reported total and the sum. Events of other types that
   carry a business `message.usage` (streamed decision payloads) no longer feed
   the token counters.
+- **opencode-go requests no longer inherit the client's `User-Agent`.** The
+  zen upstream sits behind Cloudflare, which answers known browser signatures
+  with `403 error code: 1010`; every request routed through an opencode-go key
+  died there while the client UA was forwarded verbatim. The provider now
+  sends the CLI identity (`User-Agent: cli`, verified live) on chat requests,
+  smoke tests and usage fetches.
+- **CommandCode per-key usage is queryable again, with a derived monthly
+  metric.** `GET /alpha/billing/credits` (undocumented but live; requires the
+  CLI identity headers) reports the 5-hour and weekly caps plus
+  `credits.monthlyCredits` (what remains of the monthly allowance), so
+  `commandcode.usagePath()` points there and its parser maps `used / cap` to
+  `rollingPercent` / `weeklyPercent` with ISO reset times. The payload has no
+  explicit monthly cap: it is **inferred** as `2 × weekly.cap` (falling back
+  to `5 × fiveHour.cap`), then accepted only when the credits agree with the
+  candidate cap in the same unit (`remaining <= cap` and
+  `cap − remaining >= max(weekly.used, fiveHour.used)`); an inconsistent
+  derivation yields null and keeps the previous state instead of handing the
+  key maximum weight. Monthly consumption is `cap − monthlyCredits`, clamped
+  to 0-100. `fetchKeyUsage` now takes the provider, sends its
+  `extraUpstreamHeaders()` and parses with its `parseUsageResponse()` (the
+  duplicated opencode-go parser in `usage-client.ts` is gone), which restores
+  usage-weighted rotation for CommandCode keys. The console rounds fractional
+  percentages and prints `n/a` when the monthly metric is unavailable; an
+  underivable monthly value is null, so the previous monthly percent is kept
+  instead of being reset to 0% (maximum weight).
+- **Rotation now weighs the monthly window, and a spent window excludes the
+  key.** `KeyUsage.usedPercent` is the monthly percentage of the key's own
+  provider budget, and the new `KeyUsage.exhausted` is true when any window
+  (5h, weekly or monthly) reaches 100%. `pickWeighted` gives an exhausted key
+  weight 0 even when the month still has room — without it, a key at 50% of the
+  month but 100% of the week would keep receiving traffic and failing upstream.
+  Zero-weight keys are skipped (their residual round-robin momentum is
+  cleared), so they cannot win behind an exhausted flag. Tier 1 (unbooked
+  candidates) never hands out an exhausted key: when every unbooked candidate
+  weighs 0 it yields to Tier 2, which can share a healthy booked key. Keys
+  without usage data take the median of the **non-exhausted** weights, or full
+  weight when no known key has room — the zeros of exhausted keys no longer
+  drag the neutral weight down.
 
 ## [0.11.0] - 2026-11-03
 

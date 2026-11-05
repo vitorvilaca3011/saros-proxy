@@ -12,6 +12,15 @@ import {
 } from '../constants.js';
 import type { KeyProvider, KeyUsage, PrefixMatch, SmokeResult } from './types.js';
 
+/**
+ * Identity the zen upstream expects. Cloudflare in front of opencode.ai
+ * rejects browser-like signatures with `403 error code: 1010` (verified live
+ * 2026-11-05: no UA, `Python-urllib/3.14` and `node` all 403; `cli` reaches
+ * the API). Forwarding the client's UA therefore killed every request made
+ * with an opencode-go key, so the provider overrides it.
+ */
+export const OPENCODE_GO_USER_AGENT = 'cli';
+
 /** Bare-name index of the live opencode-go catalog. */
 let catalogCache: { bareNames: Set<string> } | null = null;
 /** Ensures the background refresh fires at most once per process. */
@@ -26,6 +35,7 @@ async function refreshCatalog(baseUrl: string, timeoutMs: number): Promise<boole
   const timer = setTimeout(() => controller.abort(), timeoutMs);
   try {
     const res = await fetch(`${baseUrl.replace(/\/$/, '')}${USAGE_PATH.replace(/\/usage$/, '/models')}`, {
+      headers: { 'User-Agent': OPENCODE_GO_USER_AGENT },
       signal: controller.signal,
     });
     if (!res.ok) return false;
@@ -59,9 +69,10 @@ interface UsageResponse {
   usage?: Partial<Record<'rolling' | 'weekly' | 'monthly', UsageWindow>>;
 }
 
-function parsePercent(window: UsageWindow | undefined): number {
+/** Percent from one window; null when the window carries no numeric percent. */
+function parsePercent(window: UsageWindow | undefined): number | null {
   const percent = window?.percent;
-  if (typeof percent !== 'number' || !Number.isFinite(percent)) return 0;
+  if (typeof percent !== 'number' || !Number.isFinite(percent)) return null;
   return Math.min(100, Math.max(0, percent));
 }
 
@@ -78,11 +89,23 @@ export function parseOpencodeUsage(body: string): KeyUsage | null {
   const rolling = parsePercent(usage.rolling);
   const weekly = parsePercent(usage.weekly);
   const monthly = parsePercent(usage.monthly);
+  // A 200 whose `usage` object has no numeric window is not data: returning
+  // zeros would overwrite the previous percentage and hand the key max weight.
+  if (rolling === null && weekly === null && monthly === null) return null;
+
+  const rollingPct = rolling ?? 0;
+  const weeklyPct = weekly ?? 0;
+  const monthlyPct = monthly ?? 0;
   return {
-    rollingPercent: rolling,
-    weeklyPercent: weekly,
-    monthlyPercent: monthly,
-    usedPercent: Math.max(rolling, weekly, monthly),
+    rollingPercent: rollingPct,
+    weeklyPercent: weeklyPct,
+    monthlyPercent: monthlyPct,
+    // The monthly window is the budget measure; any window at 100% pulls the
+    // key out of rotation before the upstream rejects it. A missing monthly
+    // stays null so the previous percentage is not overwritten with 0%.
+    usedPercent: monthly,
+    exhausted: rollingPct >= 100 || weeklyPct >= 100 || monthlyPct >= 100,
+    monthlyAvailable: monthly !== null,
     rollingResetsAt: typeof usage.rolling?.resetsAt === 'string' ? usage.rolling.resetsAt : undefined,
     weeklyResetsAt: typeof usage.weekly?.resetsAt === 'string' ? usage.weekly.resetsAt : undefined,
     monthlyResetsAt: typeof usage.monthly?.resetsAt === 'string' ? usage.monthly.resetsAt : undefined,
@@ -108,7 +131,7 @@ export const opencodeGoProvider: KeyProvider = {
     const timer = setTimeout(() => controller.abort(), timeoutMs);
     try {
       const res = await fetch(`${this.baseUrl}${USAGE_PATH}`, {
-        headers: { Authorization: `Bearer ${key}` },
+        headers: { Authorization: `Bearer ${key}`, 'User-Agent': OPENCODE_GO_USER_AGENT },
         signal: controller.signal,
       });
       if (res.ok) {
@@ -135,6 +158,11 @@ export const opencodeGoProvider: KeyProvider = {
 
   usagePath(): string {
     return USAGE_PATH;
+  },
+
+  /** Cloudflare rejects forwarded browser UAs; always identify as the CLI. */
+  extraUpstreamHeaders(): Record<string, string> {
+    return { 'User-Agent': OPENCODE_GO_USER_AGENT };
   },
 
   parseUsageResponse(body: string): KeyUsage | null {
@@ -190,7 +218,9 @@ export const opencodeGoProvider: KeyProvider = {
     if (!ok) return null;
     // Re-fetch and return the raw list for catalog consumers (harness sync).
     try {
-      const res = await fetch(`${this.baseUrl.replace(/\/$/, '')}${USAGE_PATH.replace(/\/usage$/, '/models')}`);
+      const res = await fetch(`${this.baseUrl.replace(/\/$/, '')}${USAGE_PATH.replace(/\/usage$/, '/models')}`, {
+        headers: { 'User-Agent': OPENCODE_GO_USER_AGENT },
+      });
       if (!res.ok) return null;
       const body = (await res.json()) as { data?: unknown };
       return Array.isArray(body.data)

@@ -1,9 +1,10 @@
 /**
- * usage-client.ts — Per-key quota usage from the upstream usage API.
+ * usage-client.ts — Per-key quota usage from each provider's usage API.
  *
- * GET <upstream>/zen/go/v1/usage (Bearer = the proxy's own API key) returns:
- *   {"usage":{"rolling":{"status":"ok","percent":12,"resetsAt":"…"},
- *             "weekly":{…},"monthly":{…}}}
+ * Every provider owns its endpoint path, response parser and identity
+ * headers (opencode-go: `/zen/go/v1/usage` behind Cloudflare, which needs the
+ * CLI User-Agent; commandcode: `/alpha/billing/credits`, gated on the same
+ * CLI identity). `fetchKeyUsage` only adds the bearer credential.
  *
  * Refresh strategy: stale-while-revalidate on demand. `maybeRefreshUsage`
  * is called on the request path; when data is older than USAGE_REFRESH_TTL_MS
@@ -13,15 +14,46 @@
  */
 
 import { logger } from './logger.js';
-import { USAGE_FETCH_TIMEOUT_MS, USAGE_PATH, USAGE_REFRESH_TTL_MS } from './constants.js';
-import { updateKeyUsage, setKeyEntitlement, type ProxyState } from './proxy-logic.js';
+import { USAGE_FETCH_TIMEOUT_MS, USAGE_REFRESH_TTL_MS } from './constants.js';
+import {
+  updateKeyUsage,
+  setKeyEntitlement,
+  type KeyUsageMetrics,
+  type ProxyState,
+} from './proxy-logic.js';
 import type { ProxyConfig } from './config.js';
-import { getProvider, inferProvider } from './providers/index.js';
-import type { ProviderId } from './providers/index.js';
+import { getProvider, inferProvider, opencodeGoProvider } from './providers/index.js';
+import type { KeyProvider, ProviderId } from './providers/index.js';
 
+/**
+ * Per-key quota usage, normalized as a percentage *of the provider's own
+ * budget* — never absolute capacity. `usedPercent` is the **monthly** window:
+ * 0 = untouched, 100 = monthly allowance spent. `exhausted` is true when any
+ * window (5h, weekly or monthly) reached 100%, which takes the key out of
+ * rotation regardless of how much of the month remains — otherwise a key with
+ * 50% monthly and a spent weekly window would keep receiving traffic and
+ * failing upstream.
+ *
+ * This normalization is the contract mixed-provider pools rely on:
+ * `pickWeighted` (`proxy-logic.ts`) compares the numbers from every provider
+ * directly, so "30%" must always mean "30% of that provider's monthly budget".
+ * Percent is the most saros can honestly compare — opencode-go's
+ * `/zen/go/v1/usage` publishes only percentages
+ * (`{"usage":{"rolling":{"percent":1},"weekly":{"percent":15},
+ * "monthly":{"percent":19}}}`), with no token counts or absolute caps, while
+ * CommandCode publishes `used`/`cap` per window plus the remaining monthly
+ * credits, and its parser converts them to the same percent scale.
+ */
 export interface KeyUsage {
-  /** Worst-window used percent, 0-100. */
-  usedPercent: number;
+  /**
+   * Monthly used percent, 0-100, of this provider's own budget; null when the
+   * payload has no derivable monthly metric (the previous value must survive).
+   */
+  usedPercent: number | null;
+  /** True when any window is at 100% — rotation weighs the key 0. */
+  exhausted: boolean;
+  /** False when the payload carries no monthly percentage (CLI shows n/a). */
+  monthlyAvailable: boolean;
   rollingPercent: number;
   weeklyPercent: number;
   monthlyPercent: number;
@@ -54,64 +86,32 @@ export function isEntitlementError(status: number, body: string): boolean {
   return status === 403 && /subscription|entitlement|upgrade_required/i.test(body);
 }
 
-interface UsageWindow {
-  status?: string;
-  percent?: unknown;
-  resetsAt?: string;
-}
-
-interface UsageResponse {
-  usage?: Partial<Record<'rolling' | 'weekly' | 'monthly', UsageWindow>>;
-}
-
-function parsePercent(window: UsageWindow | undefined): number {
-  const percent = window?.percent;
-  if (typeof percent !== 'number' || !Number.isFinite(percent)) return 0;
-  return Math.min(100, Math.max(0, percent));
-}
-
-/** Parse a usage API response body into KeyUsage (throws on contract violation). */
-export function parseUsageResponse(body: string): KeyUsage {
-  let parsed: UsageResponse;
-  try {
-    parsed = JSON.parse(body) as UsageResponse;
-  } catch {
-    throw new Error('usage response is not valid JSON');
-  }
-  const usage = parsed?.usage;
-  if (!usage || typeof usage !== 'object') {
-    throw new Error('usage response missing "usage" object');
-  }
-  const rolling = parsePercent(usage.rolling);
-  const weekly = parsePercent(usage.weekly);
-  const monthly = parsePercent(usage.monthly);
-  return {
-    rollingPercent: rolling,
-    weeklyPercent: weekly,
-    monthlyPercent: monthly,
-    usedPercent: Math.max(rolling, weekly, monthly),
-    rollingResetsAt: typeof usage.rolling?.resetsAt === 'string' ? usage.rolling.resetsAt : undefined,
-    weeklyResetsAt: typeof usage.weekly?.resetsAt === 'string' ? usage.weekly.resetsAt : undefined,
-    monthlyResetsAt: typeof usage.monthly?.resetsAt === 'string' ? usage.monthly.resetsAt : undefined,
-  };
-}
-
 /**
- * Fetch current usage for one key. Failures (network, timeout, non-200,
- * contract violation) yield `usage: null` — callers treat that as "no fresh
- * data". A 403 entitlement rejection is reported separately because it is
- * definitive rather than transient.
+ * Fetch current usage for one key from its provider's endpoint. The provider
+ * supplies the path, the identity headers (CommandCode and opencode-go both
+ * reject requests without a CLI User-Agent) and the response parser; this
+ * function only adds the bearer credential and the timeout.
+ *
+ * Failures (network, timeout, non-200, contract violation) yield
+ * `usage: null` — callers treat that as "no fresh data". A 403 entitlement
+ * rejection is reported separately because it is definitive, not transient.
  */
 export async function fetchKeyUsage(
   upstreamBaseUrl: string,
   apiKey: string,
-  usagePath: string = USAGE_PATH,
+  provider: KeyProvider = opencodeGoProvider,
 ): Promise<UsageFetchResult> {
+  const usagePath = provider.usagePath();
+  if (!usagePath) return { usage: null, noEntitlement: false };
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), USAGE_FETCH_TIMEOUT_MS);
   try {
     const response = await fetch(new URL(usagePath, upstreamBaseUrl), {
-      headers: { Authorization: `Bearer ${apiKey}`, Accept: 'application/json' },
+      headers: {
+        ...provider.extraUpstreamHeaders?.(),
+        Authorization: `Bearer ${apiKey}`,
+        Accept: 'application/json',
+      },
       signal: controller.signal,
     });
     // Keep the abort armed through the body read: a stalled body after a 200
@@ -122,7 +122,7 @@ export async function fetchKeyUsage(
       return { usage: null, noEntitlement: isEntitlementError(response.status, body) };
     }
     try {
-      return { usage: parseUsageResponse(body), noEntitlement: false };
+      return { usage: provider.parseUsageResponse(body), noEntitlement: false };
     } catch {
       return { usage: null, noEntitlement: false };
     }
@@ -163,19 +163,22 @@ export function maybeRefreshUsage(state: ProxyState, config: ProxyConfig): void 
       const entries = await Promise.all(
         state.keys.map(async (k) => {
           const provider = getProvider(inferProvider({ label: k.label, key: k.key, provider: k.provider as ProviderId | undefined }));
-          // Providers without a queryable usage API (commandcode) are skipped —
-          // weighted rotation simply treats them as having no fresh data.
+          // Providers without a usage endpoint are skipped — weighted
+          // rotation simply treats them as having no fresh data.
           if (!provider || !provider.usagePath()) return [k.label, null] as const;
           const base = config.upstreams?.[provider.id] ?? (provider.id === 'opencode-go' ? config.upstreamBaseUrl : provider.baseUrl);
-          const usage = await fetchKeyUsage(base, k.key, provider.usagePath());
+          const usage = await fetchKeyUsage(base, k.key, provider);
           return [k.label, usage] as const;
         }),
       );
-      const percents = new Map<string, number>();
+      const metrics = new Map<string, KeyUsageMetrics>();
       for (const [label, result] of entries) {
         if (!result) continue;
         if (result.usage) {
-          percents.set(label, result.usage.usedPercent);
+          metrics.set(label, {
+            usedPercent: result.usage.usedPercent,
+            exhausted: result.usage.exhausted,
+          });
           // A key that answers the usage API is entitled again.
           setKeyEntitlement(state, label, true);
         } else if (result.noEntitlement) {
@@ -183,9 +186,9 @@ export function maybeRefreshUsage(state: ProxyState, config: ProxyConfig): void 
         }
         // Transient failures leave the previous entitlement untouched.
       }
-      if (percents.size > 0) {
-        updateKeyUsage(state, percents);
-        logger.debug({ keys: [...percents.keys()] }, 'key usage refreshed');
+      if (metrics.size > 0) {
+        updateKeyUsage(state, metrics);
+        logger.debug({ keys: [...metrics.keys()] }, 'key usage refreshed');
       }
     } catch (err) {
       logger.debug({ err }, 'usage refresh failed');

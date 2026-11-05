@@ -15,6 +15,7 @@ import {
 import {
   commandcodeProvider,
   commandcodeClientHeaders,
+  parseCommandcodeUsage,
   parsePlanId,
 } from '../src/providers/commandcode.js';
 import { identifyKey, extractKeys, isPlausibleKey, allProviders } from '../src/providers/index.js';
@@ -37,7 +38,10 @@ describe('parseOpencodeUsage', () => {
     expect(usage?.rollingPercent).toBe(12);
     expect(usage?.weeklyPercent).toBe(40);
     expect(usage?.monthlyPercent).toBe(5);
-    expect(usage?.usedPercent).toBe(40);
+    // The rotation metric is the monthly window, not the worst window.
+    expect(usage?.usedPercent).toBe(5);
+    expect(usage?.exhausted).toBe(false);
+    expect(usage?.monthlyAvailable).toBe(true);
     expect(usage?.rollingResetsAt).toBe('2026-08-29T00:00:00Z');
   });
 
@@ -47,10 +51,29 @@ describe('parseOpencodeUsage', () => {
     expect(parseOpencodeUsage('{"usage":"nope"}')).toBeNull();
   });
 
-  it('clamps out-of-range percentages', () => {
+  it('returns null when usage exists but no window carries a number', () => {
+    // A shape-less 200 must not overwrite the last good usage with zeros.
+    expect(parseOpencodeUsage('{"usage":{}}')).toBeNull();
+    expect(parseOpencodeUsage(
+      '{"usage":{"rolling":{},"weekly":{"percent":"high"},"monthly":{}}}',
+    )).toBeNull();
+  });
+
+  it('keeps usable windows when only the monthly percent is missing', () => {
+    const usage = parseOpencodeUsage('{"usage":{"rolling":{"percent":12},"weekly":{"percent":40},"monthly":{}}}');
+    expect(usage).not.toBeNull();
+    expect(usage?.usedPercent).toBeNull();
+    expect(usage?.monthlyAvailable).toBe(false);
+    expect(usage?.exhausted).toBe(false);
+  });
+
+  it('clamps out-of-range percentages and flags an exhausted window', () => {
     const usage = parseOpencodeUsage('{"usage":{"rolling":{"percent":150},"weekly":{"percent":-3},"monthly":{"percent":0}}}');
     expect(usage?.rollingPercent).toBe(100);
     expect(usage?.weeklyPercent).toBe(0);
+    expect(usage?.usedPercent).toBe(0);
+    // The rolling window is at 100% even though the month is untouched.
+    expect(usage?.exhausted).toBe(true);
   });
 });
 
@@ -63,6 +86,132 @@ describe('parsePlanId', () => {
     expect(parsePlanId('nope')).toBeUndefined();
     expect(parsePlanId('{"success":false}')).toBeUndefined();
     expect(parsePlanId('{"data":{}}')).toBeUndefined();
+  });
+});
+
+// Real GET /alpha/billing/credits payload, measured 2026-11-05.
+const CREDITS_BODY = JSON.stringify({
+  credits: { monthlyCredits: 62.1003565047, purchasedCredits: 0, freeCredits: 0 },
+  windowLimits: {
+    limited: true,
+    fiveHour: { used: 0.3212, cap: 14, exceeded: false, resetAt: 1793914043720 },
+    weekly: { used: 4.2736, cap: 35, exceeded: false, resetAt: 1794307589031 },
+  },
+});
+
+describe('parseCommandcodeUsage', () => {
+  it('derives the monthly rotation metric from the live credits payload', () => {
+    const usage = parseCommandcodeUsage(CREDITS_BODY);
+    expect(usage).not.toBeNull();
+    expect(usage?.rollingPercent).toBeCloseTo(2.294285714, 6);
+    expect(usage?.weeklyPercent).toBeCloseTo(12.210285714, 6);
+    // Monthly cap = 2 × weekly.cap = 70; consumed = 70 − remaining credits.
+    expect(usage?.monthlyPercent).toBeCloseTo(11.285204993, 6);
+    expect(usage?.usedPercent).toBe(usage?.monthlyPercent);
+    expect(usage?.exhausted).toBe(false);
+    expect(usage?.monthlyAvailable).toBe(true);
+    expect(usage?.rollingResetsAt).toBe('2026-11-05T21:27:23.720Z');
+    expect(usage?.weeklyResetsAt).toBe('2026-11-10T10:46:29.031Z');
+    expect(usage?.monthlyResetsAt).toBeUndefined();
+  });
+
+  it('falls back to 5 × fiveHour.cap when weekly.cap is absent', () => {
+    const usage = parseCommandcodeUsage(JSON.stringify({
+      credits: { monthlyCredits: 35 },
+      windowLimits: { fiveHour: { used: 7, cap: 14 } },
+    }));
+    // Cap = 5 × 14 = 70; 35 credits remain → 50% consumed.
+    expect(usage?.monthlyPercent).toBeCloseTo(50, 10);
+    expect(usage?.usedPercent).toBeCloseTo(50, 10);
+    expect(usage?.exhausted).toBe(false);
+    expect(usage?.monthlyAvailable).toBe(true);
+  });
+
+  it('falls back to 5 × fiveHour.cap when the weekly-derived cap contradicts the used credits', () => {
+    const usage = parseCommandcodeUsage(JSON.stringify({
+      credits: { monthlyCredits: 68.5 },
+      windowLimits: {
+        fiveHour: { used: 0.5, cap: 20 },
+        weekly: { used: 2, cap: 35 },
+      },
+    }));
+    // 2 × 35 = 70, but consumed (70 − 68.5 = 1.5) < weekly.used (2) — impossible.
+    // 5 × 20 = 100 validates: remaining 68.5 ≤ 100 and consumed 31.5 ≥ 2.
+    expect(usage?.monthlyPercent).toBeCloseTo(31.5, 10);
+    expect(usage?.monthlyAvailable).toBe(true);
+  });
+
+  it('returns null when monthlyCredits is numeric but no derived cap validates', () => {
+    // remaining > cap means the inferred ladder is wrong; never clamp to 0%.
+    expect(parseCommandcodeUsage(JSON.stringify({
+      credits: { monthlyCredits: 100 },
+      windowLimits: { fiveHour: { used: 1, cap: 14 }, weekly: { used: 2, cap: 35 } },
+    }))).toBeNull();
+
+    // Same with a single weekly cap and more remaining credits than the cap.
+    expect(parseCommandcodeUsage(
+      '{"credits":{"monthlyCredits":80},"windowLimits":{"weekly":{"used":0,"cap":35}}}',
+    )).toBeNull();
+  });
+
+  it('leaves the monthly metric at 0 when monthlyCredits is absent but windows exist', () => {
+    const withoutCredits = parseCommandcodeUsage(JSON.stringify({
+      windowLimits: { fiveHour: { used: 7, cap: 14 }, weekly: { used: 7, cap: 35 } },
+    }));
+    expect(withoutCredits).not.toBeNull();
+    expect(withoutCredits?.monthlyPercent).toBe(0);
+    expect(withoutCredits?.usedPercent).toBeNull();
+    expect(withoutCredits?.monthlyAvailable).toBe(false);
+    expect(withoutCredits?.exhausted).toBe(false);
+  });
+
+  it('returns null when neither windows nor a monthly value produce data', () => {
+    // No windowLimits, only credits: no cap to derive anything from.
+    expect(parseCommandcodeUsage(
+      '{"credits":{"monthlyCredits":62.29,"purchasedCredits":0,"freeCredits":0}}',
+    )).toBeNull();
+
+    // Non-numeric remaining value and no usable window.
+    expect(parseCommandcodeUsage(
+      '{"credits":{"monthlyCredits":"62"},"windowLimits":{"weekly":{"cap":35}}}',
+    )).toBeNull();
+
+    // Credits but no caps anywhere.
+    expect(parseCommandcodeUsage('{"credits":{"monthlyCredits":62}}')).toBeNull();
+
+    // Empty object.
+    expect(parseCommandcodeUsage('{}')).toBeNull();
+  });
+
+  it('clamps ratios and flags exhaustion from any window', () => {
+    const usage = parseCommandcodeUsage(JSON.stringify({
+      windowLimits: {
+        fiveHour: { used: 20, cap: 10, resetAt: 'not-a-number' },
+        weekly: { used: 1, cap: 0 },
+      },
+    }));
+    expect(usage?.rollingPercent).toBe(100);
+    expect(usage?.weeklyPercent).toBe(0);
+    expect(usage?.monthlyPercent).toBe(0);
+    expect(usage?.usedPercent).toBeNull();
+    expect(usage?.monthlyAvailable).toBe(false);
+    expect(usage?.exhausted).toBe(true);
+    expect(usage?.rollingResetsAt).toBeUndefined();
+  });
+
+  it('flags exhaustion when the monthly allowance is spent', () => {
+    const usage = parseCommandcodeUsage(
+      '{"credits":{"monthlyCredits":0},"windowLimits":{"weekly":{"used":0,"cap":35}}}',
+    );
+    expect(usage?.monthlyPercent).toBe(100);
+    expect(usage?.usedPercent).toBe(100);
+    expect(usage?.exhausted).toBe(true);
+  });
+
+  it('returns null for non-JSON and non-object bodies', () => {
+    expect(parseCommandcodeUsage('nope')).toBeNull();
+    expect(parseCommandcodeUsage('null')).toBeNull();
+    expect(parseCommandcodeUsage('[]')).toBeNull();
   });
 });
 
@@ -97,6 +246,16 @@ describe('commandcodeClientHeaders', () => {
     expect(h['X-CommandCode-Client']).toBe('cli');
     expect(h['X-CLI-Environment']).toBe('production');
     expect(h.Authorization).toBeUndefined();
+  });
+});
+
+describe('provider identity headers', () => {
+  it('opencode-go overrides the User-Agent with the CLI identity Cloudflare accepts', () => {
+    expect(opencodeGoProvider.extraUpstreamHeaders?.()).toEqual({ 'User-Agent': 'cli' });
+  });
+
+  it('opencode-go usage endpoint is unchanged', () => {
+    expect(opencodeGoProvider.usagePath()).toBe('/zen/go/v1/usage');
   });
 });
 
@@ -248,6 +407,9 @@ describe('smokeTest (mock upstream)', () => {
     const result = await opencodeGoProvider.smokeTest('sk-testkeyabcdefghijklmnop');
     Object.defineProperty(opencodeGoProvider, 'baseUrl', { value: original, configurable: true });
     expect(result.status).toBe('valid');
+    // Cloudflare rejects browser-like signatures, so even the probe must
+    // identify as the CLI.
+    expect(lastHeaders['user-agent']).toBe('cli');
   });
 });
 
