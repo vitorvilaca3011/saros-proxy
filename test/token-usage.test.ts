@@ -86,6 +86,17 @@ describe('parseTokenCounts', () => {
     });
   });
 
+  it('never reports a total below the sum of prompt and completion', () => {
+    // A stream merges counts per field, so a chunk can contribute a stale
+    // total while a later chunk raises completion: trusting the reported
+    // total would book less than the parts.
+    expect(parseTokenCounts({ prompt_tokens: 100, completion_tokens: 20, total_tokens: 105 })).toEqual({
+      promptTokens: 100,
+      completionTokens: 20,
+      totalTokens: 120,
+    });
+  });
+
   it('ignores non-numeric, negative, and fractional values', () => {
     expect(parseTokenCounts({ prompt_tokens: '10', completion_tokens: -4, total_tokens: 12.7 })).toEqual({
       promptTokens: 0,
@@ -153,8 +164,9 @@ describe('token-usage', () => {
       expect(file.keys.alpha.totalTokens).toBe(15);
       expect(typeof file.since).toBe('number');
 
-      // Counters survive an in-memory reset when a file exists.
-      resetTokenUsage();
+      // Counters survive an in-memory reset when the file is kept
+      // (simulated process restart).
+      resetTokenUsage({ keepFile: true });
       expect(getKeyTokenUsage().keys.alpha.totalTokens).toBe(15);
     } finally {
       vi.useRealTimers();
@@ -168,9 +180,9 @@ describe('token-usage', () => {
       await vi.advanceTimersByTimeAsync(10_000);
       const path = getTokenUsagePath();
 
-      // A fresh process restarts (in-memory state reset), records nothing,
-      // and shuts down gracefully — history must survive.
-      resetTokenUsage();
+      // A fresh process restarts (in-memory state reset, file kept),
+      // records nothing, and shuts down gracefully — history must survive.
+      resetTokenUsage({ keepFile: true });
       flushTokenUsage();
       const file = JSON.parse(readFileSync(path, 'utf-8')) as {
         keys: Record<string, { totalTokens: number }>;
@@ -202,6 +214,30 @@ describe('token-usage', () => {
       resetTokenUsage();
       await vi.advanceTimersByTimeAsync(10_000);
       expect(existsSync(getTokenUsagePath())).toBe(false);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('reset removes the persisted file so counters cannot leak between tests', async () => {
+    vi.useFakeTimers();
+    try {
+      recordKeyTokens('alpha', usage(10, 5));
+      await vi.advanceTimersByTimeAsync(10_000);
+      const path = getTokenUsagePath();
+      expect(existsSync(path)).toBe(true);
+
+      resetTokenUsage();
+      expect(existsSync(path)).toBe(false);
+
+      // The next test starts from zero instead of reloading this one's history.
+      recordKeyTokens('alpha', usage(1, 1));
+      expect(getKeyTokenUsage().keys.alpha).toMatchObject({
+        requests: 1,
+        promptTokens: 1,
+        completionTokens: 1,
+        totalTokens: 2,
+      });
     } finally {
       vi.useRealTimers();
     }
@@ -267,7 +303,7 @@ describe('token-usage', () => {
       }),
       'utf-8',
     );
-    resetTokenUsage(); // drop in-memory state so the file is reloaded
+    resetTokenUsage({ keepFile: true }); // keep the hand-written file so it is reloaded
     expect(getKeyTokenUsage()).toEqual({
       since: 1_700_000_000_000,
       keys: {
@@ -284,7 +320,7 @@ describe('token-usage', () => {
     writeFileSync(path, JSON.stringify({
       keys: { alpha: { requests: 1, promptTokens: 2, completionTokens: 3, totalTokens: 5, lastAt: 7 } },
     }), 'utf-8');
-    resetTokenUsage();
+    resetTokenUsage({ keepFile: true });
     expect(getKeyTokenUsage().since).toBe(0);
     flushTokenUsage();
     const stamped = JSON.parse(readFileSync(path, 'utf-8')) as { since: number };
@@ -292,7 +328,7 @@ describe('token-usage', () => {
 
     // `keys` is not an object → nothing loaded, no crash.
     writeFileSync(path, JSON.stringify({ since: 42, keys: 'nope' }), 'utf-8');
-    resetTokenUsage();
+    resetTokenUsage({ keepFile: true });
     expect(getKeyTokenUsage()).toEqual({ since: 42, keys: {} });
   });
 
