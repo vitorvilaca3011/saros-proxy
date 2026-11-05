@@ -1148,7 +1148,7 @@ describe('createProxyApp — streaming pipeline', () => {
         sseStream(
           'event: message_start\ndata: {"type":"message_start","message":{"id":"msg_1","usage":{"input_tokens":25,"output_tokens":1}}}\n\n',
           'event: content_block_delta\ndata: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"hi"}}\n\n',
-          'event: message_delta\ndata: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":15}}\n\n',
+          'event: message_delta\ndata: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"input_tokens":5,"output_tokens":15}}\n\n',
           'event: message_stop\ndata: {"type":"message_stop"}\n\n',
         ),
         { status: 200, headers: { 'content-type': 'text/event-stream' } },
@@ -1164,7 +1164,9 @@ describe('createProxyApp — streaming pipeline', () => {
 
     // Anthropic reports the prompt count once (message_start) and the
     // cumulative output count later (message_delta): a last-one-wins reader
-    // books 0 prompt tokens for every Messages stream.
+    // books 0 prompt tokens for every Messages stream. The delta repeats
+    // input_tokens lower than the start event, so a per-field overwrite would
+    // book 5; the largest cumulative value must win.
     const recorded = Object.values(getKeyTokenUsage().keys);
     expect(recorded).toHaveLength(1);
     expect(recorded[0]).toMatchObject({
@@ -1172,6 +1174,64 @@ describe('createProxyApp — streaming pipeline', () => {
       promptTokens: 25,
       completionTokens: 15,
       totalTokens: 40,
+    });
+  });
+
+  it('ignores message.usage on events that are not message_start', async () => {
+    resetTokenUsage();
+    vi.spyOn(globalThis, 'fetch').mockImplementation(async () =>
+      new Response(
+        sseStream(
+          // A decision stream may carry a business `message` object; only
+          // Anthropic's message_start owns token usage under that key.
+          'data: {"type":"decision","message":{"usage":{"input_tokens":999,"output_tokens":999}}}\n\n',
+          'data: {"type":"decision.completed","usage":{"input_tokens":3,"output_tokens":0,"total_tokens":3}}\n\n',
+        ),
+        { status: 200, headers: { 'content-type': 'text/event-stream' } },
+      ),
+    );
+    const app = createProxyApp(makeConfig());
+    const res = await app.request('/v1/systemone', {
+      method: 'POST',
+      body: JSON.stringify({ model: 'typesafe/jev', state: 'payments failing', questions: {}, stream: true }),
+      headers: { 'content-type': 'application/json' },
+    });
+    await res.text();
+
+    const recorded = Object.values(getKeyTokenUsage().keys);
+    expect(recorded).toHaveLength(1);
+    expect(recorded[0]).toMatchObject({
+      requests: 1,
+      promptTokens: 3,
+      completionTokens: 0,
+      totalTokens: 3,
+    });
+  });
+
+  it('books a total that never undercuts the merged prompt and completion', async () => {
+    resetTokenUsage();
+    vi.spyOn(globalThis, 'fetch').mockImplementation(async () =>
+      new Response(
+        sseStream(
+          // The finish chunk carries the full triple; a later usage-only chunk
+          // raises completion without repeating the total.
+          'data: {"choices":[{"index":0,"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":100,"completion_tokens":5,"total_tokens":105}}\n\n',
+          'data: {"choices":[],"usage":{"completion_tokens":20}}\n\n',
+          'data: [DONE]\n\n',
+        ),
+        { status: 200 },
+      ),
+    );
+    const app = createProxyApp(makeConfig());
+    await (await streamRequest(app)).text();
+
+    const recorded = Object.values(getKeyTokenUsage().keys);
+    expect(recorded).toHaveLength(1);
+    expect(recorded[0]).toMatchObject({
+      requests: 1,
+      promptTokens: 100,
+      completionTokens: 20,
+      totalTokens: 120,
     });
   });
 
@@ -1524,7 +1584,9 @@ describe('createProxyApp — provider mapping & extra headers', () => {
       },
     ],
   ])('relays %s to CommandCode /provider/v1 with the body and ZDR header intact', async (route, payload) => {
-    const fetchMock = vi.spyOn(globalThis, 'fetch').mockResolvedValue(
+    // Fresh Response per call: a shared instance arrives with its body already
+    // consumed if any other path (catalog warm-up, usage probe) fetches first.
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockImplementation(async () =>
       new Response('{"ok":true}', { status: 200, headers: { 'content-type': 'application/json' } }),
     );
     const app = createProxyApp(makeConfig({
@@ -1538,15 +1600,14 @@ describe('createProxyApp — provider mapping & extra headers', () => {
     });
 
     expect(res.status).toBe(200);
-    const call = fetchMock.mock.calls.find(([url]) => String(url).includes('/provider/v1/'));
+    // Match the full route: `/provider/v1/` alone also matches the public
+    // models catalog (`/provider/v1/models`).
+    const expectedUrl = `https://api.commandcode.ai/provider/v1${route.slice('/v1'.length)}`;
+    const call = fetchMock.mock.calls.find(([url]) => String(url) === expectedUrl);
     expect(call).toBeDefined();
-    // The canonical /v1 prefix is remapped per provider; the route tail and
-    // the body survive untouched (no chat-specific rewriting on these routes).
-    expect(String(call?.[0])).toBe(
-      `https://api.commandcode.ai/provider/v1${route.slice('/v1'.length)}`,
-    );
     const init = call?.[1] as RequestInit;
-    expect(JSON.parse(String(init.body))).toEqual(payload);
+    // Byte-identical: no re-serialization, no chat-specific rewriting.
+    expect(String(init.body)).toBe(JSON.stringify(payload));
     // Zero-data-retention opt-in is a client header: the proxy forwards it.
     expect((init.headers as Headers).get('x-cmd-zdr')).toBe('1');
   });

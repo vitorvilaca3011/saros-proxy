@@ -17,6 +17,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   Per-field counts are now merged across the stream (largest cumulative value
   wins), which also keeps the duplicated `usage` chunk that CommandCode sends
   on chat completions booking a single request with the full counts.
+- **Merged stream totals never undercut their parts, and only Anthropic
+  `message_start` owns `message.usage`.** When a later chunk raises
+  prompt/completion without repeating `total_tokens`, the booked total uses
+  the larger of the reported total and the sum. Events of other types that
+  carry a business `message.usage` (streamed decision payloads) no longer feed
+  the token counters.
 
 ## [0.11.0] - 2026-11-03
 

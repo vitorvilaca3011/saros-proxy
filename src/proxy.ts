@@ -1130,11 +1130,15 @@ async function handleStreamingRequest(opts: HandleRequestOptions): Promise<Respo
  * relays: Chat Completions (top-level `usage`), OpenAI Responses
  * (`response.usage` on `response.completed`) and Anthropic Messages
  * (`message.usage` on `message_start`). A reader that only knew the first
- * shape booked zero for the other two.
+ * shape booked zero for the other two. `message` is only consulted on
+ * `message_start`: other event types may carry an unrelated business object
+ * under that key (e.g. streamed decision payloads).
  */
 function extractEventUsage(parsed: Record<string, unknown>): unknown {
   if (parsed.usage) return parsed.usage;
-  for (const container of [parsed.response, parsed.message]) {
+  const containers: unknown[] = [parsed.response];
+  if (parsed.type === 'message_start') containers.push(parsed.message);
+  for (const container of containers) {
     if (!container || typeof container !== 'object' || Array.isArray(container)) continue;
     const nested = (container as Record<string, unknown>).usage;
     if (nested) return nested;

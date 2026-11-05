@@ -12,7 +12,7 @@
  * written behind a debounce so the request path never blocks on I/O.
  */
 
-import { existsSync, readFileSync, writeFileSync, mkdirSync, renameSync } from 'node:fs';
+import { existsSync, readFileSync, writeFileSync, mkdirSync, renameSync, rmSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { TOKEN_USAGE_SAVE_DEBOUNCE_MS } from './constants.js';
 import { getSarosDir } from './config.js';
@@ -88,7 +88,10 @@ export function parseTokenCounts(usage: unknown): TokenCounts | null {
   return {
     promptTokens,
     completionTokens,
-    totalTokens: total || promptTokens + completionTokens,
+    // A stream merges counts per field, so a chunk can contribute a stale
+    // total while a later chunk raises prompt/completion. Never report a
+    // total below the parts the upstream itself reported.
+    totalTokens: Math.max(total, promptTokens + completionTokens),
   };
 }
 
@@ -211,8 +214,13 @@ export function getKeyTokenUsage(): { since: number; keys: Record<string, KeyTok
   return { since, keys: Object.fromEntries(counters) };
 }
 
-/** Test seam: drop in-memory state and any pending debounced write. */
-export function resetTokenUsage(): void {
+/**
+ * Test seam: drop in-memory state and any pending debounced write. By default
+ * the persisted file is removed too, so counters cannot leak between tests
+ * that share a config dir; `keepFile` simulates a process restart that
+ * reloads existing history.
+ */
+export function resetTokenUsage(options: { keepFile?: boolean } = {}): void {
   if (saveTimer !== undefined) {
     clearTimeout(saveTimer);
     saveTimer = undefined;
@@ -220,4 +228,10 @@ export function resetTokenUsage(): void {
   counters.clear();
   since = 0;
   loaded = false;
+  if (options.keepFile) return;
+  try {
+    rmSync(getTokenUsagePath(), { force: true });
+  } catch (err) {
+    logger.debug({ err }, 'failed to remove token usage file');
+  }
 }
