@@ -103,6 +103,19 @@ and weights rotation by **remaining** quota. If key X is 30% used and key Y is
 70% used, 10 requests are distributed 7 → X and 3 → Y — proportional balancing,
 not hard cutoffs, so neither key absorbs the full load when the other runs low.
 
+> **This only applies to providers that publish a quota API, which today means
+> OpenCode Go.** CommandCode exposes none: its Provider API documents
+> `chat/completions`, `responses`, `messages`, `models` and `systemone` and
+> nothing else. `GET /v1/account/usage`, `/provider/v1/usage` and
+> `/alpha/billing/usage` answer `404`, and `/alpha/billing/subscriptions` — the
+> route Saros uses to validate a CommandCode key and read its plan — returns
+> subscription metadata only (`planId`, `status`, billing period, quantity):
+> no percentages, no credit balance. CommandCode keys therefore always fall back
+> to even round-robin, and their only consumption signal is the token counts each
+> response reports, booked per key in `token-usage.json` (see
+> [Token Accounting](#token-accounting)). The example above is about OpenCode Go
+> keys.
+
 - Refreshed in the background every 60s (stale data keeps working).
 - Without usage data, falls back to even round-robin.
 - A key whose account has no plan for its provider (403 `EntitlementError` /
@@ -729,7 +742,7 @@ Two kinds of upstream quota are visible in the provider documentation but are **
 - **Model-level free tiers (CommandCode).** `glyph-cluster:free` is capped at 100 requests/day, `beam:free` has no daily cap, and the `laguna-s-2.1-free` tiers cost no credits. Saros counts tokens per key (`token-usage.json`) and per model, but it does not refuse a request because a *model* reached its daily free quota — the upstream returns the error and the key's circuit breaker decides what happens next.
 - **Plan windows (OpenCode Go).** The Go plan meters each model against `5-hour — 20% of the monthly limit`, `weekly — 50%` and `monthly — 100%`. Those windows belong to the subscription: `/zen/go/v1/usage` reports what was consumed, and Saros surfaces it, but the proxy does not predict window exhaustion or re-route on it.
 
-Both are documented here so the behaviour is not mistaken for a bug. Requests through the alternate OpenAI/Anthropic surfaces (`/v1/responses`, `/v1/messages`) and through the decision endpoint (`/v1/systemone`) are forwarded and counted: streamed usage nested under `response.usage` (Responses), the counts Anthropic splits between `message_start.message.usage` and `message_delta.usage` (Messages), and the `input_tokens`/`output_tokens` shape are booked like any other call.
+Both are documented here so the behaviour is not mistaken for a bug. Requests through the alternate OpenAI/Anthropic surfaces (`/v1/responses`, `/v1/messages`) and through the decision endpoint (`/v1/systemone`) are forwarded and counted: streamed usage nested under `response.usage` (Responses), the counts Anthropic splits between `message_start.message.usage` and `message_delta.usage` (Messages), and the `input_tokens`/`output_tokens` shape are booked like any other call — with one exception: Anthropic **cache** counters (`cache_read_input_tokens`, `cache_creation_input_tokens`) are not counted, so prompt-cached Messages traffic is under-booked on the prompt side.
 
 ---
 
