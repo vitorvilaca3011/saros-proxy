@@ -1139,6 +1139,42 @@ describe('createProxyApp — streaming pipeline', () => {
     });
   });
 
+  it('books usage split across Anthropic message_start and message_delta', async () => {
+    resetTokenUsage();
+    // Fresh Response per call: the usage-refresh probe also calls fetch, and a
+    // shared instance would arrive with its body already consumed.
+    vi.spyOn(globalThis, 'fetch').mockImplementation(async () =>
+      new Response(
+        sseStream(
+          'event: message_start\ndata: {"type":"message_start","message":{"id":"msg_1","usage":{"input_tokens":25,"output_tokens":1}}}\n\n',
+          'event: content_block_delta\ndata: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"hi"}}\n\n',
+          'event: message_delta\ndata: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":15}}\n\n',
+          'event: message_stop\ndata: {"type":"message_stop"}\n\n',
+        ),
+        { status: 200, headers: { 'content-type': 'text/event-stream' } },
+      ),
+    );
+    const app = createProxyApp(makeConfig());
+    const res = await app.request('/v1/messages', {
+      method: 'POST',
+      body: JSON.stringify({ model: 'claude-sonnet-4-6', max_tokens: 64, stream: true, messages: [] }),
+      headers: { 'content-type': 'application/json' },
+    });
+    await res.text();
+
+    // Anthropic reports the prompt count once (message_start) and the
+    // cumulative output count later (message_delta): a last-one-wins reader
+    // books 0 prompt tokens for every Messages stream.
+    const recorded = Object.values(getKeyTokenUsage().keys);
+    expect(recorded).toHaveLength(1);
+    expect(recorded[0]).toMatchObject({
+      requests: 1,
+      promptTokens: 25,
+      completionTokens: 15,
+      totalTokens: 40,
+    });
+  });
+
   it('respects the client decision about streamed usage', async () => {
     const fetchMock = vi.spyOn(globalThis, 'fetch').mockResolvedValue(
       new Response(sseStream('data: {"choices":[{"delta":{"content":"hi"}}]}\n\n'), { status: 200 }),
@@ -1468,6 +1504,51 @@ describe('createProxyApp — provider mapping & extra headers', () => {
     // The @commandcode routing suffix is stripped before upstream.
     const body = JSON.parse(String(init.body)) as { model: string };
     expect(body.model).toBe('claude-opus-5');
+  });
+
+  it.each([
+    [
+      '/v1/responses',
+      { model: 'deepseek/deepseek-v4-flash', input: 'hi', stream: false },
+    ],
+    [
+      '/v1/messages',
+      { model: 'claude-sonnet-4-6', max_tokens: 1024, messages: [{ role: 'user', content: 'hi' }], stream: false },
+    ],
+    [
+      '/v1/systemone',
+      {
+        model: 'typesafe/jev',
+        state: 'payments failing',
+        questions: { is_urgent: { type: 'noul', instructions: 'Is this urgent?' } },
+      },
+    ],
+  ])('relays %s to CommandCode /provider/v1 with the body and ZDR header intact', async (route, payload) => {
+    const fetchMock = vi.spyOn(globalThis, 'fetch').mockResolvedValue(
+      new Response('{"ok":true}', { status: 200, headers: { 'content-type': 'application/json' } }),
+    );
+    const app = createProxyApp(makeConfig({
+      keys: [{ label: 'cc', key: 'user_cc-key-0001', provider: 'commandcode' }],
+    }));
+
+    const res = await app.request(route, {
+      method: 'POST',
+      body: JSON.stringify(payload),
+      headers: { 'content-type': 'application/json', 'x-cmd-zdr': '1' },
+    });
+
+    expect(res.status).toBe(200);
+    const call = fetchMock.mock.calls.find(([url]) => String(url).includes('/provider/v1/'));
+    expect(call).toBeDefined();
+    // The canonical /v1 prefix is remapped per provider; the route tail and
+    // the body survive untouched (no chat-specific rewriting on these routes).
+    expect(String(call?.[0])).toBe(
+      `https://api.commandcode.ai/provider/v1${route.slice('/v1'.length)}`,
+    );
+    const init = call?.[1] as RequestInit;
+    expect(JSON.parse(String(init.body))).toEqual(payload);
+    // Zero-data-retention opt-in is a client header: the proxy forwards it.
+    expect((init.headers as Headers).get('x-cmd-zdr')).toBe('1');
   });
 
   it('never sends a key from another provider when a pin names the provider', async () => {
