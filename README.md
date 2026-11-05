@@ -52,44 +52,47 @@ Manage multiple API keys behind a single endpoint — OpenCode-Go **and** Comman
 
 ## Architecture
 
-```
-┌─────────────────────────────────────────────────────────────┐
-│                     Your App / OpenCode                     │
-│                                                             │
-│   ┌──────────┐   ┌──────────┐   ┌──────────┐                │
-│   │ Request 1│   │ Request 2│   │ Request 3│    ...         │
-│   └────┬─────┘   └────┬─────┘   └────┬─────┘                │
-└────────┼──────────────┼──────────────┼──────────────────────┘
-         │              │              │
-         └──────────────┼──────────────┘
-                        │
-                        ▼
-┌─────────────────────────────────────────────────────────────┐
-│                       Saros (:3000)                         │
-│                                                             │
-│  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐       │
-│  │ Key Selector │─▶│   Circuit    │─▶│   Request   │       │
-│  │ Round-Robin  │  │   Breaker    │  │   Forwarder  │       │
-│  │ + Failover   │  │ Threshold +  │  │ + Timeout +  │       │
-│  │              │  │   Cooldown   │  │     SSE      │       │
-│  └──────────────┘  └──────────────┘  └──────┬───────┘       │
-└─────────────────────────────────────────────┼───────────────┘
-                                              │
-                                  ┌───────────┼───────────┐
-                                  ▼           ▼           ▼
-                           ┌──────────┐ ┌──────────┐ ┌──────────┐
-                           │  Key A   │ │  Key B   │ │  Key C   │
-                           │ sk-abc…  │ │ sk-def…  │ │ user_…   │
-                           └────┬─────┘ └────┬─────┘ └────┬─────┘
-                                │            │            │
-                                └────────────┼────────────┘
-                                             │
-                       ┌─────────────────────┴─────────────────────┐
-                       ▼                                           ▼
-              ┌───────────────────────┐                  ┌──────────────────────────┐
-              │      OpenCode-Go API  │                  │      CommandCode API     │
-              │    https://opencode.ai│                  │ https://api.commandcode.ai│
-              └───────────────────────┘                  └──────────────────────────┘
+```mermaid
+flowchart TB
+    subgraph client["Your App / OpenCode"]
+        direction LR
+        r1["Request 1"]
+        r2["Request 2"]
+        r3["Request 3"]
+        rest["..."]
+    end
+
+    subgraph saros["Saros :3000"]
+        direction LR
+        ks["Key Selector<br/>round-robin + failover"]
+        cb["Circuit Breaker<br/>threshold + cooldown"]
+        fw["Request Forwarder<br/>timeout + SSE"]
+        ks --> cb --> fw
+    end
+
+    subgraph keys["API keys"]
+        direction LR
+        ka["Key A<br/>sk-abc…"]
+        kb["Key B<br/>sk-def…"]
+        kc["Key C<br/>user_…"]
+    end
+
+    oc["OpenCode-Go API<br/>opencode.ai"]
+    cc["CommandCode API<br/>api.commandcode.ai"]
+
+    r1 --> ks
+    r2 --> ks
+    r3 --> ks
+    rest --> ks
+    fw --> ka
+    fw --> kb
+    fw --> kc
+    ka --> oc
+    kb --> oc
+    kc --> oc
+    ka --> cc
+    kb --> cc
+    kc --> cc
 ```
 
 ### How Request Distribution Works
