@@ -45,8 +45,11 @@ import type { KeyProvider, ProviderId } from './providers/index.js';
  * credits, and its parser converts them to the same percent scale.
  */
 export interface KeyUsage {
-  /** Monthly used percent, 0-100, of this provider's own budget. */
-  usedPercent: number;
+  /**
+   * Monthly used percent, 0-100, of this provider's own budget; null when the
+   * payload has no derivable monthly metric (the previous value must survive).
+   */
+  usedPercent: number | null;
   /** True when any window is at 100% — rotation weighs the key 0. */
   exhausted: boolean;
   /** False when the payload carries no monthly percentage (CLI shows n/a). */

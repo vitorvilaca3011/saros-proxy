@@ -245,6 +245,35 @@ describe('maybeRefreshUsage', () => {
     expect(a.exhausted).toBe(true);
   });
 
+  it('keeps the previous monthly percent when a 200 omits only the monthly window', async () => {
+    const state = makeState();
+    const config = makeConfig();
+
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response(
+      JSON.stringify({ usage: { rolling: {}, weekly: {}, monthly: { percent: 70 } } }),
+      { status: 200 },
+    ));
+    maybeRefreshUsage(state, config);
+    await settleMacrotasks();
+    await settleMacrotasks();
+    expect(state.keys.find((k) => k.label === 'a')?.usagePercent).toBe(70);
+
+    // Windows are present, but the monthly metric is missing: the previous
+    // monthly value must survive rather than become 0% (maximum weight).
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response(
+      JSON.stringify({ usage: { rolling: { percent: 10 }, weekly: { percent: 20 }, monthly: {} } }),
+      { status: 200 },
+    ));
+    resetUsageRefreshState();
+    maybeRefreshUsage(state, config);
+    await settleMacrotasks();
+    await settleMacrotasks();
+
+    const a = state.keys.find((k) => k.label === 'a')!;
+    expect(a.usagePercent).toBe(70);
+    expect(a.exhausted).toBe(false);
+  });
+
   it('propagates a spent window into state even when the month has room', async () => {
     vi.spyOn(globalThis, 'fetch').mockImplementation(async (_url, init) => {
       const auth = (init as RequestInit).headers as Record<string, string>;

@@ -122,7 +122,7 @@ dashboard): monthly cap = 2 × `weekly.cap`, falling back to 5 ×
 accepted when the credits agree with it — `credits.monthlyCredits <= cap` and
 `cap − monthlyCredits >= max(weekly.used, fiveHour.used)`; otherwise the
 fallback is tried and, if it also disagrees, the response is treated as
-unusable (the previous usage state is kept rather than brands a broken
+unusable (the previous usage state is kept rather than branding a broken
 derivation as 0% usage). A payload without `monthlyCredits` reports the
 monthly metric as unavailable (`n/a` in `saros-proxy usage`). Both parsers
 emit the same 0-100 percent scale, so a mixed pool compares like with like.
@@ -137,7 +137,10 @@ Two consequences worth knowing:
   no caps — so "remaining capacity" in tokens or dollars cannot be derived.
 
 - Refreshed in the background every 60s (stale data keeps working).
-- Without usage data, falls back to even round-robin.
+- Keys without usage data take the **median of the other keys' non-exhausted
+  weights**, not plain round-robin. Round-robin is only the fallback when no
+  key has usage data at all (or when every key is exhausted and a request must
+  share one).
 - A key whose account has no plan for its provider (403 `EntitlementError` /
   `upgrade_required` from the usage endpoint) is dropped from rotation without
   tripping the circuit breaker, and returns as soon as a later refresh sees it

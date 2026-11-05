@@ -101,8 +101,9 @@ export function parseOpencodeUsage(body: string): KeyUsage | null {
     weeklyPercent: weeklyPct,
     monthlyPercent: monthlyPct,
     // The monthly window is the budget measure; any window at 100% pulls the
-    // key out of rotation before the upstream rejects it.
-    usedPercent: monthlyPct,
+    // key out of rotation before the upstream rejects it. A missing monthly
+    // stays null so the previous percentage is not overwritten with 0%.
+    usedPercent: monthly,
     exhausted: rollingPct >= 100 || weeklyPct >= 100 || monthlyPct >= 100,
     monthlyAvailable: monthly !== null,
     rollingResetsAt: typeof usage.rolling?.resetsAt === 'string' ? usage.rolling.resetsAt : undefined,

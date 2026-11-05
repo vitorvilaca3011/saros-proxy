@@ -62,7 +62,7 @@ describe('parseOpencodeUsage', () => {
   it('keeps usable windows when only the monthly percent is missing', () => {
     const usage = parseOpencodeUsage('{"usage":{"rolling":{"percent":12},"weekly":{"percent":40},"monthly":{}}}');
     expect(usage).not.toBeNull();
-    expect(usage?.usedPercent).toBe(0);
+    expect(usage?.usedPercent).toBeNull();
     expect(usage?.monthlyAvailable).toBe(false);
     expect(usage?.exhausted).toBe(false);
   });
@@ -160,7 +160,7 @@ describe('parseCommandcodeUsage', () => {
     }));
     expect(withoutCredits).not.toBeNull();
     expect(withoutCredits?.monthlyPercent).toBe(0);
-    expect(withoutCredits?.usedPercent).toBe(0);
+    expect(withoutCredits?.usedPercent).toBeNull();
     expect(withoutCredits?.monthlyAvailable).toBe(false);
     expect(withoutCredits?.exhausted).toBe(false);
   });
@@ -193,7 +193,7 @@ describe('parseCommandcodeUsage', () => {
     expect(usage?.rollingPercent).toBe(100);
     expect(usage?.weeklyPercent).toBe(0);
     expect(usage?.monthlyPercent).toBe(0);
-    expect(usage?.usedPercent).toBe(0);
+    expect(usage?.usedPercent).toBeNull();
     expect(usage?.monthlyAvailable).toBe(false);
     expect(usage?.exhausted).toBe(true);
     expect(usage?.rollingResetsAt).toBeUndefined();

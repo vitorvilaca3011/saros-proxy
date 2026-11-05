@@ -199,7 +199,7 @@ export function parseCommandcodeUsage(body: string): KeyUsage | null {
     rollingPercent: rollingPct,
     weeklyPercent: weeklyPct,
     monthlyPercent: monthlyPct,
-    usedPercent: monthlyPct,
+    usedPercent: monthly,
     exhausted: rollingPct >= 100 || weeklyPct >= 100 || monthlyPct >= 100,
     monthlyAvailable: monthly !== null,
     rollingResetsAt: resetIso(limits.fiveHour?.resetAt),

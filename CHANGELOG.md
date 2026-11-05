@@ -45,7 +45,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `extraUpstreamHeaders()` and parses with its `parseUsageResponse()` (the
   duplicated opencode-go parser in `usage-client.ts` is gone), which restores
   usage-weighted rotation for CommandCode keys. The console rounds fractional
-  percentages and prints `n/a` when the monthly metric is unavailable.
+  percentages and prints `n/a` when the monthly metric is unavailable; an
+  underivable monthly value is null, so the previous monthly percent is kept
+  instead of being reset to 0% (maximum weight).
 - **Rotation now weighs the monthly window, and a spent window excludes the
   key.** `KeyUsage.usedPercent` is the monthly percentage of the key's own
   provider budget, and the new `KeyUsage.exhausted` is true when any window
@@ -53,10 +55,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   weight 0 even when the month still has room — without it, a key at 50% of the
   month but 100% of the week would keep receiving traffic and failing upstream.
   Zero-weight keys are skipped (their residual round-robin momentum is
-  cleared), so they cannot win behind an exhausted flag. Keys without usage
-  data take the median of the **non-exhausted** weights, or full weight when
-  no known key has room — the zeros of exhausted keys no longer drag the
-  neutral weight down.
+  cleared), so they cannot win behind an exhausted flag. Tier 1 (unbooked
+  candidates) never hands out an exhausted key: when every unbooked candidate
+  weighs 0 it yields to Tier 2, which can share a healthy booked key. Keys
+  without usage data take the median of the **non-exhausted** weights, or full
+  weight when no known key has room — the zeros of exhausted keys no longer
+  drag the neutral weight down.
 
 ## [0.11.0] - 2026-11-03
 

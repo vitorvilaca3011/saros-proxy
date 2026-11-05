@@ -266,13 +266,16 @@ function buildBookedLabels(state: ProxyState): Set<string> {
  *    proportions over a cycle, not random sampling.
  *  - A key with any exhausted window weighs 0, so it is not selected while
  *    another candidate still has room.
- *  - Without usage data (or when every candidate is exhausted), falls back to
- *    plain round-robin ordering.
+ *  - Keys without usage data take the median of the other candidates'
+ *    non-exhausted weights (not plain round-robin). Round-robin only applies
+ *    when no candidate has usage data at all; with `allowExhausted` (Tier 2+)
+ *    it is also the last resort when every candidate is exhausted.
  */
 function findNextKey(
   state: ProxyState,
   excludeLabels: Set<string>,
   providerFilter?: (provider: string) => boolean,
+  allowExhausted = true,
 ): KeySnapshot | null {
   const n = state.keys.length;
   if (n === 0) return null;
@@ -287,7 +290,8 @@ function findNextKey(
   }
   if (candidates.length === 0) return null;
 
-  const picked = pickWeighted(state, candidates);
+  const picked = pickWeighted(state, candidates, allowExhausted);
+  if (!picked) return null;
   state.currentIndex = (state.keys.indexOf(picked) + 1) % n;
   picked.lastUsed = Date.now();
   return toSnapshot(picked);
@@ -308,9 +312,16 @@ function findNextKey(
  * so a key that just became exhausted cannot win on leftover momentum.
  *
  * Falls back to the first candidate (round-robin order) when no candidate has
- * usage data at all or when every candidate is out of capacity.
+ * usage data at all, or — only when `allowExhausted` — when every candidate is
+ * out of capacity. Tier 1 passes `false`, so a zero-weight pool yields null
+ * and the next tier can share a healthy key instead of serving an exhausted
+ * one.
  */
-function pickWeighted(state: ProxyState, candidates: ApiKey[]): ApiKey {
+function pickWeighted(
+  state: ProxyState,
+  candidates: ApiKey[],
+  allowExhausted: boolean,
+): ApiKey | null {
   const known = candidates.map((k) => {
     if (k.usagePercent === null) return null;
     return k.exhausted ? 0 : Math.max(0, 100 - k.usagePercent);
@@ -332,7 +343,7 @@ function pickWeighted(state: ProxyState, candidates: ApiKey[]): ApiKey {
     // Nothing has room: keep the round-robin fallback momentum-free so a key
     // that frees up later does not start with stale weight.
     for (const key of candidates) key.currentWeight = 0;
-    return candidates[0];
+    return allowExhausted ? candidates[0] : null;
   }
 
   let best: ApiKey | null = null;
@@ -355,8 +366,11 @@ function pickWeighted(state: ProxyState, candidates: ApiKey[]): ApiKey {
 
 /** Usage snapshot applied to one key. */
 export interface KeyUsageMetrics {
-  /** Monthly used percent, 0-100, of the key's own provider budget. */
-  usedPercent: number;
+  /**
+   * Monthly used percent, 0-100, of the key's own provider budget; null when
+   * the payload had no derivable monthly value and the previous one must stay.
+   */
+  usedPercent: number | null;
   /** True when any quota window is at 100%. */
   exhausted: boolean;
 }
@@ -367,14 +381,17 @@ export interface KeyUsageMetrics {
  * feeds every provider's number into `pickWeighted`, where only this
  * normalized percent is comparable (opencode-go publishes percentages alone —
  * no counts or caps). `exhausted` means a shorter window already hit its cap,
- * so the key weighs 0 even when the month has room. Keys absent from the map
- * keep their previous values.
+ * so the key weighs 0 even when the month has room. A null `usedPercent` means
+ * the payload had no derivable monthly value and the previous percentage is
+ * kept. Keys absent from the map keep their previous values.
  */
 export function updateKeyUsage(state: ProxyState, usage: Map<string, KeyUsageMetrics>): void {
   for (const key of state.keys) {
     const metrics = usage.get(key.label);
     if (!metrics) continue;
-    key.usagePercent = metrics.usedPercent;
+    // A null monthly metric is "no data", not 0%: keep the last known value
+    // so an underivable payload can never turn into maximum weight.
+    if (metrics.usedPercent !== null) key.usagePercent = metrics.usedPercent;
     key.exhausted = metrics.exhausted;
   }
 }
@@ -481,11 +498,12 @@ export function selectKeyForRequest(
     excludeLabels.add(label);
   }
 
-  let snapshot = findNextKey(state, excludeLabels, providerFilter);
+  let snapshot = findNextKey(state, excludeLabels, providerFilter, false);
 
   // Tier 2: all healthy preferred keys are booked — share one via
   // round-robin. Better to share a key than return 503 when concurrent
-  // requests outnumber the key pool.
+  // requests outnumber the key pool. This tier may fall back to an exhausted
+  // key when no healthy one exists at all.
   if (!snapshot) {
     snapshot = findNextKey(state, new Set(ctx.triedKeys), providerFilter);
   }
@@ -529,11 +547,12 @@ export function failoverRequest(
     excludeLabels.add(label);
   }
 
-  let snapshot = findNextKey(state, excludeLabels, filter);
+  let snapshot = findNextKey(state, excludeLabels, filter, false);
 
   // Tier 2: all remaining healthy preferred keys are booked — share one.
   // Still respects per-request triedKeys (don't re-use a key this
-  // request already failed on).
+  // request already failed on). May fall back to an exhausted key only when
+  // no healthy candidate exists.
   if (!snapshot) {
     snapshot = findNextKey(state, new Set(ctx.triedKeys), filter);
   }

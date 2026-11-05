@@ -1090,6 +1090,44 @@ describe('weighted selection with exhausted keys and missing usage data', () => 
     expect(countSelections(state, 10)).toEqual({ x: 10, y: 0 });
     expect(y.currentWeight).toBe(0);
   });
+
+  it('defers an exhausted key to Tier 2 when the healthy key is booked', () => {
+    const state = pool(['H', 'E']);
+    updateKeyUsage(state, new Map([
+      ['H', { usedPercent: 10, exhausted: false }],
+      ['E', { usedPercent: 50, exhausted: true }],
+    ]));
+
+    expect(selectKeyForRequest(state, 'r1')?.label).toBe('H');
+    // r1 never completed, so H is booked. Tier 1 must not hand out E just
+    // because it is the only unbooked candidate.
+    expect(selectKeyForRequest(state, 'r2')?.label).toBe('H');
+  });
+
+  it('failover does not hand out an exhausted key when a booked key is healthy', () => {
+    const state = pool(['H', 'G', 'E']);
+    updateKeyUsage(state, new Map([
+      ['H', { usedPercent: 10, exhausted: false }],
+      ['G', { usedPercent: 10, exhausted: false }],
+      ['E', { usedPercent: 50, exhausted: true }],
+    ]));
+
+    expect(selectKeyForRequest(state, 'r1')?.label).toBe('H');
+    expect(selectKeyForRequest(state, 'r2')?.label).toBe('G');
+    // H failed on r1 and G is booked by r2, so Tier 1 sees only E.
+    expect(failoverRequest(state, 'r1')?.label).toBe('G');
+  });
+
+  it('keeps the previous monthly percent when a snapshot has no monthly metric', () => {
+    const state = pool(['x']);
+    updateKeyUsage(state, new Map([['x', { usedPercent: 80, exhausted: false }]]));
+
+    updateKeyUsage(state, new Map([['x', { usedPercent: null, exhausted: true }]]));
+
+    const x = state.keys[0];
+    expect(x.usagePercent).toBe(80);
+    expect(x.exhausted).toBe(true);
+  });
 });
 
 describe('setKeyEntitlement (no plan for the provider)', () => {

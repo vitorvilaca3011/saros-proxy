@@ -146,7 +146,8 @@ export type ModelAffinity = 'yes' | 'no' | 'maybe';
  * `exhausted` means any window is at 100% and the key must not serve traffic.
  */
 export interface KeyUsage {
-  usedPercent: number;
+  /** Monthly used percent, or null when it cannot be derived. */
+  usedPercent: number | null;
   exhausted: boolean;
   /** False when the payload carries no monthly percentage (CLI shows n/a). */
   monthlyAvailable: boolean;
