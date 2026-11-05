@@ -215,7 +215,7 @@ export async function runUsageCommand(): Promise<number> {
     console.log(
       `  ${chalk.green('•')} ${label.padEnd(16)}${chalk.dim(` (${provider})`)} 5h: ${formatWindow(usage.rollingPercent)}`
       + `  Weekly: ${formatWindow(usage.weeklyPercent)}`
-      + `  Monthly: ${formatWindow(usage.monthlyPercent)}`
+      + `  Monthly: ${usage.monthlyAvailable ? formatWindow(usage.monthlyPercent) : chalk.dim('n/a')}`
       + chalk.dim(`  (tightest resets ${earliestReset(usage)})`)
       + (totals ? chalk.dim(`  · ${totals}`) : ''),
     );

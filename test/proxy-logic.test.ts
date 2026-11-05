@@ -1034,6 +1034,64 @@ describe('weighted selection fed by the provider usage parsers', () => {
   });
 });
 
+describe('weighted selection with exhausted keys and missing usage data', () => {
+  function pool(labels: string[]): ProxyState {
+    return createProxyState(labels.map((label) => ({ label, key: `sk-${label}` })));
+  }
+
+  it('never routes to an exhausted key beside a key without usage data (2-key pool)', () => {
+    const state = pool(['exh', 'new']);
+    updateKeyUsage(state, new Map([
+      ['exh', { usedPercent: 50, exhausted: true }],
+    ]));
+
+    expect(countSelections(state, 10)).toEqual({ exh: 0, new: 10 });
+  });
+
+  it('never routes to two exhausted keys beside a key without usage data (3-key pool)', () => {
+    const state = pool(['exh1', 'exh2', 'new']);
+    updateKeyUsage(state, new Map([
+      ['exh1', { usedPercent: 90, exhausted: true }],
+      ['exh2', { usedPercent: 10, exhausted: true }],
+    ]));
+
+    expect(countSelections(state, 10)).toEqual({ exh1: 0, exh2: 0, new: 10 });
+  });
+
+  it('does not let exhausted zeros drag the neutral weight to zero', () => {
+    const state = pool(['exh1', 'exh2', 'near', 'new']);
+    updateKeyUsage(state, new Map([
+      ['exh1', { usedPercent: 100, exhausted: true }],
+      ['exh2', { usedPercent: 100, exhausted: true }],
+      ['near', { usedPercent: 95, exhausted: false }],
+    ]));
+
+    // Without the fix the median of [0, 0, 5] was 0 and 'new' starved.
+    expect(countSelections(state, 10)).toEqual({ exh1: 0, exh2: 0, near: 5, new: 5 });
+  });
+
+  it('clears residual weight when a key becomes exhausted', () => {
+    const state = pool(['x', 'y']);
+    updateKeyUsage(state, new Map([
+      ['x', { usedPercent: 50, exhausted: false }],
+      ['y', { usedPercent: 50, exhausted: false }],
+    ]));
+
+    // Equal weights: x wins the first pick, leaving y with +50 momentum.
+    const first = selectKeyForRequest(state, 'warmup')!;
+    completeRequest(state, 'warmup', true);
+    expect(first.label).toBe('x');
+    const y = state.keys.find((k) => k.label === 'y')!;
+    expect(y.currentWeight).toBeGreaterThan(0);
+
+    updateKeyUsage(state, new Map([
+      ['y', { usedPercent: 50, exhausted: true }],
+    ]));
+    expect(countSelections(state, 10)).toEqual({ x: 10, y: 0 });
+    expect(y.currentWeight).toBe(0);
+  });
+});
+
 describe('setKeyEntitlement (no plan for the provider)', () => {
   it('keeps an unentitled key out of rotation without tripping the breaker', () => {
     const state = createProxyState(

@@ -35,6 +35,7 @@ async function refreshCatalog(baseUrl: string, timeoutMs: number): Promise<boole
   const timer = setTimeout(() => controller.abort(), timeoutMs);
   try {
     const res = await fetch(`${baseUrl.replace(/\/$/, '')}${USAGE_PATH.replace(/\/usage$/, '/models')}`, {
+      headers: { 'User-Agent': OPENCODE_GO_USER_AGENT },
       signal: controller.signal,
     });
     if (!res.ok) return false;
@@ -68,9 +69,10 @@ interface UsageResponse {
   usage?: Partial<Record<'rolling' | 'weekly' | 'monthly', UsageWindow>>;
 }
 
-function parsePercent(window: UsageWindow | undefined): number {
+/** Percent from one window; null when the window carries no numeric percent. */
+function parsePercent(window: UsageWindow | undefined): number | null {
   const percent = window?.percent;
-  if (typeof percent !== 'number' || !Number.isFinite(percent)) return 0;
+  if (typeof percent !== 'number' || !Number.isFinite(percent)) return null;
   return Math.min(100, Math.max(0, percent));
 }
 
@@ -87,14 +89,22 @@ export function parseOpencodeUsage(body: string): KeyUsage | null {
   const rolling = parsePercent(usage.rolling);
   const weekly = parsePercent(usage.weekly);
   const monthly = parsePercent(usage.monthly);
+  // A 200 whose `usage` object has no numeric window is not data: returning
+  // zeros would overwrite the previous percentage and hand the key max weight.
+  if (rolling === null && weekly === null && monthly === null) return null;
+
+  const rollingPct = rolling ?? 0;
+  const weeklyPct = weekly ?? 0;
+  const monthlyPct = monthly ?? 0;
   return {
-    rollingPercent: rolling,
-    weeklyPercent: weekly,
-    monthlyPercent: monthly,
+    rollingPercent: rollingPct,
+    weeklyPercent: weeklyPct,
+    monthlyPercent: monthlyPct,
     // The monthly window is the budget measure; any window at 100% pulls the
     // key out of rotation before the upstream rejects it.
-    usedPercent: monthly,
-    exhausted: rolling >= 100 || weekly >= 100 || monthly >= 100,
+    usedPercent: monthlyPct,
+    exhausted: rollingPct >= 100 || weeklyPct >= 100 || monthlyPct >= 100,
+    monthlyAvailable: monthly !== null,
     rollingResetsAt: typeof usage.rolling?.resetsAt === 'string' ? usage.rolling.resetsAt : undefined,
     weeklyResetsAt: typeof usage.weekly?.resetsAt === 'string' ? usage.weekly.resetsAt : undefined,
     monthlyResetsAt: typeof usage.monthly?.resetsAt === 'string' ? usage.monthly.resetsAt : undefined,
@@ -207,7 +217,9 @@ export const opencodeGoProvider: KeyProvider = {
     if (!ok) return null;
     // Re-fetch and return the raw list for catalog consumers (harness sync).
     try {
-      const res = await fetch(`${this.baseUrl.replace(/\/$/, '')}${USAGE_PATH.replace(/\/usage$/, '/models')}`);
+      const res = await fetch(`${this.baseUrl.replace(/\/$/, '')}${USAGE_PATH.replace(/\/usage$/, '/models')}`, {
+        headers: { 'User-Agent': OPENCODE_GO_USER_AGENT },
+      });
       if (!res.ok) return null;
       const body = (await res.json()) as { data?: unknown };
       return Array.isArray(body.data)

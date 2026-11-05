@@ -248,6 +248,24 @@ describe('runUsageCommand', () => {
     });
   });
 
+  it('renders Monthly as n/a when the credits payload has no monthly value', async () => {
+    mockConfigRef.config = makeConfig([
+      { label: 'cc', key: 'user_cc-key-abcdefghijklmnop', provider: 'commandcode' },
+    ]);
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response(JSON.stringify({
+      windowLimits: {
+        fiveHour: { used: 7, cap: 14 },
+        weekly: { used: 7, cap: 35 },
+      },
+    }), { status: 200 }));
+    const log = vi.spyOn(console, 'log').mockImplementation(() => {});
+
+    const code = await runUsageCommand();
+    expect(code).toBe(0);
+    const out = log.mock.calls.map((c) => String(c[0])).join('\n');
+    expect(out).toContain('5h: 50%  Weekly: 20%  Monthly: n/a');
+  });
+
   it('reports n/a for an unknown provider id', async () => {
     mockConfigRef.config = makeConfig([
       { label: 'ghost', key: 'sk-ghost', provider: 'unknown' as never },

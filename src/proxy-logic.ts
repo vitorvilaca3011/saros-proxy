@@ -300,35 +300,55 @@ function findNextKey(
  * that a key with any exhausted window weighs 0 — the upstream would reject it
  * even while the month still has room.
  *
- * Falls back to the first candidate (round-robin order) when usage data is
- * missing for every candidate or when no candidate has remaining capacity.
+ * Keys without usage data get the median of the *non-exhausted* known weights.
+ * Including the zeros of exhausted keys here would silently drag the neutral
+ * weight to 0 (and starve the unknown keys); when no known key has room they
+ * get a positive weight instead, so an exhausted key is never preferred.
+ * Keys with weight 0 are skipped and their residual `currentWeight` cleared,
+ * so a key that just became exhausted cannot win on leftover momentum.
+ *
+ * Falls back to the first candidate (round-robin order) when no candidate has
+ * usage data at all or when every candidate is out of capacity.
  */
 function pickWeighted(state: ProxyState, candidates: ApiKey[]): ApiKey {
-  const weights: Array<number | null> = candidates.map((k) => {
+  const known = candidates.map((k) => {
     if (k.usagePercent === null) return null;
     return k.exhausted ? 0 : Math.max(0, 100 - k.usagePercent);
   });
-  const knownWeights = weights
-    .filter((w): w is number => w !== null)
+  if (known.every((w) => w === null)) return candidates[0];
+
+  const roomWeights = candidates
+    .map((k, i) => (known[i] !== null && !k.exhausted ? known[i] : null))
+    .filter((w): w is number => w !== null && w > 0)
     .sort((a, b) => a - b);
-  if (knownWeights.length === 0) return candidates[0];
-
-  // Keys missing usage data get the median of the known weights — neutral,
-  // so one flaky key no longer disables weighting for the whole pool.
-  const median = knownWeights[Math.floor(knownWeights.length / 2)] ?? 0;
-  const finalWeights = weights.map((w) => w ?? median);
+  // No known key has room: unknown keys must still be tried, so give them a
+  // full weight instead of the zero median.
+  const neutralWeight = roomWeights.length > 0
+    ? roomWeights[Math.floor(roomWeights.length / 2)]!
+    : 100;
+  const finalWeights = known.map((w) => w ?? neutralWeight);
   const totalWeight = finalWeights.reduce((sum, w) => sum + w, 0);
-  if (totalWeight === 0) return candidates[0];
+  if (totalWeight === 0) {
+    // Nothing has room: keep the round-robin fallback momentum-free so a key
+    // that frees up later does not start with stale weight.
+    for (const key of candidates) key.currentWeight = 0;
+    return candidates[0];
+  }
 
-  let best = candidates[0];
+  let best: ApiKey | null = null;
   let bestWeight = -Infinity;
   for (let i = 0; i < candidates.length; i++) {
+    if (finalWeights[i] === 0) {
+      candidates[i].currentWeight = 0;
+      continue;
+    }
     candidates[i].currentWeight += finalWeights[i];
     if (candidates[i].currentWeight > bestWeight) {
       bestWeight = candidates[i].currentWeight;
       best = candidates[i];
     }
   }
+  if (best === null) return candidates[0];
   best.currentWeight -= totalWeight;
   return best;
 }

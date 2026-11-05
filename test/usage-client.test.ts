@@ -207,6 +207,44 @@ describe('maybeRefreshUsage', () => {
     expect(state.keys.every((k) => k.exhausted === false)).toBe(true);
   });
 
+  it('keeps the previous usage when a 200 carries no numeric window', async () => {
+    const state = makeState();
+    const config = makeConfig();
+
+    // Seed: 'a' has a spent weekly window, 'b' a normal month.
+    vi.spyOn(globalThis, 'fetch').mockImplementation(async (_url, init) => {
+      const auth = (init as RequestInit).headers as Record<string, string>;
+      const isA = auth.Authorization.includes('sk-a');
+      return new Response(
+        JSON.stringify({
+          usage: {
+            rolling: { percent: isA ? 100 : 0 },
+            weekly: {},
+            monthly: { percent: isA ? 50 : 10 },
+          },
+        }),
+        { status: 200 },
+      );
+    });
+    maybeRefreshUsage(state, config);
+    await settleMacrotasks();
+    await settleMacrotasks();
+
+    const a = state.keys.find((k) => k.label === 'a')!;
+    expect(a.usagePercent).toBe(50);
+    expect(a.exhausted).toBe(true);
+
+    // Empty usage shape must not reset the key to 0% / non-exhausted.
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response('{"usage":{}}', { status: 200 }));
+    resetUsageRefreshState();
+    maybeRefreshUsage(state, config);
+    await settleMacrotasks();
+    await settleMacrotasks();
+
+    expect(a.usagePercent).toBe(50);
+    expect(a.exhausted).toBe(true);
+  });
+
   it('propagates a spent window into state even when the month has room', async () => {
     vi.spyOn(globalThis, 'fetch').mockImplementation(async (_url, init) => {
       const auth = (init as RequestInit).headers as Record<string, string>;

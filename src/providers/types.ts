@@ -148,6 +148,8 @@ export type ModelAffinity = 'yes' | 'no' | 'maybe';
 export interface KeyUsage {
   usedPercent: number;
   exhausted: boolean;
+  /** False when the payload carries no monthly percentage (CLI shows n/a). */
+  monthlyAvailable: boolean;
   rollingPercent: number;
   weeklyPercent: number;
   monthlyPercent: number;

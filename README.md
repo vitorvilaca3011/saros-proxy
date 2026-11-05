@@ -114,13 +114,19 @@ monthly budget**, never absolute capacity:
 | OpenCode Go | `GET /zen/go/v1/usage` | `rolling` (5h) / `weekly` / `monthly` as percents |
 | CommandCode | `GET /alpha/billing/credits` | `fiveHour` and `weekly` as `used`/`cap` in credits, `credits.monthlyCredits` (remaining) and reset timestamps |
 
-CommandCode's payload has no explicit monthly cap, so the parser derives it
-from the plan ladder (`5-hour — 20%`, `weekly — 50%`, `monthly — 100%`):
-monthly cap = 2 × `weekly.cap` (5 × `fiveHour.cap` when the weekly window is
-absent), and monthly consumption = `cap − credits.monthlyCredits`. A payload
-without a usable cap or `monthlyCredits` leaves the monthly metric at 0 rather
-than inventing one. Both parsers emit the same 0-100 percent scale, so a mixed
-pool compares like with like. Two consequences worth knowing:
+CommandCode's payload has no explicit monthly cap. The parser **infers** it
+from the window caps (the 20% / 50% / 100% ladder is OpenCode Go's documented
+plan shape; for CommandCode the 14/35 ratio was measured against its
+dashboard): monthly cap = 2 × `weekly.cap`, falling back to 5 ×
+`fiveHour.cap` when the weekly window is absent. The candidate cap is only
+accepted when the credits agree with it — `credits.monthlyCredits <= cap` and
+`cap − monthlyCredits >= max(weekly.used, fiveHour.used)`; otherwise the
+fallback is tried and, if it also disagrees, the response is treated as
+unusable (the previous usage state is kept rather than brands a broken
+derivation as 0% usage). A payload without `monthlyCredits` reports the
+monthly metric as unavailable (`n/a` in `saros-proxy usage`). Both parsers
+emit the same 0-100 percent scale, so a mixed pool compares like with like.
+Two consequences worth knowing:
 
 - **Monthly is the weight; a spent window still excludes the key.** A key with
   50% of the month left but a 5-hour or weekly window at 100% weighs 0 and is

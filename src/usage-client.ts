@@ -49,6 +49,8 @@ export interface KeyUsage {
   usedPercent: number;
   /** True when any window is at 100% — rotation weighs the key 0. */
   exhausted: boolean;
+  /** False when the payload carries no monthly percentage (CLI shows n/a). */
+  monthlyAvailable: boolean;
   rollingPercent: number;
   weeklyPercent: number;
   monthlyPercent: number;

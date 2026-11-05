@@ -10,6 +10,7 @@
  */
 
 import { MODELS_FETCH_TIMEOUT_MS, MODELS_WARM_BUFFER_MS } from './constants.js';
+import { OPENCODE_GO_USER_AGENT } from './providers/opencode-go.js';
 import { loadModelsCatalog } from './models-catalog.js';
 import type { ProxyConfig } from './config.js';
 
@@ -49,6 +50,7 @@ export async function fetchModelsFromUpstream(
   try {
     const response = await fetch(`${config.upstreamBaseUrl}/zen/go/v1/models`, {
       method: 'GET',
+      headers: { 'User-Agent': OPENCODE_GO_USER_AGENT },
       signal: AbortSignal.timeout(MODELS_FETCH_TIMEOUT_MS),
     });
 

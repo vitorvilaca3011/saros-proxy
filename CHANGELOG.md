@@ -35,21 +35,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `credits.monthlyCredits` (what remains of the monthly allowance), so
   `commandcode.usagePath()` points there and its parser maps `used / cap` to
   `rollingPercent` / `weeklyPercent` with ISO reset times. The payload has no
-  explicit monthly cap: it is derived from the plan ladder as
-  `2 × weekly.cap` (falling back to `5 × fiveHour.cap`), and monthly
-  consumption is `cap − monthlyCredits`, clamped to 0-100 and left at 0 when
-  either value is unusable. `fetchKeyUsage` now takes the provider, sends its
+  explicit monthly cap: it is **inferred** as `2 × weekly.cap` (falling back
+  to `5 × fiveHour.cap`), then accepted only when the credits agree with the
+  candidate cap in the same unit (`remaining <= cap` and
+  `cap − remaining >= max(weekly.used, fiveHour.used)`); an inconsistent
+  derivation yields null and keeps the previous state instead of handing the
+  key maximum weight. Monthly consumption is `cap − monthlyCredits`, clamped
+  to 0-100. `fetchKeyUsage` now takes the provider, sends its
   `extraUpstreamHeaders()` and parses with its `parseUsageResponse()` (the
   duplicated opencode-go parser in `usage-client.ts` is gone), which restores
   usage-weighted rotation for CommandCode keys. The console rounds fractional
-  percentages.
+  percentages and prints `n/a` when the monthly metric is unavailable.
 - **Rotation now weighs the monthly window, and a spent window excludes the
   key.** `KeyUsage.usedPercent` is the monthly percentage of the key's own
   provider budget, and the new `KeyUsage.exhausted` is true when any window
   (5h, weekly or monthly) reaches 100%. `pickWeighted` gives an exhausted key
   weight 0 even when the month still has room — without it, a key at 50% of the
   month but 100% of the week would keep receiving traffic and failing upstream.
-  Keys without usage data keep the median-weight fallback.
+  Zero-weight keys are skipped (their residual round-robin momentum is
+  cleared), so they cannot win behind an exhausted flag. Keys without usage
+  data take the median of the **non-exhausted** weights, or full weight when
+  no known key has room — the zeros of exhausted keys no longer drag the
+  neutral weight down.
 
 ## [0.11.0] - 2026-11-03
 
