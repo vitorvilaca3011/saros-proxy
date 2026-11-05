@@ -1126,18 +1126,36 @@ async function handleStreamingRequest(opts: HandleRequestOptions): Promise<Respo
 }
 
 /**
- * Pull token counts out of one SSE event. Chat completions carry `usage` at the
- * top level; the OpenAI Responses schema nests it under `response.usage` on
- * `response.completed`, so a top-level-only reader books zero for those streams.
+ * Pull token counts out of one SSE event, across every streaming surface saros
+ * relays: Chat Completions (top-level `usage`), OpenAI Responses
+ * (`response.usage` on `response.completed`) and Anthropic Messages
+ * (`message.usage` on `message_start`). A reader that only knew the first
+ * shape booked zero for the other two.
  */
 function extractEventUsage(parsed: Record<string, unknown>): unknown {
   if (parsed.usage) return parsed.usage;
-  const response = parsed.response;
-  if (response && typeof response === 'object' && !Array.isArray(response)) {
-    const nested = (response as Record<string, unknown>).usage;
+  for (const container of [parsed.response, parsed.message]) {
+    if (!container || typeof container !== 'object' || Array.isArray(container)) continue;
+    const nested = (container as Record<string, unknown>).usage;
     if (nested) return nested;
   }
   return null;
+}
+
+/**
+ * Merge one event's usage into the stream total. Anthropic splits the counts
+ * across events — `message_start` carries the prompt tokens, `message_delta`
+ * the cumulative output tokens — so last-one-wins would book zero prompt
+ * tokens for every Messages stream. Every documented surface reports
+ * cumulative per-field counts, so the largest value seen is the final one;
+ * identical repeats (CommandCode sends `usage` twice) are no-ops.
+ */
+function mergeStreamUsage(target: Record<string, number>, next: unknown): void {
+  if (!next || typeof next !== 'object' || Array.isArray(next)) return;
+  for (const [field, value] of Object.entries(next as Record<string, unknown>)) {
+    if (typeof value !== 'number' || !Number.isFinite(value)) continue;
+    target[field] = Math.max(target[field] ?? 0, value);
+  }
 }
 
 /**
@@ -1158,19 +1176,16 @@ function wrapStreamWithErrorDetection(
   const encoder = new TextEncoder();
   let buffer = '';
 
-  // Upstreams may report the same `usage` on more than one chunk: CommandCode
-  // sends it on the finish chunk (`choices[0].finish_reason`) and again on the
-  // trailing usage-only chunk (`choices: []`), so booking per chunk would
-  // count every streamed request twice. Keep the canonical usage-only chunk
-  // (last one wins, OpenAI's `include_usage` contract) and fall back to the
-  // finish chunk's copy; book exactly once, when the stream ends.
-  let lastUsage: unknown = null;
-  let usageOnlyChunk: unknown = null;
+  // Usage is booked exactly once, when the stream ends. Upstreams may repeat
+  // the same counts on more than one chunk (CommandCode sends them on the
+  // finish chunk and on the trailing usage-only chunk) and Anthropic splits
+  // them across events, so counts are merged per field instead of replaced.
+  let streamUsage: Record<string, number> | null = null;
   let usageBooked = false;
   const bookUsage = (): void => {
     if (usageBooked) return;
     usageBooked = true;
-    recordKeyTokens(keyLabel, usageOnlyChunk ?? lastUsage);
+    recordKeyTokens(keyLabel, streamUsage);
   };
 
   return new ReadableStream<Uint8Array>({
@@ -1214,15 +1229,12 @@ function wrapStreamWithErrorDetection(
               return;
             }
             // Intermediate chunks send `usage: null`; the counts arrive on the
-            // finish chunk and/or the usage-only chunk (see bookUsage). The
-            // OpenAI Responses schema nests them under `response.usage` on the
-            // `response.completed` event instead of at the top level.
+            // finish chunk and/or a usage-only chunk (see bookUsage), or split
+            // across `response.completed` / `message_start` / `message_delta`.
             const eventUsage = extractEventUsage(parsed);
             if (eventUsage) {
-              lastUsage = eventUsage;
-              if (Array.isArray(parsed.choices) && parsed.choices.length === 0) {
-                usageOnlyChunk = eventUsage;
-              }
+              streamUsage ??= {};
+              mergeStreamUsage(streamUsage, eventUsage);
             }
           } catch {
             // Invalid JSON in SSE event — not an error we can classify, ignore

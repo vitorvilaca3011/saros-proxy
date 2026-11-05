@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **Anthropic Messages streams book their prompt tokens.** The stream reader
+  only recognized top-level `usage` and `response.usage`. Anthropic reports
+  the prompt count once, in `message_start.message.usage`, and
+  `message_delta.usage` carries the cumulative output count — often without
+  input tokens — so every `/v1/messages` stream booked 0 prompt tokens.
+  Per-field counts are now merged across the stream (largest cumulative value
+  wins), which also keeps the duplicated `usage` chunk that CommandCode sends
+  on chat completions booking a single request with the full counts.
+
 ## [0.11.0] - 2026-11-03
 
 ### Added
