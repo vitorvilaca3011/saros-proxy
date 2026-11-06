@@ -425,7 +425,7 @@ function ensureModelsJson(): void {
     // and skip the seed; the runtime already handles a missing catalog.
     logger.warn(
       { err, path: bundledPath },
-      'models.json: could not read the bundled catalog; skipping the seed',
+      'models.json: could not read or parse the bundled catalog; skipping the seed',
     );
     return;
   }
