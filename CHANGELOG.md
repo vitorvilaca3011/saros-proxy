@@ -48,6 +48,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Patch/minor dependency refresh.** `hono` 4.13.13 → 4.13.16, `@hono/node-server`
+  2.1.3 → 2.1.6, `pino` 10.3.1 → 10.4.0, `pino-pretty` 13.1.3 → 13.2.0, `vitest`
+  and `@vitest/coverage-v8` 5.0.3 → 5.1.0, `@types/node` 26.6.4 → 26.6.6 — all
+  inside the ranges already declared, no `package.json` range changed.
 - **The bundled model catalog moved to `assets/models.json`.** It is no longer
   shipped at the package root: anything that referenced `models.json` inside the
   installed package must use `assets/models.json`. `package.json#files`, the
