@@ -9,7 +9,7 @@
   },
   "files": [
     "dist",
-    "models.json",
+    "assets/models.json",
     "README.md",
     "LICENSE"
   ],
@@ -17,7 +17,7 @@
     "setup": "tsx src/cli/setup.ts",
     "dev": "tsx src/index.ts serve",
     "build": "tsc",
-    "lint": "tsc --noEmit",
+    "lint": "tsc --noEmit && tsc --noEmit -p tsconfig.scripts.json",
     "prepublishOnly": "npm run build",
     "test": "vitest",
     "coverage": "vitest run --coverage",
@@ -30,7 +30,8 @@
     "docker:build": "docker compose build proxy",
     "docker:run": "docker compose up proxy",
     "docker:test": "docker compose run --rm test",
-    "test:e2e": "npm run build && vitest run --config vitest.e2e.config.ts"
+    "test:e2e": "npm run build && vitest run --config vitest.e2e.config.ts",
+    "models:refresh": "tsx scripts/refresh-models.ts"
   },
   "keywords": [
     "opencode",

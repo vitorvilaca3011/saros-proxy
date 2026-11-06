@@ -7,6 +7,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **`npm run models:refresh` generates the bundled catalog.** `scripts/refresh-models.ts`
+  merges models.dev metadata for `opencode-go` and `commandcode` with the live
+  provider catalogs, so the bundle no longer depends on a hand-edited commit. A
+  model the provider serves but models.dev does not know enters with the live
+  payload's name and context window; membership follows the live catalogs, and two
+  raw ids that collapse to the same bare name abort the run. The output is sorted
+  keys, 2-space JSON and a trailing newline; the script prints
+  added/removed/changed counts, supports `--dry-run` (and reports a formatting-only
+  difference), writes through a temp file plus rename, and aborts before reading
+  the file when any source fetch fails or answers with an empty catalog. A merge
+  that would remove more than half of the current models needs `--allow-shrink`.
+  `models-refresh.ts` holds the pure merge and the fetch helpers.
+
+### Changed
+
+- **The bundled model catalog moved to `assets/models.json`.** It is no longer
+  shipped at the package root: anything that referenced `models.json` inside the
+  installed package must use `assets/models.json`. `package.json#files`, the
+  Docker stages, the catalog loader and the daemon seed path follow.
+
+### Fixed
+
+- **`saros-proxy start` repairs and completes `~/.config/saros/models.json`.** The
+  daemon seeded the bundled copy on every start, discarding user edits; it now
+  adds only the bundle keys the user file lacks (never overwriting a value the
+  user set), leaves a file that already covers the bundle untouched, and backs up
+  an unparseable file to `models.json.corrupt` before re-seeding it. A missing or
+  corrupt user catalog is no longer kept forever while the CLI silently fell back
+  to the bundled copy.
+
 ## [1.0.0] - 2026-11-05
 
 First stable release. The public surface — the `/v1/*` and `/zen/go/v1/*` routes, the

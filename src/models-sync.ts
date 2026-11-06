@@ -17,6 +17,7 @@ import {
   MODELS_DEV_SAFE_FIELDS,
 } from './constants.js';
 import { loadModelsCatalog } from './models-catalog.js';
+import { extractModelsDevProviderModels } from './models-refresh.js';
 import { logger } from './logger.js';
 import type { ProxyConfig } from './config.js';
 import type { OpencodeConfigResult } from './cli/opencode-config.js';
@@ -160,7 +161,7 @@ function pickSafeFields(entry: Record<string, unknown>): Record<string, unknown>
  *
  * Priority (first match wins):
  *   1. models.dev metadata (if provided and found for modelId)
- *   2. Bundled `models.json` catalog
+ *   2. Bundled `assets/models.json` catalog
  *   3. Heuristic title-case of the ID with default limits
  *
  * @param modelId — The upstream model ID (e.g. "glm-5", "kimi-k2.7-code")
@@ -441,13 +442,7 @@ export function extractOpencodeGoModels(
 ): Record<string, Record<string, unknown>> {
   // The API returns a flat dictionary keyed by provider ID, e.g.:
   // { "opencode-go": { id, env, npm, api, name, doc, models: { ... } }, ... }
-  const entry = parsed[MODELS_DEV_PROVIDER_ID];
-  if (!entry || typeof entry !== 'object' || Array.isArray(entry)) return {};
-
-  const models = (entry as Record<string, unknown>).models;
-  if (!models || typeof models !== 'object' || Array.isArray(models)) return {};
-
-  return models as Record<string, Record<string, unknown>>;
+  return extractModelsDevProviderModels(parsed, MODELS_DEV_PROVIDER_ID);
 }
 
 /**

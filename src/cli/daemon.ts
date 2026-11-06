@@ -36,6 +36,7 @@ import {
 import { homedir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { getModelsJsonPath } from './opencode-config.js';
+import { mergeMissingModels, parseCatalogObject, serializeCatalogObject } from '../models-catalog.js';
 import { formatKeyBlock } from './key-state.js';
 import { checkForUpdate } from './update-check.js';
 import { loadConfig, getSarosDir } from '../config.js';
@@ -396,22 +397,69 @@ function readLogSince(offset: number): string {
 
 /**
  * Ensure models.json exists at ~/.config/saros/models.json.
- * Always overwrites with the bundled copy on every daemon start.
+ *
+ * A missing file is seeded from the bundle. An existing file is the user's:
+ * a value they customized is never overwritten, but bundle keys they lack are
+ * added so an installation created before a catalog refresh still gets the new
+ * models. An unparseable file is backed up to models.json.corrupt and
+ * re-seeded — it used to be kept forever while the CLI silently fell back to
+ * the bundled catalog.
  */
 function ensureModelsJson(): void {
   const modelsPath = getModelsJsonPath();
   if (!assertStateDir(modelsPath, 'write')) return;
 
-  const dir = pathJoin(homedir(), '.config', 'saros');
-  if (!existsSync(dir)) {
-    mkdirSync(dir, { recursive: true });
+  const bundledPath = pathJoin(PACKAGE_ROOT, 'assets', 'models.json');
+  if (!existsSync(bundledPath)) return;
+  const bundledContent = readFileSync(bundledPath, 'utf-8');
+
+  if (!existsSync(modelsPath)) {
+    mkdirSync(pathDirname(modelsPath), { recursive: true });
+    writeModelsFile(modelsPath, bundledContent);
+    return;
   }
 
-  // Copy bundled models.json to default location (always overwrite)
-  const bundledPath = pathJoin(PACKAGE_ROOT, 'models.json');
-  if (existsSync(bundledPath)) {
-    copyFileSync(bundledPath, modelsPath);
+  const raw = readModelsFile(modelsPath);
+  if (raw === null) return;
+
+  let existing: Record<string, unknown>;
+  try {
+    existing = parseCatalogObject(raw);
+  } catch {
+    const backupPath = `${modelsPath}.corrupt`;
+    copyFileSync(modelsPath, backupPath);
+    writeModelsFile(modelsPath, bundledContent);
+    console.warn(
+      chalk.yellow(`⚠ models.json is not a valid catalog; backed it up to ${backupPath} and re-seeded from the bundle`),
+    );
+    return;
   }
+
+  const merged = mergeMissingModels(existing, parseCatalogObject(bundledContent));
+  if (merged.added.length === 0) {
+    console.log(chalk.dim('models.json already present, keeping the user copy'));
+    return;
+  }
+
+  writeModelsFile(modelsPath, serializeCatalogObject(merged.models));
+  console.log(chalk.dim(`models.json: added ${merged.added.length} missing models from the bundle`));
+}
+
+/** Read models.json; a read error leaves the file alone instead of replacing it. */
+function readModelsFile(modelsPath: string): string | null {
+  try {
+    return readFileSync(modelsPath, 'utf-8');
+  } catch {
+    console.warn(chalk.yellow('⚠ could not read models.json; keeping it as is'));
+    return null;
+  }
+}
+
+/** Write a catalog atomically: temp file beside it, then rename. */
+function writeModelsFile(modelsPath: string, content: string): void {
+  const tempPath = `${modelsPath}.tmp`;
+  writeFileSync(tempPath, content, 'utf-8');
+  renameSync(tempPath, modelsPath);
 }
 
 // ---------------------------------------------------------------------------

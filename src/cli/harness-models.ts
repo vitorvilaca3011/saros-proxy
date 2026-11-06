@@ -5,7 +5,7 @@
  * { id, name, tool_call, reasoning, limit:{context,output},
  *   modalities:{input,output}, cost? }) into the array shape the pi and
  * oh-my-pi harnesses expect, and builds that canonical map from the live
- * upstream + models.dev metadata (falling back to bundled models.json).
+ * upstream + models.dev metadata (falling back to bundled `assets/models.json`).
  */
 
 import type { ProxyConfig } from '../config.js';
@@ -266,8 +266,8 @@ async function appendProviderCatalogModels(
  * Live path (config provided, not offline): fetch upstream model IDs and
  * enrich each with models.dev metadata via buildMinimalStub, then append
  * provider-specific catalog models (@commandcode etc.). Falls back to the
- * bundled models.json when the upstream fetch yields nothing.
- * Offline path (or no config): bundled models.json only.
+ * bundled `assets/models.json` when the upstream fetch yields nothing.
+ * Offline path (or no config): bundled `assets/models.json` only.
  */
 export async function buildCanonicalModels(
   config?: ProxyConfig,

@@ -243,6 +243,12 @@ describe('install e2e (npm pack -> install -> run)', () => {
     expect(existsSync(join(prefixDir, 'node_modules', '.bin', binName))).toBe(true);
   });
 
+  it('ships the bundled model catalog under assets/', () => {
+    expect(
+      existsSync(join(prefixDir, 'node_modules', 'saros-proxy', 'assets', 'models.json')),
+    ).toBe(true);
+  });
+
   it('--version matches package.json', async () => {
     const pkgVersion = (JSON.parse(
       readFileSync(join(REPO_ROOT, 'package.json'), 'utf-8'),
