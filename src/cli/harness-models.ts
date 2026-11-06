@@ -12,6 +12,7 @@ import type { ProxyConfig } from '../config.js';
 import { loadModelsFromJson } from './opencode-config.js';
 import { buildMinimalStub, fetchModelsDevMetadata, fetchUpstreamModelIds } from '../models-sync.js';
 import {
+  collidingBareNames,
   fetchModelsDevProvider,
   findProviderModel,
   pickModelsDevFields,
@@ -42,6 +43,32 @@ export interface PiOmpModel {
 
 /** Canonical effort vocabulary, least → most intensive (pi/omp schema). */
 const EFFORT_ORDER = ['minimal', 'low', 'medium', 'high', 'xhigh', 'max'] as const;
+
+/**
+ * Conservative effort ladder for a reasoning model whose metadata declares no
+ * effort levels (models.dev ships an empty ladder or a bare toggle for some
+ * CommandCode models). Copied verbatim, that absence makes the harness invent
+ * a ladder that includes `minimal`, which the CommandCode gateway rejects;
+ * low|medium|high is accepted everywhere.
+ */
+const CONSERVATIVE_EFFORT_VALUES = ['low', 'medium', 'high'] as const;
+
+/** Fresh effort ladder entry — callers may keep or mutate the array. */
+function conservativeEffortOptions(): Array<{ type: 'effort'; values: string[] }> {
+  return [{ type: 'effort', values: [...CONSERVATIVE_EFFORT_VALUES] }];
+}
+
+/** Does any reasoning option declare an effort ladder? */
+function hasEffortOption(options: unknown): boolean {
+  if (!Array.isArray(options)) return false;
+  return options.some(
+    (option) =>
+      typeof option === 'object' &&
+      option !== null &&
+      !Array.isArray(option) &&
+      (option as Record<string, unknown>).type === 'effort',
+  );
+}
 
 /**
  * Extract the effort ladder from models.dev `reasoning_options`
@@ -176,9 +203,11 @@ function bundledModel(nativeId: string): Record<string, unknown> | undefined {
   }
 
   const bare = bareModelName(nativeId);
+  const colliding = collidingBareNames(catalog, bareModelName);
   for (const [id, entry] of Object.entries(catalog)) {
     if (typeof entry !== 'object' || entry === null || Array.isArray(entry)) continue;
-    if (bareModelName(id) === bare) return entry as Record<string, unknown>;
+    const candidate = bareModelName(id);
+    if (candidate === bare && !colliding.has(candidate)) return entry as Record<string, unknown>;
   }
   return undefined;
 }
@@ -226,8 +255,16 @@ function providerCatalogToCanonical(
       // Conservative effort ladder for models with no metadata anywhere: the
       // commandcode gateway accepts low|medium|high|xhigh and rejects
       // minimal — better declared here than invented by the harness.
-      reasoning_options: [{ type: 'effort', values: ['low', 'medium', 'high'] }],
+      reasoning_options: conservativeEffortOptions(),
     };
+  }
+
+  // models.dev (and the bundle generated from it) sometimes marks a model
+  // `reasoning: true` with an empty ladder or a toggle only. Copied verbatim,
+  // that absence lets the harness invent a ladder with `minimal`, which the
+  // CommandCode gateway rejects — declare the conservative ladder instead.
+  if (canonical.reasoning === true && !hasEffortOption(canonical.reasoning_options)) {
+    canonical.reasoning_options = conservativeEffortOptions();
   }
 
   canonical.name = annotateName(

@@ -2,39 +2,40 @@
  * models-dev.ts — Read models.dev canonical metadata per provider.
  *
  * `GET https://models.dev/api.json` is one document keyed by provider id
- * (235 providers, ~2 MB). Saros only consumes the providers it proxies;
- * this module owns the fetch, the per-provider extraction and the TTL cache
- * so every consumer (opencode.json sync, pi/omp harness sync) reads the same
- * slice the same way.
+ * (235 providers, 5.9 MB on 2026-11-06). Saros only consumes the providers it
+ * proxies; this module owns the fetch, the per-provider extraction and the TTL
+ * cache so every consumer (opencode.json sync, pi/omp harness sync) reads the
+ * same slice the same way.
  *
- * models.dev sits behind Cloudflare: a request without a `User-Agent` gets
- * 403. Always send one.
+ * The request sends a stable CLI `User-Agent`. models.dev's edge has answered
+ * 403 to a library-default UA while `User-Agent: cli` got 200 (measured
+ * 2026-11-06); a recheck minutes later returned 200 for both, so treat the
+ * header as a fixed contract — it keeps the fetch independent of whatever UA
+ * the local HTTP stack defaults to — not as a reproducible gate.
  */
 
 import {
   MODELS_DEV_CACHE_TTL_MS,
-  MODELS_DEV_PROVIDER_ID,
   MODELS_DEV_SAFE_FIELDS,
   MODELS_DEV_TIMEOUT_MS,
   MODELS_DEV_URL,
 } from './constants.js';
+import { logger } from './logger.js';
 
 /** Model id → models.dev metadata entry. */
 export type ModelsDevModelMap = Record<string, Record<string, unknown>>;
 
-/**
- * Providers whose metadata saros consumes. opencode-go first — it is the
- * default upstream, so `MODELS_DEV_PROVIDER_ID` keeps pointing at it.
- */
-export const MODELS_DEV_PROVIDER_IDS = [MODELS_DEV_PROVIDER_ID, 'commandcode'] as const;
-
-export type ModelsDevProviderId = (typeof MODELS_DEV_PROVIDER_IDS)[number];
-
-/** Identity sent to models.dev. Without a UA, Cloudflare returns 403. */
+/** Identity sent to models.dev — a stable CLI UA, never the HTTP stack default. */
 export const MODELS_DEV_USER_AGENT = 'saros-proxy';
 
 /** Cached parsed document. Null = never fetched / reset. */
 let documentCache: { ts: number; parsed: Record<string, unknown> } | null = null;
+
+/**
+ * Fetch in progress, if any. Concurrent cold-cache callers await this instead
+ * of each pulling the 5.9 MB document.
+ */
+let documentRequest: Promise<Record<string, unknown> | null> | null = null;
 
 /**
  * Extract one provider's model map from a parsed models.dev document.
@@ -84,6 +85,45 @@ function bareModelName(modelId: string): string {
   return parts[parts.length - 1].toLowerCase().replaceAll('_', '-');
 }
 
+/** Catalogs already checked for bare-name collisions (one warning per slice). */
+const collisionReported = new WeakSet<object>();
+
+/**
+ * Bare names that two or more entries of one catalog normalize to.
+ *
+ * Matching by such a name would return whichever entry `Object.keys` yields
+ * first — silently pricing/limiting the wrong model — so callers must fall
+ * back to exact ids. `models-refresh` aborts the generation on the same
+ * condition; runtime stays lenient but warns once per slice.
+ *
+ * @param models — id → entry catalog (models.dev slice or bundled catalog)
+ * @param normalize — id → bare name function for that catalog's id shape
+ */
+export function collidingBareNames(
+  models: Record<string, unknown>,
+  normalize: (id: string) => string,
+): Set<string> {
+  const counts = new Map<string, number>();
+  for (const [id, entry] of Object.entries(models)) {
+    if (typeof entry !== 'object' || entry === null || Array.isArray(entry)) continue;
+    const bare = normalize(id);
+    if (!bare) continue;
+    counts.set(bare, (counts.get(bare) ?? 0) + 1);
+  }
+
+  const collisions = new Set(
+    [...counts].filter(([, count]) => count > 1).map(([bare]) => bare),
+  );
+  if (collisions.size > 0 && !collisionReported.has(models)) {
+    collisionReported.add(models);
+    logger.warn(
+      { bareNames: [...collisions] },
+      'model catalog has bare-name collisions; only exact ids will match',
+    );
+  }
+  return collisions;
+}
+
 /**
  * Find a model entry inside one provider's slice.
  *
@@ -105,6 +145,8 @@ export function findProviderModel(
 
   const bare = bareModelName(modelId);
   if (!bare) return undefined;
+  // Two ids share this bare name: matching one of them would be arbitrary.
+  if (collidingBareNames(models, bareModelName).has(bare)) return undefined;
 
   for (const [id, entry] of Object.entries(models)) {
     if (typeof entry !== 'object' || entry === null || Array.isArray(entry)) continue;
@@ -114,16 +156,10 @@ export function findProviderModel(
 }
 
 /**
- * Fetch (or reuse) the parsed models.dev document.
- *
- * Returns null on any failure and does not cache failures, so a later call
- * retries. A successful document is cached for `MODELS_DEV_CACHE_TTL_MS`.
+ * Fetch and parse the models.dev document. Never throws; failures are not
+ * cached, so a later call retries.
  */
-async function fetchModelsDevDocument(): Promise<Record<string, unknown> | null> {
-  if (documentCache !== null && Date.now() - documentCache.ts < MODELS_DEV_CACHE_TTL_MS) {
-    return documentCache.parsed;
-  }
-
+async function loadModelsDevDocument(): Promise<Record<string, unknown> | null> {
   try {
     const response = await fetch(MODELS_DEV_URL, {
       headers: {
@@ -146,6 +182,27 @@ async function fetchModelsDevDocument(): Promise<Record<string, unknown> | null>
 }
 
 /**
+ * Fetch (or reuse) the parsed models.dev document.
+ *
+ * Concurrent cold-cache callers share one request: the pending promise is
+ * cached, not just its result. A successful document is then cached for
+ * `MODELS_DEV_CACHE_TTL_MS`.
+ */
+async function fetchModelsDevDocument(): Promise<Record<string, unknown> | null> {
+  if (documentCache !== null && Date.now() - documentCache.ts < MODELS_DEV_CACHE_TTL_MS) {
+    return documentCache.parsed;
+  }
+  if (documentRequest !== null) return documentRequest;
+
+  const request = loadModelsDevDocument().finally(() => {
+    // Only clear our own request: a reset() may already have installed one.
+    if (documentRequest === request) documentRequest = null;
+  });
+  documentRequest = request;
+  return request;
+}
+
+/**
  * Fetch one provider's model map, with the shared TTL cache.
  *
  * The document is fetched once and split per provider, so asking for both
@@ -165,4 +222,5 @@ export async function fetchModelsDevProvider(
 /** Clear the models.dev document cache (test helper). */
 export function resetModelsDevCache(): void {
   documentCache = null;
+  documentRequest = null;
 }

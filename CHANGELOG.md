@@ -12,10 +12,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **CommandCode models are enriched from models.dev.** The models.dev read is
   now per provider (`src/models-dev.ts`): `opencode-go` and `commandcode`
   slices come from the same cached document, and the request always sends a
-  `User-Agent` (Cloudflare answers 403 without one). `@commandcode` harness
+  stable CLI `User-Agent` (measured 2026-11-06: a library-default UA got 403
+  where `User-Agent: cli` got 200). `@commandcode` harness
   entries take metadata from the commandcode slice first, then the bundled
   `assets/models.json`, then the live catalog/defaults — a model absent from
-  models.dev is never dropped.
+  models.dev is never dropped. A reasoning model whose metadata declares no
+  effort option (empty ladder or toggle only) gets the conservative
+  `low|medium|high` ladder, because the CommandCode gateway rejects `minimal`
+  and the harness would otherwise invent it.
 - **`npm run models:refresh` generates the bundled catalog.** `scripts/refresh-models.ts`
   merges models.dev metadata for `opencode-go` and `commandcode` with the live
   provider catalogs, so the bundle no longer depends on a hand-edited commit. A

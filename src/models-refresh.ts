@@ -27,6 +27,7 @@ import { isDeepStrictEqual } from 'node:util';
 import {
   DEFAULT_UPSTREAM_COMMANDCODE,
   DEFAULT_UPSTREAM_URL,
+  MODELS_DEV_COMMANDCODE_PROVIDER_ID,
   MODELS_DEV_SAFE_FIELDS,
   MODELS_DEV_TIMEOUT_MS,
   MODELS_DEV_URL,
@@ -40,9 +41,6 @@ import { extractProviderModels } from './models-dev.js';
 // ---------------------------------------------------------------------------
 // Sources
 // ---------------------------------------------------------------------------
-
-/** models.dev's CommandCode provider id. */
-export const MODELS_DEV_COMMANDCODE_PROVIDER_ID = 'commandcode';
 
 /** Public opencode-go catalog — no auth, but Cloudflare wants a CLI signature. */
 export const OPENCODE_GO_MODELS_URL = `${DEFAULT_UPSTREAM_URL}/zen/go/v1/models`;

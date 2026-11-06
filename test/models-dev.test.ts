@@ -6,15 +6,16 @@
  */
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { MODELS_DEV_PROVIDER_ID } from '../src/constants.js';
+import { logger } from '../src/logger.js';
 import {
-  MODELS_DEV_PROVIDER_IDS,
-  MODELS_DEV_USER_AGENT,
   extractProviderModels,
   fetchModelsDevProvider,
   findProviderModel,
   resetModelsDevCache,
 } from '../src/models-dev.js';
+
+// Warnings are asserted, not printed; models-dev is the only consumer here.
+vi.mock('../src/logger.js', () => ({ logger: { warn: vi.fn() } }));
 
 /** Small fixture covering both providers saros consumes. */
 const FIXTURE = {
@@ -88,11 +89,6 @@ describe('extractProviderModels', () => {
     expect(extractProviderModels({ 'opencode-go': { models: null } }, 'opencode-go')).toEqual({});
     expect(extractProviderModels({ 'opencode-go': { models: [] } }, 'opencode-go')).toEqual({});
   });
-
-  it('lists opencode-go first, with commandcode also in scope', () => {
-    expect(MODELS_DEV_PROVIDER_IDS[0]).toBe(MODELS_DEV_PROVIDER_ID);
-    expect(MODELS_DEV_PROVIDER_IDS).toContain('commandcode');
-  });
 });
 
 // ---------------------------------------------------------------------------
@@ -145,6 +141,40 @@ describe('findProviderModel', () => {
     expect(findProviderModel(commandcode, 'broken')).toBeUndefined();
     expect(findProviderModel({}, 'anything')).toBeUndefined();
   });
+
+  it('refuses a bare-name match when two ids share that bare name', () => {
+    const slice = {
+      'vendorA/foo': { id: 'vendorA/foo', name: 'A Foo' },
+      'vendorB/foo': { id: 'vendorB/foo', name: 'B Foo' },
+      'vendorC/bar': { id: 'vendorC/bar', name: 'C Bar' },
+    };
+
+    // Exact ids still resolve; only the ambiguous bare name is refused.
+    expect(findProviderModel(slice, 'vendorA/foo')).toEqual({ id: 'vendorA/foo', name: 'A Foo' });
+    expect(findProviderModel(slice, 'vendorB/foo')).toEqual({ id: 'vendorB/foo', name: 'B Foo' });
+    expect(findProviderModel(slice, 'foo')).toBeUndefined();
+
+    // A bare name claimed once keeps matching.
+    expect(findProviderModel(slice, 'bar')).toEqual({ id: 'vendorC/bar', name: 'C Bar' });
+  });
+
+  it('warns once per slice about colliding bare names', () => {
+    const warn = vi.mocked(logger.warn);
+    warn.mockClear();
+    const slice = {
+      'vendorA/foo': { id: 'vendorA/foo' },
+      'vendorB/foo': { id: 'vendorB/foo' },
+    };
+
+    findProviderModel(slice, 'foo');
+    findProviderModel(slice, 'foo');
+
+    expect(warn).toHaveBeenCalledTimes(1);
+    expect(warn).toHaveBeenCalledWith(
+      { bareNames: ['foo'] },
+      expect.stringContaining('bare-name collisions'),
+    );
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -162,17 +192,23 @@ describe('fetchModelsDevProvider', () => {
     resetModelsDevCache();
   });
 
-  it('sends a User-Agent header (Cloudflare 403s without one)', async () => {
-    const fetchMock = vi.fn().mockResolvedValue(jsonResponse(FIXTURE));
+  it('fetches with the CLI User-Agent models.dev accepts', async () => {
+    // Measured 2026-11-06: models.dev answered 403 to a library-default UA
+    // where `User-Agent: cli` got 200. The mock enforces that gate, so
+    // dropping or renaming the header makes this test fail; the 403 → null
+    // path itself is covered by 'returns null on non-2xx'.
+    const fetchMock = vi.fn(async (_url: string, init?: RequestInit) => {
+      const headers = (init?.headers ?? {}) as Record<string, string>;
+      return headers['User-Agent'] === 'saros-proxy'
+        ? jsonResponse(FIXTURE)
+        : new Response('forbidden', { status: 403 });
+    });
     vi.stubGlobal('fetch', fetchMock);
 
-    await fetchModelsDevProvider('commandcode');
-
+    await expect(fetchModelsDevProvider('commandcode')).resolves.toMatchObject({
+      'claude-opus-5': { id: 'claude-opus-5', name: 'Claude Opus 5' },
+    });
     expect(fetchMock).toHaveBeenCalledTimes(1);
-    const [, init] = fetchMock.mock.calls[0] as [string, RequestInit];
-    const headers = init.headers as Record<string, string>;
-    expect(headers['User-Agent']).toBe(MODELS_DEV_USER_AGENT);
-    expect(headers.Accept).toBe('application/json');
   });
 
   it('returns only the requested provider slice', async () => {
@@ -198,6 +234,26 @@ describe('fetchModelsDevProvider', () => {
     await fetchModelsDevProvider('commandcode');
     await fetchModelsDevProvider('opencode-go');
 
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+
+  it('shares one in-flight fetch between concurrent cold-cache callers', async () => {
+    const { promise, resolve: resolveFetch } = Promise.withResolvers<Response>();
+    const fetchMock = vi.fn(() => promise);
+    vi.stubGlobal('fetch', fetchMock);
+
+    // Both start on a cold cache, before the first response settles.
+    const first = fetchModelsDevProvider('opencode-go');
+    const second = fetchModelsDevProvider('commandcode');
+    resolveFetch(jsonResponse(FIXTURE));
+
+    await expect(first).resolves.toEqual({
+      'deepseek-v4-pro': { id: 'deepseek-v4-pro', name: 'DeepSeek V4 Pro' },
+      'glm-5': { id: 'glm-5', name: 'GLM 5' },
+    });
+    await expect(second).resolves.toMatchObject({
+      'claude-opus-5': { id: 'claude-opus-5', name: 'Claude Opus 5' },
+    });
     expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 
