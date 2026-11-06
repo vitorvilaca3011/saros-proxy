@@ -1304,6 +1304,7 @@ describe('buildCanonicalModels — provider catalogs', () => {
       { id: 'moonshotai/Kimi-K2.7-Code-Highspeed' }, // empty ladder
       { id: 'minimaxai/MiniMax-M2.7' }, // junk options
       { id: 'nvidia/nemotron-3-ultra-550b-a55b' }, // toggle only
+      { id: 'vendor/empty-effort' }, // effort option with no values
       { id: 'vendor/plain' }, // not a reasoning model
       { id: 'vendor/explicit' }, // explicit ladder
     ]);
@@ -1325,6 +1326,12 @@ describe('buildCanonicalModels — provider catalogs', () => {
         name: 'Nemotron 3 Ultra',
         reasoning: true,
         reasoning_options: [{ type: 'toggle' }],
+      },
+      'vendor/empty-effort': {
+        id: 'vendor/empty-effort',
+        name: 'Empty Effort',
+        reasoning: true,
+        reasoning_options: [{ type: 'effort', values: [] }],
       },
       'vendor/plain': { id: 'vendor/plain', name: 'Plain', reasoning: false, reasoning_options: [] },
       'vendor/explicit': {
@@ -1350,6 +1357,7 @@ describe('buildCanonicalModels — provider catalogs', () => {
       'moonshotai/Kimi-K2.7-Code-Highspeed@commandcode',
       'minimaxai/MiniMax-M2.7@commandcode',
       'nvidia/nemotron-3-ultra-550b-a55b@commandcode',
+      'vendor/empty-effort@commandcode',
     ]) {
       expect((result[id] as Record<string, unknown>).reasoning_options).toEqual(ladder);
     }

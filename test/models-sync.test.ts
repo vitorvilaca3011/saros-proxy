@@ -363,6 +363,7 @@ describe('buildMinimalStub', () => {
       limit: { context: 262144, output: 65536 },
       tool_call: true,
       reasoning: true,
+      reasoning_options: [{ type: 'effort', values: ['low', 'medium', 'high'] }],
     });
   });
 
@@ -423,9 +424,58 @@ describe('buildMinimalStub', () => {
     expect(stub.name).toBe('DeepSeek V4 Pro (from models.dev)');
     expect(stub.limit).toEqual({ context: 200000, output: 100000 });
     expect(stub.cost).toEqual({ input: 1.0, output: 4.0 });
-    expect(stub.reasoning_options).toEqual([]);
+    expect(stub.reasoning_options).toEqual([
+      { type: 'effort', values: ['low', 'medium', 'high'] },
+    ]);
     expect(stub.interleaved).toEqual({ field: 'reasoning_content' });
     expect(stub.structured_output).toBe(true);
+  });
+
+  it('replaces an effort option with empty values with the conservative ladder', () => {
+    const devMetadata = {
+      'empty-values': {
+        id: 'empty-values',
+        name: 'Empty Values',
+        reasoning: true,
+        reasoning_options: [{ type: 'effort', values: [] }],
+      },
+    };
+
+    const stub = buildMinimalStub('empty-values', devMetadata);
+
+    expect(stub.reasoning_options).toEqual([
+      { type: 'effort', values: ['low', 'medium', 'high'] },
+    ]);
+  });
+
+  it('preserves an explicit effort ladder from models.dev', () => {
+    const devMetadata = {
+      'explicit-ladder': {
+        id: 'explicit-ladder',
+        name: 'Explicit Ladder',
+        reasoning: true,
+        reasoning_options: [{ type: 'effort', values: ['high', 'max'] }],
+      },
+    };
+
+    const stub = buildMinimalStub('explicit-ladder', devMetadata);
+
+    expect(stub.reasoning_options).toEqual([{ type: 'effort', values: ['high', 'max'] }]);
+  });
+
+  it('leaves a non-reasoning model without an effort ladder', () => {
+    const devMetadata = {
+      'no-reasoning': {
+        id: 'no-reasoning',
+        name: 'No Reasoning',
+        reasoning: false,
+        reasoning_options: [],
+      },
+    };
+
+    const stub = buildMinimalStub('no-reasoning', devMetadata);
+
+    expect(stub.reasoning_options).toEqual([]);
   });
 
   it('strips the provider field from models.dev metadata', () => {
@@ -615,6 +665,7 @@ describe('addMissingModelsToOpencodeConfig', () => {
         limit: { context: 262144, output: 65536 },
         tool_call: true,
         reasoning: true,
+        reasoning_options: [{ type: 'effort', values: ['low', 'medium', 'high'] }],
       },
     });
   });
@@ -633,6 +684,7 @@ describe('addMissingModelsToOpencodeConfig', () => {
         limit: { context: 262144, output: 65536 },
         tool_call: true,
         reasoning: true,
+        reasoning_options: [{ type: 'effort', values: ['low', 'medium', 'high'] }],
       },
     });
   });
@@ -735,6 +787,7 @@ describe('addMissingModelsToOpencodeConfig', () => {
         limit: { context: 262144, output: 65536 },
         tool_call: true,
         reasoning: true,
+        reasoning_options: [{ type: 'effort', values: ['low', 'medium', 'high'] }],
       },
     });
   });
@@ -1251,8 +1304,12 @@ describe('syncOpencodeModelsWithUpstream', () => {
 
     const written = JSON.parse(readFileSync(configPath, 'utf-8'));
     const models = written.provider['saros-proxy'].models;
-    // Plumbing check: the sync fallback is the bundled catalog entry itself.
-    expect(models['deepseek-v4-pro']).toEqual(bundledCatalogFixture['deepseek-v4-pro']);
+    // Plumbing check: the sync fallback is the bundled catalog entry itself,
+    // plus the conservative ladder the bundle does not declare.
+    expect(models['deepseek-v4-pro']).toEqual({
+      ...bundledCatalogFixture['deepseek-v4-pro'],
+      reasoning_options: [{ type: 'effort', values: ['low', 'medium', 'high'] }],
+    });
   });
 
   it('handles models.dev returning empty (no opencode-go provider)', async () => {
