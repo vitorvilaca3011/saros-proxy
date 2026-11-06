@@ -11,6 +11,7 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { existsSync, mkdirSync, writeFileSync, appendFileSync, readFileSync, rmSync, mkdtempSync, statSync, readlinkSync, readdirSync, closeSync, chmodSync, openSync, writeSync, symlinkSync } from 'node:fs';
 import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { tmpdir } from 'node:os';
 import { createServer } from 'node:http';
 import type * as Daemon from '../src/cli/daemon.js';
@@ -1552,6 +1553,47 @@ describe('daemonStart', () => {
 
     expect(exitSpy).toHaveBeenCalledWith(0);
     expect(openFdsTo(logPath)).toEqual([]);
+  });
+
+  it('seeds models.json on a start when the user has none', async () => {
+    stubHealthDown();
+    mockSpawn.mockClear();
+    mockProcessExitRecord();
+    vi.spyOn(console, 'log').mockImplementation(() => {});
+    vi.spyOn(process, 'kill').mockImplementation(() => true); // child stays alive
+    vi.useFakeTimers();
+
+    await daemon.daemonStart();
+    await vi.advanceTimersByTimeAsync(2000);
+
+    const bundled = readFileSync(
+      join(dirname(fileURLToPath(import.meta.url)), '..', 'assets', 'models.json'),
+      'utf-8',
+    );
+    expect(readFileSync(join(sarosDir, 'models.json'), 'utf-8')).toBe(bundled);
+    // Let the post-verification work (models sync, update check) settle.
+    await vi.advanceTimersByTimeAsync(60_000);
+  });
+
+  it('keeps an existing user models.json instead of overwriting it', async () => {
+    stubHealthDown();
+    mockSpawn.mockClear();
+    mockProcessExitRecord();
+    const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+    vi.spyOn(process, 'kill').mockImplementation(() => true); // child stays alive
+    vi.useFakeTimers();
+    const userCatalog = '{"mine":{"id":"mine","name":"My Model"}}';
+    mkdirSync(sarosDir, { recursive: true });
+    writeFileSync(join(sarosDir, 'models.json'), userCatalog, 'utf-8');
+
+    await daemon.daemonStart();
+    await vi.advanceTimersByTimeAsync(2000);
+
+    expect(readFileSync(join(sarosDir, 'models.json'), 'utf-8')).toBe(userCatalog);
+    const output = logSpy.mock.calls.map((call) => String(call[0])).join('\n');
+    expect(output).toContain('models.json already present, keeping the user copy');
+    // Let the post-verification work (models sync, update check) settle.
+    await vi.advanceTimersByTimeAsync(60_000);
   });
 
   it('rotates daemon.log at start when it exceeds 10 MB', async () => {

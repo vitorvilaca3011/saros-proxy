@@ -396,22 +396,28 @@ function readLogSince(offset: number): string {
 
 /**
  * Ensure models.json exists at ~/.config/saros/models.json.
- * Always overwrites with the bundled copy on every daemon start.
+ *
+ * Seeds the bundled copy only when the file is absent. An existing file is the
+ * user's — overwriting it on every start discarded their edits.
  */
 function ensureModelsJson(): void {
   const modelsPath = getModelsJsonPath();
   if (!assertStateDir(modelsPath, 'write')) return;
+
+  if (existsSync(modelsPath)) {
+    console.log(chalk.dim('models.json already present, keeping the user copy'));
+    return;
+  }
+
+  const bundledPath = pathJoin(PACKAGE_ROOT, 'assets', 'models.json');
+  if (!existsSync(bundledPath)) return;
 
   const dir = pathJoin(homedir(), '.config', 'saros');
   if (!existsSync(dir)) {
     mkdirSync(dir, { recursive: true });
   }
 
-  // Copy bundled models.json to default location (always overwrite)
-  const bundledPath = pathJoin(PACKAGE_ROOT, 'models.json');
-  if (existsSync(bundledPath)) {
-    copyFileSync(bundledPath, modelsPath);
-  }
+  copyFileSync(bundledPath, modelsPath);
 }
 
 // ---------------------------------------------------------------------------

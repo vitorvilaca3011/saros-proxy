@@ -30,7 +30,7 @@ describe('loadModelsCatalog', () => {
     }
   });
 
-  it('loads the bundled catalog from the package root by default', () => {
+  it('loads the bundled catalog from assets/models.json by default', () => {
     const models = loadModelsCatalog();
 
     expect(Object.keys(models).length).toBeGreaterThan(0);

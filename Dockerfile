@@ -12,7 +12,7 @@ RUN npm ci
 
 COPY tsconfig.json ./
 COPY src/ ./src/
-COPY models.json ./
+COPY assets/models.json ./assets/
 RUN npm run build
 
 # ===========================================================================
@@ -31,7 +31,7 @@ RUN npm ci --omit=dev && npm cache clean --force
 
 # Copy compiled output + bundled model catalog
 COPY --from=build /app/dist ./dist
-COPY --from=build /app/models.json ./
+COPY --from=build /app/assets/models.json ./assets/
 
 # Expose proxy port
 EXPOSE 3000

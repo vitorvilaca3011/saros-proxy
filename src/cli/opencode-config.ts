@@ -199,7 +199,7 @@ export function updateOpencodeConfig(
       }
     }
 
-    // Build provider configuration (models from bundled models.json)
+    // Build provider configuration (models from bundled `assets/models.json`)
     const providerConfig = {
       npm: '@ai-sdk/openai-compatible',
       name: 'Saros',
