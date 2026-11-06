@@ -9,13 +9,13 @@
 import { constants, existsSync, readFileSync, writeFileSync, copyFileSync } from 'node:fs';
 import { getDefaultOpencodeConfigPath, stripJsoncComments } from './cli/opencode-config.js';
 import { getModelsList } from './models-fetcher.js';
+import { MODELS_DEV_PROVIDER_ID } from './constants.js';
 import {
-  MODELS_DEV_URL,
-  MODELS_DEV_CACHE_TTL_MS,
-  MODELS_DEV_TIMEOUT_MS,
-  MODELS_DEV_PROVIDER_ID,
-  MODELS_DEV_SAFE_FIELDS,
-} from './constants.js';
+  extractProviderModels,
+  fetchModelsDevProvider,
+  pickModelsDevFields,
+  resetModelsDevCache,
+} from './models-dev.js';
 import { loadModelsCatalog } from './models-catalog.js';
 import { logger } from './logger.js';
 import type { ProxyConfig } from './config.js';
@@ -143,19 +143,6 @@ export function getMissingModels(current: string[], upstream: string[]): string[
 }
 
 /**
- * Safely pick only whitelisted fields from a models.dev metadata entry.
- */
-function pickSafeFields(entry: Record<string, unknown>): Record<string, unknown> {
-  const result: Record<string, unknown> = {};
-  for (const key of MODELS_DEV_SAFE_FIELDS) {
-    if (key in entry) {
-      result[key] = entry[key];
-    }
-  }
-  return result;
-}
-
-/**
  * Build a minimal model stub for use in opencode.json.
  *
  * Priority (first match wins):
@@ -178,7 +165,7 @@ export function buildMinimalStub(
       // Edge case: if the dev entry exists but has none of our safe fields,
       // the result is a valid { id } stub — Tiers 2/3 are intentionally skipped
       // because the model is "known" via dev metadata.
-      const safe = pickSafeFields(raw);
+      const safe = pickModelsDevFields(raw);
       safe.id = modelId;
       return safe;
     }
@@ -310,7 +297,7 @@ export function addMissingModelsToOpencodeConfig(
         const devEntry = modelsDevMetadata[id];
         if (!devEntry || typeof devEntry !== 'object' || Array.isArray(devEntry)) continue;
 
-        const additions = pickSafeFields(devEntry);
+        const additions = pickModelsDevFields(devEntry);
         const modelObj = model as Record<string, unknown>;
         let enriched = false;
 
@@ -424,14 +411,10 @@ export async function syncOpencodeModelsWithUpstream(
 // models.dev metadata fetching
 // ---------------------------------------------------------------------------
 
-/** Module-level cache for models.dev response. Null = unset. */
-type ModelsDevCache = { ts: number; data: Record<string, Record<string, unknown>> };
-let _modelsDevCache: ModelsDevCache | null = null;
-
 /**
  * Extract the opencode-go provider's models from a models.dev API response.
  *
- * Pure function — callers handle JSON parsing and error recovery.
+ * Thin delegate: per-provider extraction lives in `models-dev.ts`.
  *
  * @param parsed — Parsed models.dev JSON object (result of `JSON.parse`)
  * @returns Model ID → metadata map, or empty object if provider not found
@@ -439,52 +422,20 @@ let _modelsDevCache: ModelsDevCache | null = null;
 export function extractOpencodeGoModels(
   parsed: Record<string, unknown>,
 ): Record<string, Record<string, unknown>> {
-  // The API returns a flat dictionary keyed by provider ID, e.g.:
-  // { "opencode-go": { id, env, npm, api, name, doc, models: { ... } }, ... }
-  const entry = parsed[MODELS_DEV_PROVIDER_ID];
-  if (!entry || typeof entry !== 'object' || Array.isArray(entry)) return {};
-
-  const models = (entry as Record<string, unknown>).models;
-  if (!models || typeof models !== 'object' || Array.isArray(models)) return {};
-
-  return models as Record<string, Record<string, unknown>>;
+  return extractProviderModels(parsed, MODELS_DEV_PROVIDER_ID);
 }
 
 /**
- * Fetch and cache models.dev metadata for opencode-go models.
+ * Fetch opencode-go metadata from models.dev.
  *
- * Caches in memory with TTL. Never throws — returns null on any failure.
- * Skips in-flight deduplication (YAGNI — single orchestrator path).
- *
- * @returns Model ID → metadata map, null on failure, empty on missing provider
+ * Never throws — returns null on any failure, `{}` when the provider is absent.
+ * The TTL cache is shared with every other provider slice.
  */
 export async function fetchModelsDevMetadata(): Promise<Record<string, Record<string, unknown>> | null> {
-  // Return cached data if within TTL
-  if (_modelsDevCache !== null && Date.now() - _modelsDevCache.ts < MODELS_DEV_CACHE_TTL_MS) {
-    return _modelsDevCache.data;
-  }
-
-  try {
-    const response = await fetch(MODELS_DEV_URL, {
-      signal: AbortSignal.timeout(MODELS_DEV_TIMEOUT_MS),
-    });
-
-    if (!response.ok) return null;
-
-    const text = await response.text();
-    const parsed: Record<string, unknown> = JSON.parse(text);
-
-    const data = extractOpencodeGoModels(parsed);
-    _modelsDevCache = { ts: Date.now(), data };
-    return data;
-  } catch {
-    return null;
-  }
+  return fetchModelsDevProvider(MODELS_DEV_PROVIDER_ID);
 }
 
-/**
- * Clear the models.dev in-memory cache (test helper).
- */
+/** Clear the models.dev in-memory cache (test helper). */
 export function resetModelsDevCacheState(): void {
-  _modelsDevCache = null;
+  resetModelsDevCache();
 }

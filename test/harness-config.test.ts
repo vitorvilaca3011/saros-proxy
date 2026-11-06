@@ -44,7 +44,7 @@ vi.mock('node:fs', async (importOriginal) => {
 // Live (non-offline) model-sync paths hit the network; stub them so
 // buildCanonicalModels/syncModelsInAllHarnesses tests stay deterministic.
 vi.mock('../src/models-sync.js', async (importOriginal) => {
-  const actual = await importOriginal<typeof import('../src/models-sync.js')>();
+  const actual = await importOriginal<typeof ModelsSyncModule>();
   return {
     ...actual,
     fetchUpstreamModelIds: vi.fn(),
@@ -53,6 +53,16 @@ vi.mock('../src/models-sync.js', async (importOriginal) => {
     syncOpencodeModelsWithUpstream: vi.fn(),
   };
 });
+
+// Per-provider models.dev slices are fetched inside buildCanonicalModels.
+// Stub the network read; tests set the slice they need.
+vi.mock('../src/models-dev.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof ModelsDevModule>();
+  return { ...actual, fetchModelsDevProvider: vi.fn() };
+});
+
+import type * as ModelsSyncModule from '../src/models-sync.js';
+import type * as ModelsDevModule from '../src/models-dev.js';
 
 import {
   buildCanonicalModels,
@@ -68,6 +78,7 @@ import {
   buildMinimalStub,
   syncOpencodeModelsWithUpstream,
 } from '../src/models-sync.js';
+import { fetchModelsDevProvider } from '../src/models-dev.js';
 import type { ProxyConfig } from '../src/config.js';
 import {
   parseHarnessCommandArgs,
@@ -84,6 +95,7 @@ const mockedFetchUpstreamIds = vi.mocked(fetchUpstreamModelIds);
 const mockedFetchModelsDevMetadata = vi.mocked(fetchModelsDevMetadata);
 const mockedBuildMinimalStub = vi.mocked(buildMinimalStub);
 const mockedSyncOpencodeUpstream = vi.mocked(syncOpencodeModelsWithUpstream);
+const mockedFetchModelsDevProvider = vi.mocked(fetchModelsDevProvider);
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -321,6 +333,8 @@ describe('buildCanonicalModels', () => {
     mockedFetchModelsDevMetadata.mockReset();
     mockedBuildMinimalStub.mockReset();
     mockedSyncOpencodeUpstream.mockReset();
+    mockedFetchModelsDevProvider.mockReset();
+    mockedFetchModelsDevProvider.mockResolvedValue(null);
   });
 
   afterEach(async () => {
@@ -1094,6 +1108,11 @@ describe('syncModelsInAllHarnesses', () => {
 });
 
 describe('buildCanonicalModels — provider catalogs', () => {
+  beforeEach(() => {
+    mockedFetchModelsDevProvider.mockReset();
+    mockedFetchModelsDevProvider.mockResolvedValue(null);
+  });
+
   afterEach(() => {
     // Restore the fetchCatalog spies; the models-sync vi.fn() mocks keep
     // their per-test implementations (set explicitly in each test).
@@ -1167,6 +1186,81 @@ describe('buildCanonicalModels — provider catalogs', () => {
 
     // Rotation width: the upstream entry shows how many keys can serve it.
     expect(((result['glm-5'] as Record<string, unknown>).name)).toBe('glm-5 (1)');
+  });
+
+  it('enriches @commandcode entries from models.dev and never drops unknown ones', async () => {
+    mockedFetchUpstreamIds.mockResolvedValue(['glm-5']);
+    mockedFetchModelsDevMetadata.mockResolvedValue(null);
+    mockedBuildMinimalStub.mockImplementation((id: string) => ({ id, name: id }));
+    vi.spyOn(commandcodeProvider, 'fetchCatalog').mockResolvedValue([
+      { id: 'claude-opus-5', owned_by: 'anthropic' }, // models.dev entry exists
+      { id: 'deepseek/deepseek-v4-pro', owned_by: 'deepseek' }, // bundle, bare-name match
+      { id: 'claude-haiku-5-5' }, // bundle, exact id
+      { id: 'vendor/mystery-1' }, // no metadata anywhere
+    ]);
+    mockedFetchModelsDevProvider.mockImplementation(async (providerId: string) =>
+      providerId === 'commandcode'
+        ? {
+            'claude-opus-5': {
+              id: 'claude-opus-5',
+              name: 'Claude Opus 5 (dev)',
+              tool_call: true,
+              reasoning: true,
+              limit: { context: 1000000, output: 128000 },
+              modalities: { input: ['text', 'image'], output: ['text'] },
+              cost: { input: 5, output: 25, cache_read: 0.5, cache_write: 6.25 },
+              reasoning_options: [{ type: 'effort', values: ['low', 'high', 'max'] }],
+              provider: 'must-not-leak',
+            },
+          }
+        : {},
+    );
+
+    const config = {
+      port: 3000,
+      keys: [{ label: 'cc', key: 'user_cc-key-abcdefghijklmnop', provider: 'commandcode' }],
+    } as unknown as ProxyConfig;
+
+    const result = await buildCanonicalModels(config);
+
+    // The commandcode slice is the one consulted for @commandcode entries.
+    expect(mockedFetchModelsDevProvider).toHaveBeenCalledWith('commandcode');
+
+    // models.dev wins, is whitelisted, keeps the suffixed id and owned_by.
+    const enriched = result['claude-opus-5@commandcode'] as Record<string, unknown>;
+    expect(enriched).toMatchObject({
+      id: 'claude-opus-5@commandcode',
+      name: 'Claude Opus 5 (dev) (1)',
+      tool_call: true,
+      reasoning: true,
+      limit: { context: 1000000, output: 128000 },
+      modalities: { input: ['text', 'image'], output: ['text'] },
+      cost: { input: 5, output: 25, cache_read: 0.5, cache_write: 6.25 },
+      reasoning_options: [{ type: 'effort', values: ['low', 'high', 'max'] }],
+      owned_by: 'anthropic',
+    });
+    expect(enriched).not.toHaveProperty('provider');
+
+    // Absent from models.dev but present in the bundled catalog: still listed,
+    // with the bundle's metadata (exact id and bare-name matches).
+    const bundled = result['deepseek/deepseek-v4-pro@commandcode'] as Record<string, unknown>;
+    expect(bundled.name).toBe('DeepSeek V4 Pro (New) (1)');
+    expect((bundled.limit as Record<string, unknown>).context).toBe(1000000);
+
+    const bundledExact = result['claude-haiku-5-5@commandcode'] as Record<string, unknown>;
+    expect(bundledExact.name).toBe('Claude Haiku 5.5 (1)');
+    expect((bundledExact.limit as Record<string, unknown>).context).toBe(1000000);
+
+    // Absent everywhere: still listed, catalog defaults + heuristic name.
+    expect(result['vendor/mystery-1@commandcode']).toEqual({
+      id: 'vendor/mystery-1@commandcode',
+      name: 'vendor/mystery-1@commandcode (1)',
+      tool_call: true,
+      reasoning: true,
+      limit: { context: 262144, output: 65536 },
+      modalities: { input: ['text'], output: ['text'] },
+      reasoning_options: [{ type: 'effort', values: ['low', 'medium', 'high'] }],
+    });
   });
 
   it('skips provider catalogs entirely when the user holds no key for them', async () => {

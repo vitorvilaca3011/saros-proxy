@@ -11,6 +11,13 @@
 import type { ProxyConfig } from '../config.js';
 import { loadModelsFromJson } from './opencode-config.js';
 import { buildMinimalStub, fetchModelsDevMetadata, fetchUpstreamModelIds } from '../models-sync.js';
+import {
+  fetchModelsDevProvider,
+  findProviderModel,
+  pickModelsDevFields,
+} from '../models-dev.js';
+import type { ModelsDevModelMap } from '../models-dev.js';
+import { loadModelsCatalog } from '../models-catalog.js';
 import { allProviders, getProvider, inferProvider } from '../providers/index.js';
 import type { KeyProvider, ProviderId } from '../providers/index.js';
 
@@ -155,40 +162,80 @@ function countServingKeys(
 }
 
 /**
- * Map one provider-catalog entry into the canonical opencode-shaped entry.
- * Uses the catalog's own fields when present (commandcode serves name +
- * context_length); models.dev metadata is not available for these providers.
+ * Bundled `models.json` entry for a provider-native id, when present.
+ *
+ * Exact id first, then bare name: the live catalog prefixes ids
+ * ('deepseek/deepseek-v4-pro') while the bundle keys the bare model
+ * ('deepseek-v4-pro').
  */
+function bundledModel(nativeId: string): Record<string, unknown> | undefined {
+  const catalog = loadModelsCatalog();
+  const direct = catalog[nativeId];
+  if (typeof direct === 'object' && direct !== null && !Array.isArray(direct)) {
+    return direct as Record<string, unknown>;
+  }
+
+  const bare = bareModelName(nativeId);
+  for (const [id, entry] of Object.entries(catalog)) {
+    if (typeof entry !== 'object' || entry === null || Array.isArray(entry)) continue;
+    if (bareModelName(id) === bare) return entry as Record<string, unknown>;
+  }
+  return undefined;
+}
 
 /**
  * Map one provider-catalog entry into the canonical opencode-shaped entry.
- * Uses the catalog's own fields when present (commandcode serves name +
- * context_length); models.dev metadata is not available for these providers.
+ *
+ * Metadata priority (first match wins):
+ *   1. models.dev slice of the owning provider (exact id, then bare name)
+ *   2. bundled `models.json`
+ *   3. the live catalog's own fields, then safe defaults
+ *
+ * Providers always keep their `owned_by` hint and the entry id carries the
+ * `@provider` routing suffix. A model absent from models.dev and the bundle
+ * still surfaces — enrichment never drops it.
  */
 function providerCatalogToCanonical(
   modelId: string,
+  nativeId: string,
   entry: Record<string, unknown>,
   keyCount: number,
+  devModels: ModelsDevModelMap,
 ): Record<string, unknown> {
-  const context = typeof entry.context_length === 'number' ? entry.context_length : undefined;
-  const name = typeof entry.name === 'string' ? entry.name : modelId;
-  return {
-    id: modelId,
-    name: annotateName(name, keyCount),
-    tool_call: true,
-    reasoning: true,
-    limit: {
-      context: context ?? 262144,
-      output: 65536,
-    },
-    modalities: { input: ['text'], output: ['text'] },
-    // Conservative effort ladder for provider-catalog models (no models.dev
-    // metadata): the commandcode gateway accepts low|medium|high|xhigh and
-    // rejects minimal — better declared here than invented by the harness.
-    reasoning_options: [{ type: 'effort', values: ['low', 'medium', 'high'] }],
-    // Hint consumed by display tooling; harmless to harnesses that ignore it.
-    ...(typeof entry.owned_by === 'string' ? { owned_by: entry.owned_by } : {}),
-  };
+  const devEntry = findProviderModel(devModels, nativeId);
+  const bundled = devEntry ? undefined : bundledModel(nativeId);
+  const catalogName = typeof entry.name === 'string' ? entry.name : modelId;
+
+  let canonical: Record<string, unknown>;
+  if (devEntry) {
+    canonical = { ...pickModelsDevFields(devEntry), id: modelId };
+  } else if (bundled) {
+    canonical = { ...bundled, id: modelId };
+  } else {
+    const context = typeof entry.context_length === 'number' ? entry.context_length : undefined;
+    canonical = {
+      id: modelId,
+      name: catalogName,
+      tool_call: true,
+      reasoning: true,
+      limit: {
+        context: context ?? 262144,
+        output: 65536,
+      },
+      modalities: { input: ['text'], output: ['text'] },
+      // Conservative effort ladder for models with no metadata anywhere: the
+      // commandcode gateway accepts low|medium|high|xhigh and rejects
+      // minimal — better declared here than invented by the harness.
+      reasoning_options: [{ type: 'effort', values: ['low', 'medium', 'high'] }],
+    };
+  }
+
+  canonical.name = annotateName(
+    typeof canonical.name === 'string' ? canonical.name : catalogName,
+    keyCount,
+  );
+  if (typeof entry.owned_by === 'string') canonical.owned_by = entry.owned_by;
+  return canonical;
 }
 
 /**
@@ -229,6 +276,9 @@ async function appendProviderCatalogModels(
     providers.map(async (provider) => {
       const catalog = await provider.fetchCatalog();
       if (!catalog) return;
+      // models.dev slice for this provider, consulted per entry. Shared TTL
+      // cache: when buildMinimalStub already fetched opencode-go this is free.
+      const devModels = (await fetchModelsDevProvider(provider.id)) ?? {};
       for (const entry of catalog) {
         const rawId = typeof entry.id === 'string' ? entry.id : '';
         if (!rawId) continue;
@@ -252,8 +302,10 @@ async function appendProviderCatalogModels(
         byBareName.set(bare, suffixedId);
         map[suffixedId] = providerCatalogToCanonical(
           suffixedId,
+          rawId,
           entry,
           countServingKeys(config, bare, provider.id),
+          devModels,
         );
       }
     }),
@@ -265,8 +317,9 @@ async function appendProviderCatalogModels(
  *
  * Live path (config provided, not offline): fetch upstream model IDs and
  * enrich each with models.dev metadata via buildMinimalStub, then append
- * provider-specific catalog models (@commandcode etc.). Falls back to the
- * bundled models.json when the upstream fetch yields nothing.
+ * provider-specific catalog models (@commandcode etc.) enriched from that
+ * provider's own models.dev slice. Falls back to the bundled models.json
+ * when the upstream fetch yields nothing.
  * Offline path (or no config): bundled models.json only.
  */
 export async function buildCanonicalModels(

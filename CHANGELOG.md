@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **CommandCode models are enriched from models.dev.** The models.dev read is
+  now per provider (`src/models-dev.ts`): `opencode-go` and `commandcode`
+  slices come from the same cached document, and the request always sends a
+  `User-Agent` (Cloudflare answers 403 without one). `@commandcode` harness
+  entries take metadata from the commandcode slice first, then the bundled
+  `models.json`, then the live catalog/defaults — a model absent from
+  models.dev is never dropped.
+
 ## [1.0.0] - 2026-11-05
 
 First stable release. The public surface — the `/v1/*` and `/zen/go/v1/*` routes, the
