@@ -10,6 +10,7 @@
 
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { existsSync, mkdirSync, writeFileSync, appendFileSync, readFileSync, rmSync, mkdtempSync, statSync, readlinkSync, readdirSync, closeSync, chmodSync, openSync, writeSync, symlinkSync } from 'node:fs';
+import type * as NodeFs from 'node:fs';
 import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { tmpdir } from 'node:os';
@@ -42,6 +43,32 @@ vi.mock('node:child_process', () => ({
   spawn: mockSpawn,
   execFileSync: mockExecFileSync,
 }));
+
+// Logger is mocked so a warning emitted from inside a timer is observable.
+const mockLoggerWarn = vi.hoisted(() => vi.fn());
+vi.mock('../src/logger.js', () => ({
+  logger: { debug: vi.fn(), info: vi.fn(), warn: mockLoggerWarn, error: vi.fn() },
+}));
+
+// Force the bundled catalog read to fail when a test flips the flag. The
+// daemon imports readFileSync directly, so an ESM spy cannot intercept it.
+const mockBundleReadFailure = vi.hoisted(() => ({ active: false }));
+vi.mock('node:fs', async (importOriginal) => {
+  const actual = await importOriginal<typeof NodeFs>();
+  return {
+    ...actual,
+    readFileSync: ((path: unknown, ...rest: unknown[]) => {
+      const isBundle =
+        typeof path === 'string' &&
+        path.includes('assets') &&
+        path.endsWith('models.json');
+      if (mockBundleReadFailure.active && isBundle) {
+        throw new Error('EIO: simulated broken bundle');
+      }
+      return (actual.readFileSync as (...args: unknown[]) => unknown)(path, ...rest);
+    }) as typeof actual.readFileSync,
+  };
+});
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -1659,6 +1686,35 @@ describe('daemonStart', () => {
     expect(output).toContain('backed it up');
     // Let the post-verification work (models sync, update check) settle.
     await vi.advanceTimersByTimeAsync(60_000);
+  });
+
+  it('warns and keeps starting when the bundled catalog cannot be read', async () => {
+    stubHealthDown();
+    mockSpawn.mockClear();
+    const exitSpy = mockProcessExitRecord();
+    vi.spyOn(console, 'log').mockImplementation(() => {});
+    vi.spyOn(process, 'kill').mockImplementation(() => true); // child stays alive
+    vi.useFakeTimers();
+    mockLoggerWarn.mockClear();
+    mockBundleReadFailure.active = true;
+
+    try {
+      await daemon.daemonStart();
+      // The start completes — no unhandled rejection after "✓ Proxy started".
+      await expect(vi.advanceTimersByTimeAsync(2000)).resolves.not.toThrow();
+    } finally {
+      mockBundleReadFailure.active = false;
+    }
+
+    expect(mockLoggerWarn).toHaveBeenCalledWith(
+      expect.objectContaining({ err: expect.any(Error) }),
+      expect.stringContaining('could not read the bundled catalog'),
+    );
+    // No models.json was seeded from the broken bundle.
+    expect(existsSync(join(sarosDir, 'models.json'))).toBe(false);
+    // The post-verification work still ran and the CLI exited 0.
+    await vi.advanceTimersByTimeAsync(60_000);
+    expect(exitSpy).toHaveBeenCalledWith(0);
   });
 
   it('rotates daemon.log at start when it exceeds 10 MB', async () => {

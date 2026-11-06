@@ -81,6 +81,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   an unparseable file to `models.json.corrupt` before re-seeding it. A missing or
   corrupt user catalog is no longer kept forever while the CLI silently fell back
   to the bundled copy.
+- **`saros-proxy start` survives an unreadable bundled catalog.** The seed read
+  and parsed `assets/models.json` outside any guard, so a damaged bundle (build
+  defect, disk error) became an unhandled rejection after "✓ Proxy started":
+  exit 1, the harness sync and the update check never ran, and the detached proxy
+  kept serving. The failure is now logged with its cause and the seed is skipped;
+  startup continues. `src/cli/daemon.ts` owns the guard.
+- **Primary and offline model stubs declare the conservative effort ladder.**
+  `buildMinimalStub` copied `reasoning_options` verbatim from models.dev and the
+  bundled catalog; the 11 `opencode-go` models that publish an empty ladder or a
+  bare toggle reached the harnesses without one, which then invented a ladder
+  containing `minimal`. A reasoning entry with no `effort` option carrying a
+  non-empty `values` array now gets `low|medium|high`; an explicit ladder is
+  preserved. `hasEffortOption` also rejects `{ type: 'effort', values: [] }`
+  (it used to accept mere presence), and the shared helpers live in
+  `src/model-ladder.ts`.
 
 ## [1.0.0] - 2026-11-05
 
