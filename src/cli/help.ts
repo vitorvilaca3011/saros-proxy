@@ -28,6 +28,11 @@ Commands:
   autostart status [--method <method>]       Check autostart status
   help                                       Show this help message
 
+Autostart methods:
+  systemd                                    Linux systemd --user unit (default on Linux)
+  vbs, registry                              Windows Startup folder script / HKCU Run key
+  auto                                       Platform default (Linux: systemd; Windows: AV-aware)
+
 Options:
   --version, -v                              Show version number`);
 }

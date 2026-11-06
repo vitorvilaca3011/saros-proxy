@@ -20,6 +20,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   effort option (empty ladder or toggle only) gets the conservative
   `low|medium|high` ladder, because the CommandCode gateway rejects `minimal`
   and the harness would otherwise invent it.
+- **Linux autostart via `systemd --user`.** `saros-proxy autostart install` writes
+  `$XDG_CONFIG_HOME/systemd/user/saros-proxy.service` (default
+  `~/.config/systemd/user`; a relative `$XDG_CONFIG_HOME` is ignored per the XDG
+  spec, with a warning), runs the current binary with `serve --port <port>` under
+  `Restart=on-failure`/`RestartSec=5` plus `StartLimitIntervalSec=60`/
+  `StartLimitBurst=3` so a permanent failure stops after three tries instead of
+  looping forever, and drives `systemctl --user daemon-reload`, `enable`,
+  `restart`, `disable --now` and `is-enabled`/`is-active`. `restart` makes a
+  reinstall with a new `--port` take effect immediately, including when the unit
+  was already active. On Linux `systemd` is the default method: `--method systemd`
+  is accepted and `auto` resolves to it. When `dist/index.js` is missing, `install`
+  fails with a `npm run build` hint instead of writing an `ExecStart` that systemd
+  cannot resolve.
 - **`npm run models:refresh` generates the bundled catalog.** `scripts/refresh-models.ts`
   merges models.dev metadata for `opencode-go` and `commandcode` with the live
   provider catalogs, so the bundle no longer depends on a hand-edited commit. A
@@ -42,6 +55,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`saros-proxy autostart` refuses methods that belong to another platform.**
+  `--method vbs|registry` on Linux and `--method systemd` on Windows now warn with
+  the requested method and the OS, and do nothing; `install` exits non-zero instead
+  of spawning `reg` or writing under `~/AppData` on Linux. The same gate covers
+  `status` (no more "not installed" false negative) and `uninstall`.
+- **`saros-proxy autostart uninstall` no longer leaves a dangling unit.** When
+  `systemctl --user disable --now` fails, the unit file is kept and the command exits
+  non-zero instead of deleting it while `default.target.wants/saros-proxy.service`
+  survives (the next login logged "Failed to load", and `is-enabled` still answered
+  `enabled`). An unsupported platform now exits non-zero for `uninstall` too, matching
+  `install`. Status classifies `systemctl` by exit status rather than English stderr,
+  so a missing unit reads "not installed" under any locale. The generated unit sets
+  `NODE_ENV=production` (JSON log lines in the journal), and an unknown `--method`
+  now warns instead of being silently dropped.
+- **`saros-proxy autostart install` no longer reports success without installing
+  anything.** Platforms without an implementation (macOS today) log a warning with
+  the OS and the alternative, and `install` exits non-zero (`status` stays zero
+  while reporting `unsupported`). A missing `systemctl` or user bus now names the
+  reason instead of returning a silent `false`.
 - **`saros-proxy start` repairs and completes `~/.config/saros/models.json`.** The
   daemon seeded the bundled copy on every start, discarding user edits; it now
   adds only the bundle keys the user file lacks (never overwriting a value the
