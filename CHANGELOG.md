@@ -9,6 +9,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **CommandCode models are enriched from models.dev.** The models.dev read is
+  now per provider (`src/models-dev.ts`): `opencode-go` and `commandcode`
+  slices come from the same cached document, and the request always sends a
+  stable CLI `User-Agent` (measured 2026-11-06: a library-default UA got 403
+  where `User-Agent: cli` got 200). `@commandcode` harness
+  entries take metadata from the commandcode slice first, then the bundled
+  `assets/models.json`, then the live catalog/defaults — a model absent from
+  models.dev is never dropped. A reasoning model whose metadata declares no
+  effort option (empty ladder or toggle only) gets the conservative
+  `low|medium|high` ladder, because the CommandCode gateway rejects `minimal`
+  and the harness would otherwise invent it.
 - **Linux autostart via `systemd --user`.** `saros-proxy autostart install` writes
   `$XDG_CONFIG_HOME/systemd/user/saros-proxy.service` (default
   `~/.config/systemd/user`; a relative `$XDG_CONFIG_HOME` is ignored per the XDG
