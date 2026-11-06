@@ -481,13 +481,20 @@ into the "no passphrase source" boot error — a locked keyring is not reported
 as an empty store.
 
 **systemd-creds recipe** (keeps the passphrase out of the unit file and the
-environment of the shell):
+environment of the shell). This is a **system** unit recipe — run the encryption
+as root, since the host key lives in `/var/lib/systemd/credential.secret`:
 
 ```bash
-# One-time: encrypt stdin into a host+user-bound credential.
-systemd-creds encrypt --name=saros-passphrase --with-key=host+user \
+# One-time, as root: encrypt stdin into a host-bound credential.
+# (--with-key=auto picks tpm2+host when the TPM is available, host otherwise.
+#  "host+user" is not a valid key type, and --user only exists from v256.)
+systemd-creds encrypt --name=saros-passphrase --with-key=auto \
   /dev/stdin /etc/saros/passphrase.cred
 ```
+
+For the `systemd --user` unit created by `saros-proxy autostart install`, use
+`Environment=`/`EnvironmentFile=` instead: user credentials need
+`systemd-creds --user`, which only exists from systemd v256 (this host runs 255).
 
 ```ini
 # /etc/systemd/system/saros-proxy.service
