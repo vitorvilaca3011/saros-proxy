@@ -10,9 +10,9 @@ import { describe, it, expect, vi } from 'vitest';
 import {
   defaultRefreshFetchers,
   extractModelsDevProviderModels,
-  fetchCommandcodeModelIds,
+  fetchCommandcodeModels,
   fetchModelsDevCatalog,
-  fetchOpencodeGoModelIds,
+  fetchOpencodeGoModels,
   formatCatalogDiff,
   mergeModelCatalog,
   parseCatalogContent,
@@ -61,8 +61,8 @@ const MODELS_DEV_SAMPLE = {
 function mergeSample(overrides: Partial<ModelCatalogMergeInput> = {}) {
   return mergeModelCatalog({
     modelsDev: MODELS_DEV_SAMPLE,
-    opencodeModelIds: ['glm-5.3'],
-    commandcodeModelIds: ['zai-org/GLM-5.3', 'vendor/new-model'],
+    opencodeModels: [{ id: 'glm-5.3' }],
+    commandcodeModels: [{ id: 'zai-org/GLM-5.3' }, { id: 'vendor/new-model', name: 'New Model' }],
     current: {
       'glm-5.3': {
         id: 'glm-5.3',
@@ -87,13 +87,27 @@ function ioWith(content: string | null) {
   return { read: vi.fn(() => content), write: vi.fn<(content: string) => void>() };
 }
 
+/** Defaults a live-only model gets (mirrors `providerCatalogToCanonical`). */
+function liveStubDefaults(): Record<string, unknown> {
+  return {
+    tool_call: true,
+    reasoning: true,
+    limit: { context: 262_144, output: 65_536 },
+    modalities: { input: ['text'], output: ['text'] },
+    reasoning_options: [{ type: 'effort', values: ['low', 'medium', 'high'] }],
+  };
+}
+
 function fetchers(
   overrides: Partial<RefreshFetchers> = {},
 ): RefreshFetchers {
   return {
     modelsDev: async () => MODELS_DEV_SAMPLE,
-    opencodeModelIds: async () => ['glm-5.3'],
-    commandcodeModelIds: async () => ['zai-org/GLM-5.3', 'vendor/new-model'],
+    opencodeModels: async () => [{ id: 'glm-5.3' }],
+    commandcodeModels: async () => [
+      { id: 'zai-org/GLM-5.3' },
+      { id: 'vendor/new-model', name: 'New Model' },
+    ],
     ...overrides,
   };
 }
@@ -194,16 +208,201 @@ describe('mergeModelCatalog', () => {
     expect(result.changed).toEqual(['glm-5.3']);
   });
 
-  it('returns an empty catalog when models.dev has no known provider', () => {
+  it('seeds a live-only model with the metadata the live payload carries', () => {
+    const result = mergeModelCatalog({
+      modelsDev: MODELS_DEV_SAMPLE,
+      opencodeModels: [
+        { id: 'glm-5.3' },
+        { id: 'vendor/Brand-New', name: 'Brand New', context_length: 200_000 },
+      ],
+      commandcodeModels: [{ id: 'zai-org/GLM-5.3' }],
+      current: {},
+    });
+
+    expect(result.models['brand-new']).toEqual({
+      id: 'brand-new',
+      ...liveStubDefaults(),
+      limit: { context: 200_000, output: 65_536 },
+      name: 'Brand New',
+    });
+    expect(result.added).toContain('brand-new');
+  });
+
+  it('gives a live-only model every field the catalog schema requires', () => {
+    const result = mergeModelCatalog({
+      modelsDev: MODELS_DEV_SAMPLE,
+      opencodeModels: [{ id: 'vendor/only-live', name: 'Only Live' }],
+      commandcodeModels: [{ id: 'zai-org/GLM-5.3' }],
+      current: {},
+    });
+
+    const entry = result.models['only-live'];
+    const limit = entry.limit as Record<string, unknown>;
+    expect(typeof limit.context).toBe('number');
+    expect(typeof limit.output).toBe('number');
+    expect(limit.output).toBe(65_536);
+    expect(entry.modalities).toEqual({ input: ['text'], output: ['text'] });
+    expect(entry.tool_call).toBe(true);
+    expect(entry.reasoning).toBe(true);
+    expect(entry.reasoning_options).toEqual([
+      { type: 'effort', values: ['low', 'medium', 'high'] },
+    ]);
+  });
+
+  it('lets models.dev limit and modalities win over the live defaults', () => {
+    const result = mergeModelCatalog({
+      modelsDev: {
+        'opencode-go': {
+          models: {
+            'glm-5.3': {
+              id: 'glm-5.3',
+              limit: { context: 900_000, output: 42 },
+              modalities: { input: ['text', 'image'], output: ['text'] },
+            },
+          },
+        },
+        commandcode: { models: {} },
+      },
+      opencodeModels: [{ id: 'glm-5.3', context_length: 123 }],
+      commandcodeModels: [],
+      current: {},
+    });
+
+    expect(result.models['glm-5.3'].limit).toEqual({ context: 900_000, output: 42 });
+    expect(result.models['glm-5.3'].modalities).toEqual({
+      input: ['text', 'image'],
+      output: ['text'],
+    });
+  });
+
+  it('keeps the current fields of a live-only model already in the file', () => {
+    const current = {
+      'brand-new': { id: 'brand-new', name: 'User Name', cost: { input: 1 } },
+    };
+    const result = mergeModelCatalog({
+      modelsDev: MODELS_DEV_SAMPLE,
+      opencodeModels: [{ id: 'glm-5.3' }, { id: 'vendor/brand-new', name: 'Live Name' }],
+      commandcodeModels: [{ id: 'zai-org/GLM-5.3' }],
+      current,
+    });
+
+    expect(result.models['brand-new']).toMatchObject({
+      id: 'brand-new',
+      name: 'User Name',
+      cost: { input: 1 },
+      limit: { context: 262_144, output: 65_536 },
+    });
+    // The stub fills the missing schema fields, so the entry does change.
+    expect(result.changed).toEqual(['brand-new']);
+  });
+
+  it('does not remove a live model models.dev omits', () => {
+    const result = mergeModelCatalog({
+      modelsDev: MODELS_DEV_SAMPLE,
+      opencodeModels: [{ id: 'glm-5.3' }],
+      commandcodeModels: [{ id: 'zai-org/GLM-5.3' }, { id: 'vendor/glm-9' }],
+      current: { 'glm-9': { id: 'glm-9', name: 'GLM 9' } },
+    });
+
+    expect(result.removed).toEqual([]);
+    expect(result.models['glm-9']).toMatchObject({ id: 'glm-9', name: 'GLM 9' });
+  });
+
+  it('lets models.dev metadata win over the live stub', () => {
+    const result = mergeModelCatalog({
+      modelsDev: MODELS_DEV_SAMPLE,
+      opencodeModels: [{ id: 'glm-5.3', name: 'Live Name', context_length: 123 }],
+      commandcodeModels: [{ id: 'zai-org/GLM-5.3' }],
+      current: {},
+    });
+
+    expect(result.models['glm-5.3']).toMatchObject({
+      name: 'GLM 5.3',
+      limit: { context: 1_000_000 },
+    });
+  });
+
+  it('aborts when two live ids collapse to the same bare name', () => {
+    expect(() =>
+      mergeModelCatalog({
+        modelsDev: MODELS_DEV_SAMPLE,
+        opencodeModels: [{ id: 'glm-5.3' }],
+        commandcodeModels: [{ id: 'vendorA/foo' }, { id: 'vendorB/foo' }],
+        current: {},
+      }),
+    ).toThrow(/bare-name collision in commandcode.*vendorA\/foo.*vendorB\/foo.*"foo"/);
+  });
+
+  it('aborts when models.dev and the live catalog disagree on the raw id', () => {
+    expect(() =>
+      mergeModelCatalog({
+        modelsDev: {
+          'opencode-go': { models: { 'glm-5.3': { id: 'glm-5.3', name: 'GLM 5.3' } } },
+          commandcode: { models: { 'vendorA/foo': { id: 'vendorA/foo', name: 'Foo' } } },
+        },
+        opencodeModels: [{ id: 'glm-5.3' }],
+        commandcodeModels: [{ id: 'vendorB/foo' }],
+        current: {},
+      }),
+    ).toThrow(/bare-name collision in commandcode.*vendorB\/foo.*vendorA\/foo.*"foo"/);
+  });
+
+  it('falls back to the live stub when models.dev has no known provider', () => {
     const result = mergeModelCatalog({
       modelsDev: {},
-      opencodeModelIds: ['glm-5.3'],
-      commandcodeModelIds: ['vendor/new-model'],
+      opencodeModels: [{ id: 'glm-5.3', name: 'GLM 5.3' }],
+      commandcodeModels: [{ id: 'vendor/new-model' }],
       current: { ghost: { id: 'ghost' } },
     });
 
-    expect(result.models).toEqual({});
+    expect(result.models['glm-5.3']).toEqual({
+      id: 'glm-5.3',
+      ...liveStubDefaults(),
+      name: 'GLM 5.3',
+    });
+    expect(result.models['new-model']).toEqual({ id: 'new-model', ...liveStubDefaults() });
     expect(result.removed).toEqual(['ghost']);
+  });
+
+  it('treats a missing current catalog as empty', () => {
+    const result = mergeModelCatalog({
+      modelsDev: MODELS_DEV_SAMPLE,
+      opencodeModels: [{ id: 'glm-5.3' }],
+      commandcodeModels: [{ id: 'zai-org/GLM-5.3' }],
+    });
+
+    expect(result.added).toEqual(['glm-5.3']);
+    expect(result.removed).toEqual([]);
+  });
+
+  it('ignores live entries whose id normalizes to an empty key', () => {
+    const result = mergeModelCatalog({
+      modelsDev: MODELS_DEV_SAMPLE,
+      opencodeModels: [{ id: '' }, { id: 'glm-5.3' }],
+      commandcodeModels: [{ id: 'zai-org/GLM-5.3' }],
+      current: {},
+    });
+
+    expect(Object.keys(result.models)).toEqual(['glm-5.3']);
+  });
+
+  it('ignores models.dev entries with no usable metadata', () => {
+    const result = mergeModelCatalog({
+      modelsDev: {
+        'opencode-go': { models: { 'glm-5.3': {}, hy4: 'not an object' } },
+        commandcode: { models: {} },
+      },
+      opencodeModels: [{ id: 'glm-5.3', name: 'Live GLM' }, { id: 'hy4', name: 'Live HY4' }],
+      commandcodeModels: [],
+      current: {},
+    });
+
+    expect(result.models['glm-5.3']).toEqual({
+      id: 'glm-5.3',
+      ...liveStubDefaults(),
+      name: 'Live GLM',
+    });
+    expect(result.models.hy4).toEqual({ id: 'hy4', ...liveStubDefaults(), name: 'Live HY4' });
   });
 });
 
@@ -261,26 +460,44 @@ describe('fetchModelsDevCatalog', () => {
 });
 
 describe('live catalog fetchers', () => {
-  it('reads opencode-go ids and skips malformed entries', async () => {
+  it('reads opencode-go models and skips malformed entries', async () => {
     const fetchMock = vi.fn(async () =>
-      okResponse({ data: [{ id: 'glm-5.3' }, { id: '' }, { id: 7 }, null, { id: 'hy4' }] }),
+      okResponse({
+        data: [
+          { id: 'glm-5.3', name: 'GLM 5.3', context_length: 1_000_000 },
+          { id: '' },
+          { id: 7 },
+          null,
+          { id: 'hy4' },
+        ],
+      }),
     );
 
-    await expect(fetchOpencodeGoModelIds(fetchMock)).resolves.toEqual(['glm-5.3', 'hy4']);
+    await expect(fetchOpencodeGoModels(fetchMock)).resolves.toEqual([
+      { id: 'glm-5.3', name: 'GLM 5.3', context_length: 1_000_000 },
+      { id: 'hy4' },
+    ]);
     const [, init] = fetchMock.mock.calls[0] as unknown as [string, RequestInit];
     expect(init.headers).toMatchObject({ 'User-Agent': 'cli' });
   });
 
-  it('reads commandcode ids and drops messages-only claude models', async () => {
+  it('reads commandcode models that advertise /chat/completions', async () => {
     const fetchMock = vi.fn(async () =>
       okResponse({
-        data: [{ id: 'claude-opus-5' }, { id: 'zai-org/GLM-5.3' }, { id: 'gpt-6-astra' }],
+        data: [
+          { id: 'claude-opus-5', supported_endpoints: ['/messages'] },
+          { id: 'vendor/claude-impostor', supported_endpoints: ['/messages'] },
+          { id: 'zai-org/GLM-5.3', name: 'GLM-5.3', context_length: 1_000_000, supported_endpoints: ['/chat/completions'] },
+          { id: 'gpt-6-astra', supported_endpoints: ['/responses'] },
+          { id: 'gpt-6-sol', supported_endpoints: ['/chat/completions', '/responses'] },
+          { id: 'no-endpoints' },
+        ],
       }),
     );
 
-    await expect(fetchCommandcodeModelIds(fetchMock)).resolves.toEqual([
-      'zai-org/GLM-5.3',
-      'gpt-6-astra',
+    await expect(fetchCommandcodeModels(fetchMock)).resolves.toEqual([
+      { id: 'zai-org/GLM-5.3', name: 'GLM-5.3', context_length: 1_000_000 },
+      { id: 'gpt-6-sol' },
     ]);
   });
 
@@ -290,13 +507,15 @@ describe('live catalog fetchers', () => {
   ])('throws on %s', async (_label, response) => {
     const fetchMock = vi.fn(response);
 
-    await expect(fetchCommandcodeModelIds(fetchMock)).rejects.toThrow(/commandcode models/);
+    await expect(fetchCommandcodeModels(fetchMock)).rejects.toThrow(/commandcode models/);
   });
 
   it('wires the default fetchers to the live endpoints', async () => {
     const fetchMock = vi.fn(async (url: string) => {
       if (url.includes('models.dev')) return okResponse(MODELS_DEV_SAMPLE);
-      if (url.includes('commandcode')) return okResponse({ data: [{ id: 'zai-org/GLM-5.3' }] });
+      if (url.includes('commandcode')) {
+        return okResponse({ data: [{ id: 'zai-org/GLM-5.3', supported_endpoints: ['/chat/completions'] }] });
+      }
       return okResponse({ data: [{ id: 'glm-5.3' }] });
     });
     vi.stubGlobal('fetch', fetchMock);
@@ -304,8 +523,8 @@ describe('live catalog fetchers', () => {
     try {
       const live = defaultRefreshFetchers();
       await expect(live.modelsDev()).resolves.toEqual(MODELS_DEV_SAMPLE);
-      await expect(live.opencodeModelIds()).resolves.toEqual(['glm-5.3']);
-      await expect(live.commandcodeModelIds()).resolves.toEqual(['zai-org/GLM-5.3']);
+      await expect(live.opencodeModels()).resolves.toEqual([{ id: 'glm-5.3' }]);
+      await expect(live.commandcodeModels()).resolves.toEqual([{ id: 'zai-org/GLM-5.3' }]);
     } finally {
       vi.unstubAllGlobals();
     }
@@ -330,6 +549,19 @@ describe('refreshModelCatalog', () => {
     const result = await refreshModelCatalog(io, fetchers(), { dryRun: false });
 
     expect(result.written).toBe(false);
+    expect(result.formattingOnly).toBe(false);
+    expect(io.write).not.toHaveBeenCalled();
+  });
+
+  it('reports a formatting-only difference on a dry run', async () => {
+    const models = mergeSample({ current: {} }).models;
+    const io = ioWith(JSON.stringify(models));
+
+    const result = await refreshModelCatalog(io, fetchers(), { dryRun: true });
+
+    expect(result.formattingOnly).toBe(true);
+    expect(result.written).toBe(false);
+    expect(result.nextContent).not.toBe(result.previousContent);
     expect(io.write).not.toHaveBeenCalled();
   });
 
@@ -357,10 +589,23 @@ describe('refreshModelCatalog', () => {
     expect(io.write).not.toHaveBeenCalled();
   });
 
+  it('does not read or write when the opencode-go catalog fails', async () => {
+    const io = ioWith('{"keep":{"id":"keep"}}');
+    const failing = fetchers({
+      opencodeModels: async () => {
+        throw new Error('opencode-go models returned HTTP 503');
+      },
+    });
+
+    await expect(refreshModelCatalog(io, failing)).rejects.toThrow(/HTTP 503/);
+    expect(io.read).not.toHaveBeenCalled();
+    expect(io.write).not.toHaveBeenCalled();
+  });
+
   it('does not read or write when a live catalog fails', async () => {
     const io = ioWith('{"keep":{"id":"keep"}}');
     const failing = fetchers({
-      commandcodeModelIds: async () => {
+      commandcodeModels: async () => {
         throw new Error('commandcode models returned HTTP 500');
       },
     });
@@ -368,6 +613,77 @@ describe('refreshModelCatalog', () => {
     await expect(refreshModelCatalog(io, failing)).rejects.toThrow(/HTTP 500/);
     expect(io.read).not.toHaveBeenCalled();
     expect(io.write).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ['models.dev has no opencode-go models', { modelsDev: async () => ({ commandcode: { models: { x: { id: 'x' } } } }) }, /no opencode-go models/],
+    ['models.dev has no commandcode models', { modelsDev: async () => ({ 'opencode-go': { models: { x: { id: 'x' } } } }) }, /no commandcode models/],
+    ['models.dev has an empty opencode-go map', { modelsDev: async () => ({ 'opencode-go': { models: {} }, commandcode: { models: { x: { id: 'x' } } } }) }, /no opencode-go models/],
+    ['the opencode-go list is empty', { opencodeModels: async () => [] }, /opencode-go returned no models/],
+    ['the commandcode list is empty', { commandcodeModels: async () => [] }, /commandcode returned no models/],
+  ])('rejects without reading or writing when %s', async (_label, overrides, message) => {
+    const io = ioWith('{"keep":{"id":"keep"}}');
+
+    await expect(refreshModelCatalog(io, fetchers(overrides))).rejects.toThrow(message);
+    expect(io.read).not.toHaveBeenCalled();
+    expect(io.write).not.toHaveBeenCalled();
+  });
+
+  it('refuses to remove more than half of the current models', async () => {
+    const io = ioWith(
+      JSON.stringify({ a: { id: 'a' }, b: { id: 'b' }, c: { id: 'c' }, d: { id: 'd' }, e: { id: 'e' } }),
+    );
+    const shrinking = fetchers({
+      modelsDev: async () => ({
+        'opencode-go': { models: { a: { id: 'a' } } },
+        commandcode: { models: { b: { id: 'b' } } },
+      }),
+      opencodeModels: async () => [{ id: 'a' }],
+      commandcodeModels: async () => [{ id: 'b' }],
+    });
+
+    await expect(refreshModelCatalog(io, shrinking)).rejects.toThrow(
+      /remove 3 of 5 models \(60%\)/,
+    );
+    expect(io.write).not.toHaveBeenCalled();
+  });
+
+  it('allows the shrink when the caller opts in', async () => {
+    const io = ioWith(
+      JSON.stringify({ a: { id: 'a' }, b: { id: 'b' }, c: { id: 'c' }, d: { id: 'd' }, e: { id: 'e' } }),
+    );
+    const shrinking = fetchers({
+      modelsDev: async () => ({
+        'opencode-go': { models: { a: { id: 'a' } } },
+        commandcode: { models: { b: { id: 'b' } } },
+      }),
+      opencodeModels: async () => [{ id: 'a' }],
+      commandcodeModels: async () => [{ id: 'b' }],
+    });
+
+    const result = await refreshModelCatalog(io, shrinking, { allowShrink: true });
+
+    expect(result.removed).toEqual(['c', 'd', 'e']);
+    expect(io.write).toHaveBeenCalledTimes(1);
+  });
+
+  it('allows a shrink of exactly half', async () => {
+    const io = ioWith(
+      JSON.stringify({ a: { id: 'a' }, b: { id: 'b' }, c: { id: 'c' }, d: { id: 'd' } }),
+    );
+    const shrinking = fetchers({
+      modelsDev: async () => ({
+        'opencode-go': { models: { a: { id: 'a' } } },
+        commandcode: { models: { b: { id: 'b' } } },
+      }),
+      opencodeModels: async () => [{ id: 'a' }],
+      commandcodeModels: async () => [{ id: 'b' }],
+    });
+
+    const result = await refreshModelCatalog(io, shrinking);
+
+    expect(result.removed).toEqual(['c', 'd']);
+    expect(io.write).toHaveBeenCalledTimes(1);
   });
 
   it('refuses to overwrite a malformed current file', async () => {

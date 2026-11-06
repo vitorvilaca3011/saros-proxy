@@ -7,7 +7,13 @@ import type { MockInstance } from 'vitest';
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { join, sep } from 'node:path';
 import { tmpdir } from 'node:os';
-import { loadModelsCatalog, resetModelsCatalogCache } from '../src/models-catalog.js';
+import {
+  loadModelsCatalog,
+  mergeMissingModels,
+  parseCatalogObject,
+  resetModelsCatalogCache,
+  serializeCatalogObject,
+} from '../src/models-catalog.js';
 import { logger } from '../src/logger.js';
 
 describe('loadModelsCatalog', () => {
@@ -32,9 +38,22 @@ describe('loadModelsCatalog', () => {
 
   it('loads the bundled catalog from assets/models.json by default', () => {
     const models = loadModelsCatalog();
+    const keys = Object.keys(models);
 
-    expect(Object.keys(models).length).toBeGreaterThan(0);
+    expect(keys.length).toBeGreaterThan(0);
     expect(warnSpy).not.toHaveBeenCalled();
+
+    for (const key of keys) {
+      const entry = models[key] as Record<string, unknown>;
+      const limit = entry.limit as Record<string, unknown>;
+      expect(entry.id).toBe(key);
+      expect(typeof limit?.context).toBe('number');
+      expect(typeof limit?.output).toBe('number');
+      expect(entry.modalities).toBeTypeOf('object');
+    }
+
+    const ids = keys.map((key) => (models[key] as Record<string, unknown>).id);
+    expect(new Set(ids).size).toBe(ids.length);
   });
 
   it('parses an explicit catalog path', () => {
@@ -93,5 +112,55 @@ describe('loadModelsCatalog', () => {
 
     expect(loadModelsCatalog(path)).toEqual({});
     expect(warnSpy).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('parseCatalogObject', () => {
+  it('parses a JSON object', () => {
+    expect(parseCatalogObject('{"a":{"id":"a"}}')).toEqual({ a: { id: 'a' } });
+  });
+
+  it.each([
+    ['invalid JSON', '{ not json', /JSON/],
+    ['an array payload', '[1]', /not a JSON object/],
+    ['a null payload', 'null', /not a JSON object/],
+  ])('rejects %s', (_label, raw, message) => {
+    expect(() => parseCatalogObject(raw)).toThrow(message);
+  });
+});
+
+describe('serializeCatalogObject', () => {
+  it('writes 2-space JSON with a trailing newline', () => {
+    expect(serializeCatalogObject({ a: { id: 'a' } })).toBe(
+      '{\n  "a": {\n    "id": "a"\n  }\n}\n',
+    );
+  });
+});
+
+describe('mergeMissingModels', () => {
+  it('adds only the bundle keys the user file lacks', () => {
+    const existing = { a: { id: 'a' }, b: { id: 'b' } };
+    const bundle = { a: { id: 'a', name: 'Bundle A' }, b: { id: 'b' }, c: { id: 'c' } };
+
+    expect(mergeMissingModels(existing, bundle)).toEqual({
+      models: { a: { id: 'a' }, b: { id: 'b' }, c: { id: 'c' } },
+      added: ['c'],
+    });
+  });
+
+  it('never overwrites a customized value', () => {
+    const existing = { a: { id: 'a', name: 'My A', cost: { input: 0 } } };
+    const bundle = { a: { id: 'a', name: 'Bundle A', cost: { input: 9, output: 1 } } };
+
+    expect(mergeMissingModels(existing, bundle)).toEqual({ models: existing, added: [] });
+  });
+
+  it('reports nothing to add when the file already covers the bundle', () => {
+    const existing = { a: { id: 'a' } };
+
+    expect(mergeMissingModels(existing, { a: { id: 'a' } })).toEqual({
+      models: existing,
+      added: [],
+    });
   });
 });

@@ -8,14 +8,19 @@
  *
  * The merge is a pure function (`mergeModelCatalog`) so the catalog rules are
  * testable without network access:
- *   - `opencode-go` and `commandcode` entries are gated by their live catalog;
+ *   - membership follows the live catalogs: a model the provider serves enters
+ *     with the metadata the live payload carries even when models.dev omits it,
+ *     and it stays while the provider keeps advertising it;
  *   - `opencode-go` metadata wins when both providers know a model;
  *   - a field already in the current file survives when models.dev is silent
  *     about it (models.dev drops fields occasionally and a regeneration must
  *     not discard the value);
+ *   - two raw ids that collapse to the same bare key abort the refresh;
  *   - output keys, including nested object keys, are sorted so a refresh diff
  *     only shows real changes;
- *   - a failed fetch aborts before the file is touched.
+ *   - a failed fetch — or an empty/partial response — aborts before the file is
+ *     read, and a merge that would drop more than half of the current models
+ *     needs `allowShrink` before it writes anything.
  */
 
 import { isDeepStrictEqual } from 'node:util';
@@ -29,6 +34,7 @@ import {
   MODELS_FETCH_TIMEOUT_MS,
 } from './constants.js';
 import { OPENCODE_GO_USER_AGENT } from './providers/opencode-go.js';
+import { parseCatalogObject, serializeCatalogObject } from './models-catalog.js';
 
 // ---------------------------------------------------------------------------
 // Sources
@@ -89,17 +95,28 @@ export async function fetchModelsDevCatalog(
 }
 
 /**
- * Fetch the opencode-go live catalog ids.
+ * One entry of a live provider catalog: the id plus the metadata the payload
+ * carries. `name` and `context_length` seed a catalog entry when models.dev
+ * does not know the model yet.
+ */
+export interface LiveModel {
+  id: string;
+  name?: string;
+  context_length?: number;
+}
+
+/**
+ * Fetch the opencode-go live catalog.
  *
  * The list is authoritative for membership: models.dev keeps models the
  * provider already retired (`space-bunny`, `cat-jam-free`, …), and publishing
  * those as connectable models is what this gate prevents.
  */
-export async function fetchOpencodeGoModelIds(
+export async function fetchOpencodeGoModels(
   fetchImpl: FetchLike = fetch,
   timeoutMs = MODELS_FETCH_TIMEOUT_MS,
-): Promise<string[]> {
-  return fetchModelIds(
+): Promise<LiveModel[]> {
+  return fetchLiveModels(
     OPENCODE_GO_MODELS_URL,
     OPENCODE_GO_USER_AGENT,
     'opencode-go models',
@@ -110,62 +127,79 @@ export async function fetchOpencodeGoModelIds(
 }
 
 /**
- * Fetch the CommandCode live catalog ids.
+ * Fetch the CommandCode live catalog.
  *
- * `claude-*` is excluded: those entries advertise `/messages` only and the
- * proxy relays chat/completions shapes — the same filter the provider applies
- * when it indexes its catalog (`src/providers/commandcode.ts`).
+ * Only models that advertise `/chat/completions` are usable through the proxy,
+ * which relays chat/completions shapes. `claude-*` entries list `/messages`
+ * only (verified live: chat/completions → unsupported_model); a vendor-prefixed
+ * Claude model would slip past a bare `^claude` test, so the endpoint field —
+ * not the id — decides.
  */
-export async function fetchCommandcodeModelIds(
+export async function fetchCommandcodeModels(
   fetchImpl: FetchLike = fetch,
   timeoutMs = MODELS_FETCH_TIMEOUT_MS,
-): Promise<string[]> {
-  return fetchModelIds(
+): Promise<LiveModel[]> {
+  return fetchLiveModels(
     COMMANDCODE_MODELS_URL,
     MODELS_REFRESH_USER_AGENT,
     'commandcode models',
     fetchImpl,
     timeoutMs,
-    (id) => !/^claude/i.test(id),
+    supportsChatCompletions,
   );
 }
 
+/** True when the live entry advertises the OpenAI chat/completions endpoint. */
+function supportsChatCompletions(entry: Record<string, unknown>): boolean {
+  const endpoints = entry.supported_endpoints;
+  return Array.isArray(endpoints) && endpoints.includes('/chat/completions');
+}
+
 /** Shared `{ object: 'list', data: [{ id }] }` parser. */
-async function fetchModelIds(
+async function fetchLiveModels(
   url: string,
   userAgent: string,
   label: string,
   fetchImpl: FetchLike,
   timeoutMs: number,
-  keep: (id: string) => boolean,
-): Promise<string[]> {
+  keep: (entry: Record<string, unknown>) => boolean,
+): Promise<LiveModel[]> {
   const body = await fetchJson(url, userAgent, label, fetchImpl, timeoutMs);
   if (!isPlainObject(body) || !Array.isArray(body.data)) {
     throw new Error(`${label} returned an unexpected payload`);
   }
 
-  const ids: string[] = [];
+  const models: LiveModel[] = [];
   for (const entry of body.data) {
-    if (!isPlainObject(entry)) continue;
-    const id = entry.id;
-    if (typeof id === 'string' && id.length > 0 && keep(id)) ids.push(id);
+    if (!isPlainObject(entry) || typeof entry.id !== 'string' || entry.id.length === 0) continue;
+    if (keep(entry)) models.push(toLiveModel(entry, entry.id));
   }
-  return ids;
+  return models;
+}
+
+/** Keep the fields the live payload can seed a catalog entry with. */
+function toLiveModel(entry: Record<string, unknown>, id: string): LiveModel {
+  const model: LiveModel = { id };
+  if (typeof entry.name === 'string' && entry.name.length > 0) model.name = entry.name;
+  if (typeof entry.context_length === 'number' && Number.isFinite(entry.context_length)) {
+    model.context_length = entry.context_length;
+  }
+  return model;
 }
 
 /** Default network sources for the CLI. */
 export interface RefreshFetchers {
   modelsDev: () => Promise<Record<string, unknown>>;
-  opencodeModelIds: () => Promise<readonly string[]>;
-  commandcodeModelIds: () => Promise<readonly string[]>;
+  opencodeModels: () => Promise<readonly LiveModel[]>;
+  commandcodeModels: () => Promise<readonly LiveModel[]>;
 }
 
 /** Build the real fetchers — the only place the CLI touches the network. */
 export function defaultRefreshFetchers(): RefreshFetchers {
   return {
     modelsDev: () => fetchModelsDevCatalog(),
-    opencodeModelIds: () => fetchOpencodeGoModelIds(),
-    commandcodeModelIds: () => fetchCommandcodeModelIds(),
+    opencodeModels: () => fetchOpencodeGoModels(),
+    commandcodeModels: () => fetchCommandcodeModels(),
   };
 }
 
@@ -192,10 +226,10 @@ export function extractModelsDevProviderModels(
 export interface ModelCatalogMergeInput {
   /** Parsed `https://models.dev/api.json`. */
   modelsDev: Record<string, unknown>;
-  /** Ids from the live opencode-go `/models` endpoint. */
-  opencodeModelIds: readonly string[];
-  /** Ids from the live CommandCode `/provider/v1/models` endpoint. */
-  commandcodeModelIds: readonly string[];
+  /** Live opencode-go `/models` entries. */
+  opencodeModels: readonly LiveModel[];
+  /** Live CommandCode `/provider/v1/models` entries (chat/completions only). */
+  commandcodeModels: readonly LiveModel[];
   /** Current bundled catalog, parsed; null/absent for a fresh file. */
   current?: Record<string, unknown> | null;
 }
@@ -215,69 +249,132 @@ export interface ModelCatalogMergeResult {
  * Merge models.dev metadata with the live catalogs and the current file.
  *
  * Membership is decided by upstream: only ids that the live catalog advertises
- * are kept. Fields inside a surviving entry are additive — the current file's
- * value survives whenever the upstream source does not carry that field.
+ * are kept, and a live id enters even when models.dev has never heard of it.
+ * Fields inside a surviving entry are additive — the current file's value
+ * survives whenever the upstream source does not carry that field.
  */
 export function mergeModelCatalog(input: ModelCatalogMergeInput): ModelCatalogMergeResult {
-  const candidates = collectCandidates(input);
+  const metadata = collectCandidates(input);
+  const live = indexLiveModels(input);
   const current = isPlainObject(input.current) ? input.current : {};
-  const keys = [...candidates.keys()].sort();
 
   const models: Record<string, Record<string, unknown>> = {};
-  for (const key of keys) {
+  const added: string[] = [];
+  const changed: string[] = [];
+  const entries = [...live].sort(([left], [right]) => (left < right ? -1 : 1));
+
+  for (const [key, liveModel] of entries) {
     const base = isPlainObject(current[key]) ? current[key] : {};
-    const upstream: Record<string, unknown> = { ...candidates.get(key), id: key };
-    models[key] = sortKeysDeep(overlay(base, upstream)) as Record<string, unknown>;
+    const fromModelsDev = metadata.get(key);
+    // models.dev wins over the current file (it is the richer source); the
+    // live payload only fills the holes models.dev leaves, so a value the user
+    // customized is never replaced by a bare live stub.
+    const entry = fromModelsDev ? overlay(base, { ...fromModelsDev, id: key }) : base;
+    const merged = fillMissing(entry, liveStub(key, liveModel));
+    models[key] = sortKeysDeep({ ...merged, id: key }) as Record<string, unknown>;
+
+    if (!(key in current)) added.push(key);
+    else if (!isDeepStrictEqual(current[key], models[key])) changed.push(key);
   }
 
   return {
     models,
-    added: keys.filter((key) => !(key in current)),
+    added,
     removed: Object.keys(current)
-      .filter((key) => !candidates.has(key))
+      .filter((key) => !live.has(key))
       .sort(),
-    changed: keys.filter((key) => key in current && !isDeepStrictEqual(current[key], models[key])),
+    changed,
   };
 }
 
-/** Build the candidate map: opencode-go first, commandcode fills the gaps. */
+/** Build the models.dev candidate map: opencode-go first, commandcode fills the gaps. */
 function collectCandidates(
   input: ModelCatalogMergeInput,
 ): Map<string, Record<string, unknown>> {
-  const allowedOpencode = new Set(input.opencodeModelIds.map(normalizeModelKey));
-  const allowedCommandcode = new Set(input.commandcodeModelIds.map(normalizeModelKey));
+  const opencodeCatalog = extractModelsDevProviderModels(input.modelsDev, MODELS_DEV_PROVIDER_ID);
+  const commandcodeCatalog = extractModelsDevProviderModels(
+    input.modelsDev,
+    MODELS_DEV_COMMANDCODE_PROVIDER_ID,
+  );
+
+  const opencodeKeys = indexProviderIds(MODELS_DEV_PROVIDER_ID, input.opencodeModels);
+  const commandcodeKeys = indexProviderIds(
+    MODELS_DEV_COMMANDCODE_PROVIDER_ID,
+    input.commandcodeModels,
+  );
 
   const candidates = new Map<string, Record<string, unknown>>();
+  addProviderModels(candidates, MODELS_DEV_PROVIDER_ID, opencodeCatalog, opencodeKeys, false);
   addProviderModels(
     candidates,
-    extractModelsDevProviderModels(input.modelsDev, MODELS_DEV_PROVIDER_ID),
-    allowedOpencode,
-    false,
-  );
-  addProviderModels(
-    candidates,
-    extractModelsDevProviderModels(input.modelsDev, MODELS_DEV_COMMANDCODE_PROVIDER_ID),
-    allowedCommandcode,
+    MODELS_DEV_COMMANDCODE_PROVIDER_ID,
+    commandcodeCatalog,
+    commandcodeKeys,
     true,
   );
   return candidates;
 }
 
 /**
- * Add one provider's entries that exist in its live catalog.
+ * Index both live catalogs by key. opencode-go is the primary provider, so its
+ * entry wins when the same model is served by both.
+ */
+function indexLiveModels(input: ModelCatalogMergeInput): Map<string, LiveModel> {
+  const byKey = new Map<string, LiveModel>();
+  for (const model of [...input.opencodeModels, ...input.commandcodeModels]) {
+    const key = normalizeModelKey(model.id);
+    if (key && !byKey.has(key)) byKey.set(key, model);
+  }
+  return byKey;
+}
+
+/**
+ * Index one provider's live ids by catalog key, rejecting ambiguity.
+ *
+ * Two different raw ids (`vendorA/foo`, `vendorB/foo`) that collapse to the
+ * same bare key would silently overwrite each other, so the refresh aborts
+ * instead of picking one.
+ */
+function indexProviderIds(providerId: string, live: readonly LiveModel[]): Map<string, LiveModel> {
+  const byKey = new Map<string, LiveModel>();
+  for (const model of live) {
+    const key = normalizeModelKey(model.id);
+    if (!key) continue;
+    const existing = byKey.get(key);
+    if (existing) throw collisionError(providerId, existing.id, model.id, key);
+    byKey.set(key, model);
+  }
+  return byKey;
+}
+
+/** The bare-name collision message: which raw ids fought over one key. */
+function collisionError(providerId: string, first: string, second: string, key: string): Error {
+  return new Error(
+    `bare-name collision in ${providerId}: "${first}" and "${second}" both map to "${key}"; `
+    + 'rename one of them upstream or teach normalizeModelKey about the difference',
+  );
+}
+
+/**
+ * Add one provider's models.dev entries that exist in its live catalog.
  *
  * @param fillOnly — keep the existing entry's fields and only fill the holes
  *                   (CommandCode is secondary metadata; opencode-go is primary)
  */
 function addProviderModels(
   target: Map<string, Record<string, unknown>>,
+  providerId: string,
   models: Record<string, Record<string, unknown>>,
-  allowed: Set<string>,
+  allowed: Map<string, LiveModel>,
   fillOnly: boolean,
 ): void {
   for (const [modelId, raw] of Object.entries(models)) {
     const key = normalizeModelKey(modelId);
-    if (!key || !allowed.has(key)) continue;
+    const liveModel = allowed.get(key);
+    if (!liveModel) continue;
+    // The same model under a different raw id in models.dev and the live
+    // payload is the cross-source form of the bare-name collision.
+    if (liveModel.id !== modelId) throw collisionError(providerId, liveModel.id, modelId, key);
 
     const entry = sanitizeEntry(raw);
     if (!entry) continue;
@@ -292,11 +389,44 @@ function addProviderModels(
 }
 
 /**
+ * Fallback context window for a live-only model whose payload carries no
+ * `context_length`; same default `providerCatalogToCanonical` uses.
+ */
+const LIVE_STUB_CONTEXT_FALLBACK = 262_144;
+
+/** Fallback max output tokens; same default `providerCatalogToCanonical` uses. */
+const LIVE_STUB_OUTPUT_FALLBACK = 65_536;
+
+/**
+ * Minimal catalog entry from a live payload: id, name, context window and the
+ * canonical defaults the harness pipeline (`providerCatalogToCanonical`) gives
+ * a model with no models.dev metadata. Every value here only fills a hole, so
+ * models.dev and the current file still win wherever they have a field.
+ */
+function liveStub(key: string, model: LiveModel): Record<string, unknown> {
+  const stub: Record<string, unknown> = {
+    id: key,
+    tool_call: true,
+    reasoning: true,
+    limit: {
+      context: model.context_length ?? LIVE_STUB_CONTEXT_FALLBACK,
+      output: LIVE_STUB_OUTPUT_FALLBACK,
+    },
+    modalities: { input: ['text'], output: ['text'] },
+    // Conservative effort ladder: the commandcode gateway accepts
+    // low|medium|high|xhigh and rejects minimal, so declare the safe three.
+    reasoning_options: [{ type: 'effort', values: ['low', 'medium', 'high'] }],
+  };
+  if (model.name !== undefined) stub.name = model.name;
+  return stub;
+}
+
+/**
  * Normalize an id to catalog key form: bare name, lower-cased, `_` → `-`.
  * Vendor-prefixed names (`zai-org/GLM-5.3`) collapse to their model name.
  */
 function normalizeModelKey(modelId: string): string {
-  const bare = modelId.split('/').pop() ?? modelId;
+  const bare = modelId.substring(modelId.lastIndexOf('/') + 1);
   return bare.toLowerCase().replaceAll('_', '-');
 }
 
@@ -366,16 +496,13 @@ function isPlainObject(value: unknown): value is Record<string, unknown> {
 
 /** Stable on-disk format: 2-space indent, sorted keys, trailing newline. */
 export function serializeModelCatalog(models: Record<string, unknown>): string {
-  return `${JSON.stringify(sortKeysDeep(models), null, 2)}\n`;
+  return serializeCatalogObject(sortKeysDeep(models) as Record<string, unknown>);
 }
 
 /** Parse a catalog file. `null`/empty content is an empty catalog. */
 export function parseCatalogContent(raw: string | null): Record<string, unknown> {
   if (raw === null || raw.trim() === '') return {};
-
-  const parsed: unknown = JSON.parse(raw);
-  if (!isPlainObject(parsed)) throw new Error('models catalog is not a JSON object');
-  return parsed;
+  return parseCatalogObject(raw);
 }
 
 export interface RefreshIo {
@@ -388,6 +515,8 @@ export interface RefreshIo {
 export interface RefreshOptions {
   /** Show the diff and skip the write. */
   dryRun?: boolean;
+  /** Allow a merge that removes more than half of the current models. */
+  allowShrink?: boolean;
 }
 
 export interface ModelCatalogRefreshResult extends ModelCatalogMergeResult {
@@ -395,38 +524,103 @@ export interface ModelCatalogRefreshResult extends ModelCatalogMergeResult {
   nextContent: string;
   /** False on a dry run and when the generated bytes already match the file. */
   written: boolean;
+  /** True when only key order/whitespace differs from the file on disk. */
+  formattingOnly: boolean;
 }
 
 /**
  * Fetch, merge, and (unless dry-running) write the catalog.
  *
- * Every fetch settles before the file is read/written: one failed source
- * aborts the whole refresh and leaves the existing catalog untouched.
+ * Sources are validated before the file is read: a 2xx with an empty body (a
+ * Cloudflare hiccup, a partial rollout) used to empty the catalog and mark
+ * every model removed. A merge that would drop more than half of the current
+ * models is treated the same way unless `allowShrink` opts in.
  */
 export async function refreshModelCatalog(
   io: RefreshIo,
   fetchers: RefreshFetchers = defaultRefreshFetchers(),
   options: RefreshOptions = {},
 ): Promise<ModelCatalogRefreshResult> {
-  const [modelsDev, opencodeModelIds, commandcodeModelIds] = await Promise.all([
+  const [modelsDev, opencodeModels, commandcodeModels] = await Promise.all([
     fetchers.modelsDev(),
-    fetchers.opencodeModelIds(),
-    fetchers.commandcodeModelIds(),
+    fetchers.opencodeModels(),
+    fetchers.commandcodeModels(),
   ]);
+  assertRefreshSources(modelsDev, opencodeModels, commandcodeModels);
 
   const previousContent = io.read();
   const current = parseCatalogContent(previousContent);
   const merge = mergeModelCatalog({
     modelsDev,
-    opencodeModelIds,
-    commandcodeModelIds,
+    opencodeModels,
+    commandcodeModels,
     current,
   });
+  assertShrinkAllowed(merge, current, options.allowShrink);
+
   const nextContent = serializeModelCatalog(merge.models);
-  const written = options.dryRun !== true && nextContent !== previousContent;
+  const bytesChanged = nextContent !== previousContent;
+  const formattingOnly = bytesChanged
+    && merge.added.length === 0
+    && merge.removed.length === 0
+    && merge.changed.length === 0;
+  const written = options.dryRun !== true && bytesChanged;
   if (written) io.write(nextContent);
 
-  return { ...merge, previousContent, nextContent, written };
+  return { ...merge, previousContent, nextContent, written, formattingOnly };
+}
+
+/**
+ * Reject a source that answered 2xx with an empty or partial payload.
+ *
+ * models.dev must carry both provider maps; each live catalog must carry at
+ * least one usable id. Anything else is a network hiccup, not a catalog.
+ */
+function assertRefreshSources(
+  modelsDev: Record<string, unknown>,
+  opencodeModels: readonly LiveModel[],
+  commandcodeModels: readonly LiveModel[],
+): void {
+  for (const providerId of [MODELS_DEV_PROVIDER_ID, MODELS_DEV_COMMANDCODE_PROVIDER_ID]) {
+    const models = extractModelsDevProviderModels(modelsDev, providerId);
+    if (Object.keys(models).length === 0) {
+      throw new Error(
+        `models.dev returned no ${providerId} models; refusing to treat an empty response as a catalog`,
+      );
+    }
+  }
+
+  if (opencodeModels.length === 0) {
+    throw new Error('opencode-go returned no models; refusing to treat an empty response as a catalog');
+  }
+  if (commandcodeModels.length === 0) {
+    throw new Error('commandcode returned no models; refusing to treat an empty response as a catalog');
+  }
+}
+
+/**
+ * Refuse a merge that removes more than half of the current models.
+ *
+ * A partial upstream response looks exactly like a mass retirement, and the
+ * resulting file would drop models the proxy still serves. `allowShrink` is
+ * the operator's statement that the removal is intentional.
+ */
+function assertShrinkAllowed(
+  merge: ModelCatalogMergeResult,
+  current: Record<string, unknown>,
+  allowShrink: boolean | undefined,
+): void {
+  if (allowShrink) return;
+
+  const total = Object.keys(current).length;
+  if (total === 0 || merge.removed.length * 2 <= total) return;
+
+  const percent = Math.round((merge.removed.length / total) * 100);
+  throw new Error(
+    `refusing to remove ${merge.removed.length} of ${total} models (${percent}%): `
+    + 'neither live catalog lists them any more, which is how a partial upstream response looks. '
+    + 'Rerun with --allow-shrink if the removal is intentional',
+  );
 }
 
 // ---------------------------------------------------------------------------

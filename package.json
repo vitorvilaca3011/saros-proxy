@@ -17,7 +17,7 @@
     "setup": "tsx src/cli/setup.ts",
     "dev": "tsx src/index.ts serve",
     "build": "tsc",
-    "lint": "tsc --noEmit",
+    "lint": "tsc --noEmit && tsc --noEmit -p tsconfig.scripts.json",
     "prepublishOnly": "npm run build",
     "test": "vitest",
     "coverage": "vitest run --coverage",

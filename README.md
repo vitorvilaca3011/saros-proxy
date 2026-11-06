@@ -868,14 +868,15 @@ Output goes to `dist/`.
 
 ### Refresh the bundled model catalog
 
-`assets/models.json` is generated — do not edit it by hand. The generator merges models.dev metadata with the live opencode-go and CommandCode catalogs: a model that left upstream leaves the bundle, and a field already in the file survives when models.dev omits it.
+`assets/models.json` is generated — do not edit it by hand. The generator merges models.dev metadata with the live opencode-go and CommandCode catalogs: a model that left upstream leaves the bundle, a model the upstream serves but models.dev does not list still enters with the live name and context window, and a field already in the file survives when models.dev omits it.
 
 ```bash
-npm run models:refresh -- --dry-run   # print the diff, write nothing
-npm run models:refresh                # rewrite assets/models.json
+npm run models:refresh -- --dry-run      # print the diff, write nothing
+npm run models:refresh                   # rewrite assets/models.json
+npm run models:refresh -- --allow-shrink # accept removing more than half of the models
 ```
 
-A failed fetch aborts without touching the file.
+A failed fetch — or a 2xx with an empty catalog — aborts before the file is read, and a merge that would remove more than half of the current models aborts unless `--allow-shrink` is given. The write goes through a temp file and an atomic rename, so a crash never leaves a truncated catalog.
 
 ### Project structure
 

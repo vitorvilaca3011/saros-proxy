@@ -48,16 +48,48 @@ export function resetModelsCatalogCache(): void {
 /** Read and validate one catalog file. Never throws. */
 function readCatalog(filePath: string): Record<string, unknown> {
   try {
-    const parsed: unknown = JSON.parse(readFileSync(filePath, 'utf-8'));
-
-    if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
-      logger.warn({ path: filePath }, 'models catalog is not a JSON object; using empty catalog');
-      return {};
-    }
-
-    return parsed as Record<string, unknown>;
+    return parseCatalogObject(readFileSync(filePath, 'utf-8'));
   } catch (err) {
     logger.warn({ err, path: filePath }, 'failed to load models catalog; using empty catalog');
     return {};
   }
+}
+
+/**
+ * Parse catalog content, throwing on invalid JSON or a non-object payload.
+ *
+ * `loadModelsCatalog` degrades to an empty map instead; this is for callers
+ * that must tell a corrupt file apart from an empty one (the daemon seed).
+ */
+export function parseCatalogObject(raw: string): Record<string, unknown> {
+  const parsed: unknown = JSON.parse(raw);
+
+  if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
+    throw new Error('models catalog is not a JSON object');
+  }
+  return parsed as Record<string, unknown>;
+}
+
+/** Stable on-disk shape: 2-space JSON with a trailing newline. */
+export function serializeCatalogObject(models: Record<string, unknown>): string {
+  return `${JSON.stringify(models, null, 2)}\n`;
+}
+
+/**
+ * Add the bundle's missing keys to a user catalog.
+ *
+ * Existing keys always win — a value the user customized is never overwritten.
+ * Returns `added: []` when the user copy already covers the bundle, so the
+ * caller can skip the write entirely.
+ */
+export function mergeMissingModels(
+  existing: Record<string, unknown>,
+  bundle: Record<string, unknown>,
+): { models: Record<string, unknown>; added: string[] } {
+  const added = Object.keys(bundle).filter((key) => !(key in existing));
+  if (added.length === 0) return { models: existing, added };
+
+  const models: Record<string, unknown> = { ...existing };
+  for (const key of added) models[key] = bundle[key];
+  return { models, added };
 }

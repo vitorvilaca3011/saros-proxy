@@ -8,7 +8,8 @@
 import { constants, existsSync, readFileSync, writeFileSync, copyFileSync, mkdirSync } from 'node:fs';
 import { dirname, join } from 'node:path';
 import { homedir } from 'node:os';
-import { loadModelsCatalog } from '../models-catalog.js';
+import { loadModelsCatalog, parseCatalogObject } from '../models-catalog.js';
+import { logger } from '../logger.js';
 
 // ---------------------------------------------------------------------------
 // JSONC support
@@ -113,16 +114,16 @@ export function getModelsJsonPath(): string {
 
 /**
  * Load models from models.json, falling back to bundled defaults.
+ * A malformed user file is logged, not silently ignored.
  * @param configPath — Explicit path to models.json (optional, for testing)
  */
 export function loadModelsFromJson(configPath?: string): Record<string, unknown> {
   const path = configPath ?? getModelsJsonPath();
   if (existsSync(path)) {
     try {
-      const raw = readFileSync(path, 'utf-8');
-      return JSON.parse(raw) as Record<string, unknown>;
-    } catch {
-      // Fall through to bundled defaults
+      return parseCatalogObject(readFileSync(path, 'utf-8'));
+    } catch (err) {
+      logger.warn({ err, path }, 'models.json is not a valid catalog; using the bundled one');
     }
   }
   // Fallback: use the bundled catalog
