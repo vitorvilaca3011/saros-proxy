@@ -19,6 +19,7 @@ import {
 } from '../models-dev.js';
 import type { ModelsDevModelMap } from '../models-dev.js';
 import { loadModelsCatalog } from '../models-catalog.js';
+import { ensureEffortLadder } from '../model-ladder.js';
 import { allProviders, getProvider, inferProvider } from '../providers/index.js';
 import type { KeyProvider, ProviderId } from '../providers/index.js';
 
@@ -43,32 +44,6 @@ export interface PiOmpModel {
 
 /** Canonical effort vocabulary, least → most intensive (pi/omp schema). */
 const EFFORT_ORDER = ['minimal', 'low', 'medium', 'high', 'xhigh', 'max'] as const;
-
-/**
- * Conservative effort ladder for a reasoning model whose metadata declares no
- * effort levels (models.dev ships an empty ladder or a bare toggle for some
- * CommandCode models). Copied verbatim, that absence makes the harness invent
- * a ladder that includes `minimal`, which the CommandCode gateway rejects;
- * low|medium|high is accepted everywhere.
- */
-const CONSERVATIVE_EFFORT_VALUES = ['low', 'medium', 'high'] as const;
-
-/** Fresh effort ladder entry — callers may keep or mutate the array. */
-function conservativeEffortOptions(): Array<{ type: 'effort'; values: string[] }> {
-  return [{ type: 'effort', values: [...CONSERVATIVE_EFFORT_VALUES] }];
-}
-
-/** Does any reasoning option declare an effort ladder? */
-function hasEffortOption(options: unknown): boolean {
-  if (!Array.isArray(options)) return false;
-  return options.some(
-    (option) =>
-      typeof option === 'object' &&
-      option !== null &&
-      !Array.isArray(option) &&
-      (option as Record<string, unknown>).type === 'effort',
-  );
-}
 
 /**
  * Extract the effort ladder from models.dev `reasoning_options`
@@ -252,10 +227,6 @@ function providerCatalogToCanonical(
         output: 65536,
       },
       modalities: { input: ['text'], output: ['text'] },
-      // Conservative effort ladder for models with no metadata anywhere: the
-      // commandcode gateway accepts low|medium|high|xhigh and rejects
-      // minimal — better declared here than invented by the harness.
-      reasoning_options: conservativeEffortOptions(),
     };
   }
 
@@ -263,9 +234,7 @@ function providerCatalogToCanonical(
   // `reasoning: true` with an empty ladder or a toggle only. Copied verbatim,
   // that absence lets the harness invent a ladder with `minimal`, which the
   // CommandCode gateway rejects — declare the conservative ladder instead.
-  if (canonical.reasoning === true && !hasEffortOption(canonical.reasoning_options)) {
-    canonical.reasoning_options = conservativeEffortOptions();
-  }
+  ensureEffortLadder(canonical);
 
   canonical.name = annotateName(
     typeof canonical.name === 'string' ? canonical.name : catalogName,

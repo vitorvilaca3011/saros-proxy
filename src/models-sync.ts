@@ -17,6 +17,7 @@ import {
   resetModelsDevCache,
 } from './models-dev.js';
 import { loadModelsCatalog } from './models-catalog.js';
+import { ensureEffortLadder } from './model-ladder.js';
 import { logger } from './logger.js';
 import type { ProxyConfig } from './config.js';
 import type { OpencodeConfigResult } from './cli/opencode-config.js';
@@ -167,7 +168,10 @@ export function buildMinimalStub(
       // because the model is "known" via dev metadata.
       const safe = pickModelsDevFields(raw);
       safe.id = modelId;
-      return safe;
+      // models.dev ships the ladder raw: 11 opencode-go models declare no
+      // effort option (an empty array or a bare toggle). Copied verbatim, the
+      // harness invents a ladder with `minimal`, which the gateways reject.
+      return ensureEffortLadder(safe);
     }
   }
 
@@ -175,17 +179,18 @@ export function buildMinimalStub(
   const bundled = loadModelsCatalog();
   const known = bundled[modelId];
   if (known && typeof known === 'object' && !Array.isArray(known)) {
-    return { ...(known as Record<string, unknown>), id: modelId };
+    // The bundle is generated from models.dev, so it carries the same gaps.
+    return ensureEffortLadder({ ...(known as Record<string, unknown>), id: modelId });
   }
 
   // 3. Heuristic fallback with sensible defaults
-  return {
+  return ensureEffortLadder({
     id: modelId,
     name: toTitleCase(modelId),
     limit: { context: 262144, output: 65536 },
     tool_call: true,
     reasoning: true,
-  };
+  });
 }
 
 /**

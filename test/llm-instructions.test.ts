@@ -1,7 +1,7 @@
 /**
  * llm-instructions.test.ts — Smoke test for LLM setup instructions.
  *
- * Verifies that LLM_INSTRUCTIONS.md is valid, complete, and the documented
+ * Verifies that docs/LLM_INSTRUCTIONS.md is valid, complete, and the documented
  * setup flow actually works end-to-end with real functions.
  *
  * Run: npx vitest run test/llm-instructions.test.ts
@@ -28,11 +28,11 @@ import { validateConfig } from '../src/config.js';
 import { printHelp } from '../src/cli/help.js';
 
 // ---------------------------------------------------------------------------
-// Read LLM_INSTRUCTIONS.md once at module scope
+// Read docs/LLM_INSTRUCTIONS.md once at module scope
 // ---------------------------------------------------------------------------
 
 const LLM_INSTRUCTIONS = readFileSync(
-  resolve(process.cwd(), 'LLM_INSTRUCTIONS.md'),
+  resolve(process.cwd(), 'docs', 'LLM_INSTRUCTIONS.md'),
   'utf-8',
 );
 

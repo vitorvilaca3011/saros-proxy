@@ -38,6 +38,7 @@ import { fileURLToPath } from 'node:url';
 import { getModelsJsonPath } from './opencode-config.js';
 import { mergeMissingModels, parseCatalogObject, serializeCatalogObject } from '../models-catalog.js';
 import { formatKeyBlock } from './key-state.js';
+import { logger } from '../logger.js';
 import { checkForUpdate } from './update-check.js';
 import { loadConfig, getSarosDir } from '../config.js';
 import { DAEMON_SYNC_TIMEOUT_MS } from '../constants.js';
@@ -411,7 +412,23 @@ function ensureModelsJson(): void {
 
   const bundledPath = pathJoin(PACKAGE_ROOT, 'assets', 'models.json');
   if (!existsSync(bundledPath)) return;
-  const bundledContent = readFileSync(bundledPath, 'utf-8');
+
+  let bundledContent: string;
+  let bundled: Record<string, unknown>;
+  try {
+    bundledContent = readFileSync(bundledPath, 'utf-8');
+    bundled = parseCatalogObject(bundledContent);
+  } catch (err) {
+    // A damaged bundle (build defect, disk error) must not become an unhandled
+    // rejection after "✓ Proxy started": that exits 1 and skips the harness
+    // sync and the update check while the detached proxy keeps running. Warn
+    // and skip the seed; the runtime already handles a missing catalog.
+    logger.warn(
+      { err, path: bundledPath },
+      'models.json: could not read or parse the bundled catalog; skipping the seed',
+    );
+    return;
+  }
 
   if (!existsSync(modelsPath)) {
     mkdirSync(pathDirname(modelsPath), { recursive: true });
@@ -435,7 +452,7 @@ function ensureModelsJson(): void {
     return;
   }
 
-  const merged = mergeMissingModels(existing, parseCatalogObject(bundledContent));
+  const merged = mergeMissingModels(existing, bundled);
   if (merged.added.length === 0) {
     console.log(chalk.dim('models.json already present, keeping the user copy'));
     return;

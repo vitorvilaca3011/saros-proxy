@@ -176,11 +176,11 @@ Saros tracks which keys are currently in use. A key handling a streaming request
 
 ### Prompt Install(for the lazy ones)
 
-Don't feel like reading through everything? Copy this prompt and paste it to your AI assistant. It'll read [`LLM_INSTRUCTIONS.md`](LLM_INSTRUCTIONS.md) and guide you through setup — no keys shared in chat.
+Don't feel like reading through everything? Copy this prompt and paste it to your AI assistant. It'll read [`docs/LLM_INSTRUCTIONS.md`](docs/LLM_INSTRUCTIONS.md) and guide you through setup — no keys shared in chat.
 
 ```
 Install Saros Proxy for my opencode. (https://github.com/vitorvilaca3011/saros-proxy)
-Follow the instructions on LLM_INSTRUCTIONS.md.
+Follow the instructions on docs/LLM_INSTRUCTIONS.md.
 ```
 
 ---

@@ -35,6 +35,7 @@ import {
   MODELS_FETCH_TIMEOUT_MS,
 } from './constants.js';
 import { OPENCODE_GO_USER_AGENT } from './providers/opencode-go.js';
+import { conservativeEffortOptions } from './model-ladder.js';
 import { parseCatalogObject, serializeCatalogObject } from './models-catalog.js';
 import { extractProviderModels } from './models-dev.js';
 
@@ -415,7 +416,7 @@ function liveStub(key: string, model: LiveModel): Record<string, unknown> {
     modalities: { input: ['text'], output: ['text'] },
     // Conservative effort ladder: the commandcode gateway accepts
     // low|medium|high|xhigh and rejects minimal, so declare the safe three.
-    reasoning_options: [{ type: 'effort', values: ['low', 'medium', 'high'] }],
+    reasoning_options: conservativeEffortOptions(),
   };
   if (model.name !== undefined) stub.name = model.name;
   return stub;
