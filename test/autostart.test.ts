@@ -102,15 +102,22 @@ function createStartupDir(): string {
 
 describe('autostart — VBS method', () => {
   let startupDir: string;
+  let originalPlatform: PropertyDescriptor | undefined;
   const OENV = process.env;
 
   beforeEach(() => {
+    // vbs is Windows-only; the method gate must see win32 even on Linux CI.
+    originalPlatform = Object.getOwnPropertyDescriptor(process, 'platform');
+    Object.defineProperty(process, 'platform', { value: 'win32', configurable: true });
     startupDir = createStartupDir();
     const baseAppData = join(startupDir, '..', '..', '..', '..', '..');
     vi.stubEnv('APPDATA', baseAppData);
   });
 
   afterEach(() => {
+    if (originalPlatform) {
+      Object.defineProperty(process, 'platform', originalPlatform);
+    }
     const base = join(startupDir, '..', '..', '..', '..', '..');
     try { rmSync(base, { recursive: true, force: true }); } catch { /* ok */ }
     process.env = { ...OENV };
@@ -228,8 +235,19 @@ describe('autostart — VBS method', () => {
 });
 
 describe('autostart — Registry method', () => {
+  let originalPlatform: PropertyDescriptor | undefined;
+
   beforeEach(() => {
+    // registry is Windows-only; the method gate must see win32 even on Linux CI.
+    originalPlatform = Object.getOwnPropertyDescriptor(process, 'platform');
+    Object.defineProperty(process, 'platform', { value: 'win32', configurable: true });
     mockExecFileSync.mockReset();
+  });
+
+  afterEach(() => {
+    if (originalPlatform) {
+      Object.defineProperty(process, 'platform', originalPlatform);
+    }
   });
 
   it('install calls reg add with correct args', async () => {
@@ -657,8 +675,21 @@ describe('autostart — systemd method (Linux)', () => {
   let configHome: string;
   let originalPlatform: PropertyDescriptor | undefined;
   let originalExitCode: number | string | null | undefined;
+  let restoreDistEntry: () => void;
 
   const unitPath = (): string => join(configHome, 'systemd', 'user', 'saros-proxy.service');
+
+  /**
+   * Force resolveSystemdCommand()'s dist-existence check, so the suite does not
+   * depend on whether `npm run build` ran in the working tree.
+   */
+  const stubDistEntry = (exists: boolean): (() => void) => {
+    const realImpl = mockExistsSync.getMockImplementation() as (p: string) => boolean;
+    mockExistsSync.mockImplementation((p: string) =>
+      /dist[/\\]index\.js$/.test(String(p)) ? exists : realImpl(p),
+    );
+    return () => mockExistsSync.mockImplementation(realImpl);
+  };
 
   beforeEach(() => {
     configHome = mkdtempSync(join(tmpdir(), 'saros-systemd-test-'));
@@ -672,9 +703,11 @@ describe('autostart — systemd method (Linux)', () => {
     mockExecFileSync.mockReturnValue(Buffer.from(''));
     mockLoggerWarn.mockReset();
     mockUiSuccess.mockReset();
+    restoreDistEntry = stubDistEntry(true);
   });
 
   afterEach(() => {
+    restoreDistEntry();
     if (originalPlatform) {
       Object.defineProperty(process, 'platform', originalPlatform);
     }
@@ -691,25 +724,39 @@ describe('autostart — systemd method (Linux)', () => {
     const content = readFileSync(unitPath(), 'utf-8');
     expect(content).toContain('[Unit]');
     expect(content).toContain('After=network-online.target');
+    expect(content).toContain('Environment=NODE_ENV=production');
     expect(content).toMatch(/^ExecStart=.+ serve --port 4242$/m);
     expect(content).toContain('Restart=on-failure');
     expect(content).toContain('RestartSec=5');
+    expect(content).toContain('StartLimitIntervalSec=60');
+    expect(content).toContain('StartLimitBurst=3');
     expect(content).toContain('WantedBy=default.target');
     expect(mockUiSuccess).toHaveBeenCalledWith(expect.stringContaining('systemd'));
   });
 
-  it('uses the same command resolution as the rest of the CLI', async () => {
-    const realImpl = mockExistsSync.getMockImplementation();
-    mockExistsSync.mockImplementation((p: string) =>
-      /dist[/\\]index\.js$/.test(String(p)) ? false : (realImpl as (p: string) => boolean)(p),
-    );
+  it('uses an absolute ExecStart path that systemd can resolve', async () => {
+    const { autostartInstall } = await import('../src/cli/autostart.js');
+
+    await autostartInstall(4242, 'systemd');
+
+    const content = readFileSync(unitPath(), 'utf-8');
+    expect(content).toContain(`ExecStart="${process.execPath}"`);
+    expect(content).toMatch(/^ExecStart=".+" ".*dist[/\\]index\.js" serve --port 4242$/m);
+  });
+
+  it('fails with a build hint instead of emitting a bare ExecStart', async () => {
+    const restore = stubDistEntry(false);
     try {
       const { autostartInstall } = await import('../src/cli/autostart.js');
+
       await autostartInstall(4242, 'systemd');
 
-      expect(readFileSync(unitPath(), 'utf-8')).toContain('ExecStart=saros-proxy serve --port 4242');
+      expect(existsSync(unitPath())).toBe(false);
+      expect(mockExecFileSync).not.toHaveBeenCalled();
+      expect(mockLoggerWarn.mock.calls[0].join(' ')).toContain('npm run build');
+      expect(process.exitCode).toBe(1);
     } finally {
-      mockExistsSync.mockImplementation(realImpl as (p: string) => boolean);
+      restore();
     }
   });
 
@@ -721,14 +768,31 @@ describe('autostart — systemd method (Linux)', () => {
     expect(readFileSync(unitPath(), 'utf-8')).toMatch(/^ExecStart=.+ serve$/m);
   });
 
-  it('runs daemon-reload before enabling and starting the unit', async () => {
+  it('runs daemon-reload, enable, then restart so the unit is applied immediately', async () => {
     const { autostartInstall } = await import('../src/cli/autostart.js');
 
     await autostartInstall(4242, 'systemd');
 
     expect(mockExecFileSync.mock.calls.map((call: unknown[]) => call[1])).toEqual([
       ['--user', 'daemon-reload'],
-      ['--user', 'enable', '--now', 'saros-proxy.service'],
+      ['--user', 'enable', 'saros-proxy.service'],
+      ['--user', 'restart', 'saros-proxy.service'],
+    ]);
+  });
+
+  it('applies a new --port on reinstall by restarting the active unit', async () => {
+    const { autostartInstall } = await import('../src/cli/autostart.js');
+    await autostartInstall(3000, 'systemd');
+    mockExecFileSync.mockReset();
+    mockExecFileSync.mockReturnValue(Buffer.from(''));
+
+    await autostartInstall(4000, 'systemd');
+
+    expect(readFileSync(unitPath(), 'utf-8')).toContain('serve --port 4000');
+    expect(mockExecFileSync.mock.calls.map((call: unknown[]) => call[1])).toEqual([
+      ['--user', 'daemon-reload'],
+      ['--user', 'enable', 'saros-proxy.service'],
+      ['--user', 'restart', 'saros-proxy.service'],
     ]);
   });
 
@@ -740,9 +804,28 @@ describe('autostart — systemd method (Linux)', () => {
     expect(existsSync(unitPath())).toBe(true);
     expect(mockExecFileSync).toHaveBeenCalledWith(
       'systemctl',
-      ['--user', 'enable', '--now', 'saros-proxy.service'],
+      ['--user', 'enable', 'saros-proxy.service'],
       expect.any(Object),
     );
+  });
+
+  it('status without --method on Linux checks the systemd unit', async () => {
+    const { autostartStatus } = await import('../src/cli/autostart.js');
+    mockExecFileSync.mockImplementation((_cmd: string, args: string[]) =>
+      Buffer.from(args.includes('is-enabled') ? 'enabled' : 'active'),
+    );
+    const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+    try {
+      autostartStatus();
+
+      expect(mockExecFileSync.mock.calls.map((call: unknown[]) => call[1])).toEqual([
+        ['--user', 'is-enabled', 'saros-proxy.service'],
+        ['--user', 'is-active', 'saros-proxy.service'],
+      ]);
+      expect(logSpy).toHaveBeenCalledWith(expect.stringContaining('enabled (systemd)'));
+    } finally {
+      logSpy.mockRestore();
+    }
   });
 
   it('resolves --method auto to systemd on Linux', async () => {
@@ -791,21 +874,64 @@ describe('autostart — systemd method (Linux)', () => {
     }
   });
 
-  it('uninstall still removes the unit when disable fails', async () => {
+  it('uninstall keeps the unit and exits non-zero when disable fails', async () => {
     const { autostartInstall, autostartUninstall } = await import('../src/cli/autostart.js');
     await autostartInstall(4242, 'systemd');
+    mockExecFileSync.mockReset();
     mockExecFileSync.mockImplementation((_cmd: string, args: string[]) => {
-      if (args.includes('disable')) throw new Error('Unit not loaded');
+      if (args.includes('disable')) {
+        throw Object.assign(new Error('Command failed'), {
+          status: 1,
+          stderr: Buffer.from('Failed to connect to bus: No such file or directory\n'),
+        });
+      }
       return Buffer.from('');
     });
+    const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+    try {
+      autostartUninstall('systemd');
 
-    autostartUninstall('systemd');
+      // Removing the file here would leave default.target.wants/… dangling.
+      expect(existsSync(unitPath())).toBe(true);
+      expect(mockExecFileSync.mock.calls.map((call: unknown[]) => call[1])).toEqual([
+        ['--user', 'disable', '--now', 'saros-proxy.service'],
+      ]);
+      expect(logSpy).not.toHaveBeenCalledWith(expect.stringContaining('Auto-start removed'));
+      const message = mockLoggerWarn.mock.calls[0].join(' ');
+      expect(message).toContain('Could not disable');
+      expect(message).toContain('Failed to connect to bus');
+      expect(message).toContain(unitPath());
+      expect(process.exitCode).toBe(1);
+    } finally {
+      logSpy.mockRestore();
+    }
+  });
 
-    expect(existsSync(unitPath())).toBe(false);
-    expect(mockLoggerWarn).toHaveBeenCalledWith(
-      expect.stringContaining('Could not disable'),
-      expect.stringContaining('Unit not loaded'),
-    );
+  it('uninstall warns but still removes the unit when daemon-reload fails', async () => {
+    const { autostartInstall, autostartUninstall } = await import('../src/cli/autostart.js');
+    await autostartInstall(4242, 'systemd');
+    mockExecFileSync.mockReset();
+    mockExecFileSync.mockImplementation((_cmd: string, args: string[]) => {
+      if (args.includes('daemon-reload')) {
+        throw Object.assign(new Error('Command failed'), {
+          status: 1,
+          stderr: Buffer.from('Failed to reload daemon: Transport endpoint is not connected\n'),
+        });
+      }
+      return Buffer.from('');
+    });
+    const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+    try {
+      autostartUninstall('systemd');
+
+      expect(existsSync(unitPath())).toBe(false);
+      const message = mockLoggerWarn.mock.calls[0].join(' ');
+      expect(message).toContain('daemon-reload');
+      expect(message).toContain('Transport endpoint');
+      expect(logSpy).toHaveBeenCalledWith(expect.stringContaining('Auto-start removed'));
+    } finally {
+      logSpy.mockRestore();
+    }
   });
 
   it('status reports enabled from is-enabled/is-active', async () => {
@@ -825,8 +951,11 @@ describe('autostart — systemd method (Linux)', () => {
   it('status reports not installed when disabled and inactive', async () => {
     const { autostartStatus } = await import('../src/cli/autostart.js');
     mockExecFileSync.mockImplementation((_cmd: string, args: string[]) => {
-      const output = args.includes('is-enabled') ? 'disabled' : 'inactive';
-      throw Object.assign(new Error('Command failed'), { stdout: Buffer.from(output) });
+      const enabled = args.includes('is-enabled');
+      throw Object.assign(new Error('Command failed'), {
+        status: enabled ? 1 : 3,
+        stdout: Buffer.from(enabled ? 'disabled' : 'inactive'),
+      });
     });
     const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
     try {
@@ -840,9 +969,31 @@ describe('autostart — systemd method (Linux)', () => {
   it('status reports not installed when the unit file does not exist yet', async () => {
     const { autostartStatus } = await import('../src/cli/autostart.js');
     mockExecFileSync.mockImplementation((_cmd: string, args: string[]) => {
+      const enabled = args.includes('is-enabled');
       throw Object.assign(new Error('Command failed'), {
-        stdout: Buffer.from(args.includes('is-enabled') ? 'disabled' : 'inactive'),
+        status: enabled ? 1 : 3,
+        stdout: Buffer.from(enabled ? 'disabled' : 'inactive'),
         stderr: Buffer.from('Unit saros-proxy.service could not be found.\n'),
+      });
+    });
+    const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+    try {
+      autostartStatus('systemd');
+      expect(logSpy).toHaveBeenCalledWith(expect.stringContaining('not installed (systemd)'));
+      expect(mockLoggerWarn).not.toHaveBeenCalled();
+    } finally {
+      logSpy.mockRestore();
+    }
+  });
+
+  it('classifies a missing unit by exit status when stderr is not English', async () => {
+    const { autostartStatus } = await import('../src/cli/autostart.js');
+    mockExecFileSync.mockImplementation((_cmd: string, args: string[]) => {
+      const enabled = args.includes('is-enabled');
+      throw Object.assign(new Error('Command failed'), {
+        status: enabled ? 1 : 3,
+        stdout: Buffer.from(enabled ? 'not-found' : 'inactive'),
+        stderr: Buffer.from('Não foi possível encontrar a unidade saros-proxy.service.\n'),
       });
     });
     const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
@@ -921,6 +1072,97 @@ describe('autostart — systemd method (Linux)', () => {
     expect(mockLoggerWarn.mock.calls[0].join(' ')).toContain('Failed to connect to bus');
     expect(process.exitCode).toBe(1);
   });
+
+  it('refuses a Windows-only method on Linux instead of running reg or writing the VBS', async () => {
+    const startupDir = createStartupDir();
+    const appData = join(startupDir, '..', '..', '..', '..', '..');
+    vi.stubEnv('APPDATA', appData);
+    try {
+      const { autostartInstall } = await import('../src/cli/autostart.js');
+
+      await autostartInstall(4242, 'vbs');
+
+      expect(existsSync(join(startupDir, 'saros-proxy-daemon.vbs'))).toBe(false);
+      expect(existsSync(unitPath())).toBe(false);
+      expect(mockExecFileSync).not.toHaveBeenCalled();
+      expect(mockLoggerWarn.mock.calls[0].join(' ')).toContain('"vbs"');
+      expect(mockLoggerWarn.mock.calls[0].join(' ')).toContain('Windows-only');
+      expect(process.exitCode).toBe(1);
+    } finally {
+      rmSync(appData, { recursive: true, force: true });
+    }
+  });
+
+  it('status with a Windows-only method on Linux warns instead of a false negative', async () => {
+    const { autostartStatus } = await import('../src/cli/autostart.js');
+    const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+    try {
+      autostartStatus('vbs');
+
+      expect(logSpy).not.toHaveBeenCalled();
+      expect(mockExecFileSync).not.toHaveBeenCalled();
+      expect(mockLoggerWarn.mock.calls[0].join(' ')).toContain('"vbs"');
+      expect(process.exitCode).toBeUndefined();
+    } finally {
+      logSpy.mockRestore();
+    }
+  });
+
+  it('refuses --method registry on Linux without touching the registry', async () => {
+    const { autostartInstall } = await import('../src/cli/autostart.js');
+
+    await autostartInstall(4242, 'registry');
+
+    expect(mockExecFileSync).not.toHaveBeenCalled();
+    expect(mockLoggerWarn.mock.calls[0].join(' ')).toContain('"registry"');
+    expect(mockLoggerWarn.mock.calls[0].join(' ')).toContain('Windows-only');
+    expect(process.exitCode).toBe(1);
+  });
+
+  it('status with --method registry on Linux warns instead of reporting not installed', async () => {
+    const { autostartStatus } = await import('../src/cli/autostart.js');
+    const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+    try {
+      autostartStatus('registry');
+
+      expect(logSpy).not.toHaveBeenCalled();
+      expect(mockExecFileSync).not.toHaveBeenCalled();
+      expect(mockLoggerWarn.mock.calls[0].join(' ')).toContain('"registry"');
+    } finally {
+      logSpy.mockRestore();
+    }
+  });
+
+  it('uninstall with a Windows-only method on Linux does not touch Windows paths', async () => {
+    const { autostartUninstall } = await import('../src/cli/autostart.js');
+
+    autostartUninstall('vbs');
+
+    expect(mockExecFileSync).not.toHaveBeenCalled();
+    expect(mockLoggerWarn.mock.calls[0].join(' ')).toContain('"vbs"');
+    expect(process.exitCode).toBe(1);
+  });
+
+  it('ignores a relative XDG_CONFIG_HOME and warns once', async () => {
+    const home = mkdtempSync(join(tmpdir(), 'saros-home-test-'));
+    vi.stubEnv('HOME', home);
+    vi.stubEnv('XDG_CONFIG_HOME', 'relative/path');
+    try {
+      const { autostartInstall, autostartStatus } = await import('../src/cli/autostart.js');
+
+      await autostartInstall(4242, 'systemd');
+      autostartStatus('systemd');
+
+      expect(existsSync(join(home, '.config', 'systemd', 'user', 'saros-proxy.service'))).toBe(true);
+      const xdgWarnings = mockLoggerWarn.mock.calls.filter((call: unknown[]) =>
+        call.join(' ').includes('XDG_CONFIG_HOME'),
+      );
+      expect(xdgWarnings).toHaveLength(1);
+      expect(xdgWarnings[0].join(' ')).toContain('relative/path');
+    } finally {
+      rmSync(home, { recursive: true, force: true });
+    }
+  });
 });
 
 describe('autostart — unsupported platforms', () => {
@@ -980,6 +1222,7 @@ describe('autostart — unsupported platforms', () => {
     autostartUninstall();
 
     expect(mockLoggerWarn.mock.calls[0].join(' ')).toContain('unsupported');
+    expect(process.exitCode).toBe(1);
   });
 
   it('names the manual fallback on other unsupported platforms', async () => {

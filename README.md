@@ -603,8 +603,35 @@ saros-proxy autostart status [--method systemd|vbs|registry|auto]
 
 On Linux the default is a `systemd --user` unit at
 `~/.config/systemd/user/saros-proxy.service` (honouring `$XDG_CONFIG_HOME`), enabled
-with `systemctl --user enable --now`. On Windows the default is AV-aware (`auto`):
-Registry when third-party antivirus is detected, otherwise the Startup-folder VBS.
+with `systemctl --user enable` and restarted with `systemctl --user restart`. On
+Windows the default is AV-aware (`auto`): Registry when third-party antivirus is
+detected, otherwise the Startup-folder VBS.
+
+Manage the unit with systemd, not with the CLI: `saros-proxy stop` exits non-zero
+while the service still answers `/health`, because the CLI does not own the unit's
+process.
+
+```bash
+systemctl --user start|stop|restart|status saros-proxy.service
+journalctl --user -u saros-proxy -f
+```
+
+The unit runs `serve` in the foreground: without a TTY it cannot prompt for a
+passphrase, and the user manager does not inherit the environment of the shell
+that ran `install`. If `config.yaml` holds `enc:v1:` envelopes, give the unit a
+source through a drop-in (`systemctl --user edit saros-proxy.service`):
+
+```ini
+[Service]
+Environment=SAROS_PASSPHRASE=your-passphrase
+```
+
+`EnvironmentFile=-%h/.config/saros/env` (mode 0600) keeps the value out of the
+unit file. A credential is stronger, but `Environment=` can only carry the
+credential *path* (`%d/<name>`), never its content — see the
+[systemd-creds recipe](#api-key-encryption), which wraps `serve` in
+`sh -c 'SAROS_PASSPHRASE="$(cat "$CREDENTIALS_DIRECTORY/<name>")" exec …'`.
+`systemd-creds` only gained a `--user` mode in v256.
 
 The `start` command automatically syncs model definitions to all enabled harnesses (see [Multi-Harness Integration](#multi-harness-integration-pi-oh-my-pi--dsh)).
 

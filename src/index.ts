@@ -79,6 +79,31 @@ function printProbeResult(probe: ModelProbe): void {
 // Subcommand dispatch — if/else if prevents fallthrough to server code
 // ---------------------------------------------------------------------------
 
+/**
+ * Parse `--port`/`--method` for the autostart subcommands. An unknown `--method`
+ * used to be dropped silently; warn so a typo cannot masquerade as the default.
+ */
+function parseAutostartArgs(args: string[]): { port?: number; method?: AutostartMethod } {
+  let port: number | undefined;
+  let method: AutostartMethod | undefined;
+  for (let i = 0; i < args.length; i++) {
+    if (args[i] === '--port' && args[i + 1]) {
+      port = Number(args[++i]);
+    } else if (args[i] === '--method' && args[i + 1]) {
+      const value = args[++i];
+      if (value === 'vbs' || value === 'registry' || value === 'systemd' || value === 'auto') {
+        method = value;
+      } else {
+        logger.warn(
+          'Ignoring unknown autostart method %s; expected vbs, registry, systemd or auto.',
+          value,
+        );
+      }
+    }
+  }
+  return { port, method };
+}
+
 const subcommand = process.argv[2];
 
 if (subcommand === 'start') {
@@ -119,45 +144,16 @@ if (subcommand === 'start') {
 } else if (subcommand === 'autostart') {
   const action = process.argv[3];
   if (action === 'install') {
-    const args = process.argv.slice(4);
-    let port: number | undefined;
-    let method: AutostartMethod | undefined;
-    for (let i = 0; i < args.length; i++) {
-      if (args[i] === '--port' && args[i + 1]) {
-        port = Number(args[++i]);
-      } else if (args[i] === '--method' && args[i + 1]) {
-        const m = args[++i];
-        if (m === 'vbs' || m === 'registry' || m === 'systemd' || m === 'auto') {
-          method = m;
-        }
-      }
-    }
+    const { port, method } = parseAutostartArgs(process.argv.slice(4));
     await autostartInstall(port, method);
     process.exit();
   } else if (action === 'uninstall') {
-    const args = process.argv.slice(4);
-    let method: AutostartMethod | undefined;
-    for (let i = 0; i < args.length; i++) {
-      if (args[i] === '--method' && args[i + 1]) {
-        const m = args[++i];
-        if (m === 'vbs' || m === 'registry' || m === 'systemd' || m === 'auto') {
-          method = m;
-        }
-      }
-    }
+    const { method } = parseAutostartArgs(process.argv.slice(4));
     autostartUninstall(method);
-    process.exit(0);
+    // Honour process.exitCode set by the command (unsupported platform, failed disable).
+    process.exit();
   } else {
-    const args = process.argv.slice(4);
-    let method: AutostartMethod | undefined;
-    for (let i = 0; i < args.length; i++) {
-      if (args[i] === '--method' && args[i + 1]) {
-        const m = args[++i];
-        if (m === 'vbs' || m === 'registry' || m === 'systemd' || m === 'auto') {
-          method = m;
-        }
-      }
-    }
+    const { method } = parseAutostartArgs(process.argv.slice(4));
     autostartStatus(method);
     process.exit(0);
   }
