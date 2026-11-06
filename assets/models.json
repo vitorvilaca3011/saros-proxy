@@ -38,6 +38,34 @@
     "structured_output": true,
     "tool_call": true
   },
+  "beam:free": {
+    "id": "beam:free",
+    "limit": {
+      "context": 1048576,
+      "output": 65536
+    },
+    "modalities": {
+      "input": [
+        "text"
+      ],
+      "output": [
+        "text"
+      ]
+    },
+    "name": "Beam 1.0",
+    "reasoning": true,
+    "reasoning_options": [
+      {
+        "type": "effort",
+        "values": [
+          "low",
+          "medium",
+          "high"
+        ]
+      }
+    ],
+    "tool_call": true
+  },
   "claude-haiku-5-5": {
     "cost": {
       "cache_read": 0.01,
@@ -90,6 +118,34 @@
       }
     ],
     "structured_output": true,
+    "tool_call": true
+  },
+  "crouton-alpha": {
+    "id": "crouton-alpha",
+    "limit": {
+      "context": 1048576,
+      "output": 65536
+    },
+    "modalities": {
+      "input": [
+        "text"
+      ],
+      "output": [
+        "text"
+      ]
+    },
+    "name": "Crouton Alpha",
+    "reasoning": true,
+    "reasoning_options": [
+      {
+        "type": "effort",
+        "values": [
+          "low",
+          "medium",
+          "high"
+        ]
+      }
+    ],
     "tool_call": true
   },
   "crouton-alpha-free": {
@@ -655,6 +711,62 @@
     "structured_output": true,
     "tool_call": true
   },
+  "glm-5": {
+    "id": "glm-5",
+    "limit": {
+      "context": 200000,
+      "output": 65536
+    },
+    "modalities": {
+      "input": [
+        "text"
+      ],
+      "output": [
+        "text"
+      ]
+    },
+    "name": "GLM-5",
+    "reasoning": true,
+    "reasoning_options": [
+      {
+        "type": "effort",
+        "values": [
+          "low",
+          "medium",
+          "high"
+        ]
+      }
+    ],
+    "tool_call": true
+  },
+  "glm-5.1": {
+    "id": "glm-5.1",
+    "limit": {
+      "context": 200000,
+      "output": 65536
+    },
+    "modalities": {
+      "input": [
+        "text"
+      ],
+      "output": [
+        "text"
+      ]
+    },
+    "name": "GLM-5.1",
+    "reasoning": true,
+    "reasoning_options": [
+      {
+        "type": "effort",
+        "values": [
+          "low",
+          "medium",
+          "high"
+        ]
+      }
+    ],
+    "tool_call": true
+  },
   "glm-5.2": {
     "cost": {
       "cache_read": 0.26,
@@ -835,6 +947,34 @@
       }
     ],
     "structured_output": true,
+    "tool_call": true
+  },
+  "glyph-cluster:free": {
+    "id": "glyph-cluster:free",
+    "limit": {
+      "context": 256000,
+      "output": 65536
+    },
+    "modalities": {
+      "input": [
+        "text"
+      ],
+      "output": [
+        "text"
+      ]
+    },
+    "name": "Glyph Cluster",
+    "reasoning": true,
+    "reasoning_options": [
+      {
+        "type": "effort",
+        "values": [
+          "low",
+          "medium",
+          "high"
+        ]
+      }
+    ],
     "tool_call": true
   },
   "gpt-5.3-codex": {
@@ -1825,6 +1965,62 @@
     ],
     "tool_call": true
   },
+  "kimi-k2.5": {
+    "id": "kimi-k2.5",
+    "limit": {
+      "context": 256000,
+      "output": 65536
+    },
+    "modalities": {
+      "input": [
+        "text"
+      ],
+      "output": [
+        "text"
+      ]
+    },
+    "name": "Kimi K2.5",
+    "reasoning": true,
+    "reasoning_options": [
+      {
+        "type": "effort",
+        "values": [
+          "low",
+          "medium",
+          "high"
+        ]
+      }
+    ],
+    "tool_call": true
+  },
+  "kimi-k2.6": {
+    "id": "kimi-k2.6",
+    "limit": {
+      "context": 256000,
+      "output": 65536
+    },
+    "modalities": {
+      "input": [
+        "text"
+      ],
+      "output": [
+        "text"
+      ]
+    },
+    "name": "Kimi K2.6",
+    "reasoning": true,
+    "reasoning_options": [
+      {
+        "type": "effort",
+        "values": [
+          "low",
+          "medium",
+          "high"
+        ]
+      }
+    ],
+    "tool_call": true
+  },
   "kimi-k2.7-code": {
     "cost": {
       "cache_read": 0.19,
@@ -1960,6 +2156,62 @@
     "structured_output": true,
     "tool_call": true
   },
+  "ling-3.1-flash": {
+    "id": "ling-3.1-flash",
+    "limit": {
+      "context": 262144,
+      "output": 65536
+    },
+    "modalities": {
+      "input": [
+        "text"
+      ],
+      "output": [
+        "text"
+      ]
+    },
+    "name": "Ling 3.1 Flash",
+    "reasoning": true,
+    "reasoning_options": [
+      {
+        "type": "effort",
+        "values": [
+          "low",
+          "medium",
+          "high"
+        ]
+      }
+    ],
+    "tool_call": true
+  },
+  "ling-3.1-flash-1019": {
+    "id": "ling-3.1-flash-1019",
+    "limit": {
+      "context": 1000000,
+      "output": 65536
+    },
+    "modalities": {
+      "input": [
+        "text"
+      ],
+      "output": [
+        "text"
+      ]
+    },
+    "name": "Ling 3.1 Flash 1019",
+    "reasoning": true,
+    "reasoning_options": [
+      {
+        "type": "effort",
+        "values": [
+          "low",
+          "medium",
+          "high"
+        ]
+      }
+    ],
+    "tool_call": true
+  },
   "longcat-2.0": {
     "cost": {
       "cache_read": 0.006,
@@ -2049,6 +2301,34 @@
     "name": "MiMo-V2.6-Pro",
     "reasoning": true,
     "reasoning_options": [],
+    "tool_call": true
+  },
+  "mimo-v2.6-pro-ultraspeed": {
+    "id": "mimo-v2.6-pro-ultraspeed",
+    "limit": {
+      "context": 1048576,
+      "output": 65536
+    },
+    "modalities": {
+      "input": [
+        "text"
+      ],
+      "output": [
+        "text"
+      ]
+    },
+    "name": "MiMo V2.6 Pro UltraSpeed",
+    "reasoning": true,
+    "reasoning_options": [
+      {
+        "type": "effort",
+        "values": [
+          "low",
+          "medium",
+          "high"
+        ]
+      }
+    ],
     "tool_call": true
   },
   "minimax-m2.5": {
@@ -2416,6 +2696,34 @@
     "structured_output": true,
     "tool_call": true
   },
+  "muse-spark-open": {
+    "id": "muse-spark-open",
+    "limit": {
+      "context": 1048576,
+      "output": 65536
+    },
+    "modalities": {
+      "input": [
+        "text"
+      ],
+      "output": [
+        "text"
+      ]
+    },
+    "name": "Muse Spark Open",
+    "reasoning": true,
+    "reasoning_options": [
+      {
+        "type": "effort",
+        "values": [
+          "low",
+          "medium",
+          "high"
+        ]
+      }
+    ],
+    "tool_call": true
+  },
   "muse-wonder-1.0": {
     "cost": {
       "cache_read": 0.2,
@@ -2480,6 +2788,174 @@
     "reasoning_options": [
       {
         "type": "toggle"
+      }
+    ],
+    "tool_call": true
+  },
+  "nemotron-3.5-super-vl": {
+    "id": "nemotron-3.5-super-vl",
+    "limit": {
+      "context": 262144,
+      "output": 65536
+    },
+    "modalities": {
+      "input": [
+        "text"
+      ],
+      "output": [
+        "text"
+      ]
+    },
+    "name": "Nemotron 3.5 Super VL",
+    "reasoning": true,
+    "reasoning_options": [
+      {
+        "type": "effort",
+        "values": [
+          "low",
+          "medium",
+          "high"
+        ]
+      }
+    ],
+    "tool_call": true
+  },
+  "ornith-1.5-122b": {
+    "id": "ornith-1.5-122b",
+    "limit": {
+      "context": 262144,
+      "output": 65536
+    },
+    "modalities": {
+      "input": [
+        "text"
+      ],
+      "output": [
+        "text"
+      ]
+    },
+    "name": "Ornith 1.5 122B",
+    "reasoning": true,
+    "reasoning_options": [
+      {
+        "type": "effort",
+        "values": [
+          "low",
+          "medium",
+          "high"
+        ]
+      }
+    ],
+    "tool_call": true
+  },
+  "qwen3.6-max-preview": {
+    "id": "qwen3.6-max-preview",
+    "limit": {
+      "context": 200000,
+      "output": 65536
+    },
+    "modalities": {
+      "input": [
+        "text"
+      ],
+      "output": [
+        "text"
+      ]
+    },
+    "name": "Qwen 3.6 Max Preview",
+    "reasoning": true,
+    "reasoning_options": [
+      {
+        "type": "effort",
+        "values": [
+          "low",
+          "medium",
+          "high"
+        ]
+      }
+    ],
+    "tool_call": true
+  },
+  "qwen3.6-plus": {
+    "id": "qwen3.6-plus",
+    "limit": {
+      "context": 200000,
+      "output": 65536
+    },
+    "modalities": {
+      "input": [
+        "text"
+      ],
+      "output": [
+        "text"
+      ]
+    },
+    "name": "Qwen 3.6 Plus",
+    "reasoning": true,
+    "reasoning_options": [
+      {
+        "type": "effort",
+        "values": [
+          "low",
+          "medium",
+          "high"
+        ]
+      }
+    ],
+    "tool_call": true
+  },
+  "qwen3.7-flash": {
+    "id": "qwen3.7-flash",
+    "limit": {
+      "context": 1000000,
+      "output": 65536
+    },
+    "modalities": {
+      "input": [
+        "text"
+      ],
+      "output": [
+        "text"
+      ]
+    },
+    "name": "Qwen 3.7 Flash",
+    "reasoning": true,
+    "reasoning_options": [
+      {
+        "type": "effort",
+        "values": [
+          "low",
+          "medium",
+          "high"
+        ]
+      }
+    ],
+    "tool_call": true
+  },
+  "qwen3.7-max": {
+    "id": "qwen3.7-max",
+    "limit": {
+      "context": 1000000,
+      "output": 65536
+    },
+    "modalities": {
+      "input": [
+        "text"
+      ],
+      "output": [
+        "text"
+      ]
+    },
+    "name": "Qwen 3.7 Max",
+    "reasoning": true,
+    "reasoning_options": [
+      {
+        "type": "effort",
+        "values": [
+          "low",
+          "medium",
+          "high"
+        ]
       }
     ],
     "tool_call": true
@@ -2691,6 +3167,34 @@
           "low",
           "medium",
           "xhigh"
+        ]
+      }
+    ],
+    "tool_call": true
+  },
+  "qwen3.8-max-prime": {
+    "id": "qwen3.8-max-prime",
+    "limit": {
+      "context": 1000000,
+      "output": 65536
+    },
+    "modalities": {
+      "input": [
+        "text"
+      ],
+      "output": [
+        "text"
+      ]
+    },
+    "name": "Qwen 3.8 Max Prime",
+    "reasoning": true,
+    "reasoning_options": [
+      {
+        "type": "effort",
+        "values": [
+          "low",
+          "medium",
+          "high"
         ]
       }
     ],
