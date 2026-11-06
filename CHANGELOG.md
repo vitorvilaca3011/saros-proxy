@@ -9,6 +9,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- **Linux autostart via `systemd --user`.** `saros-proxy autostart install` writes
+  `$XDG_CONFIG_HOME/systemd/user/saros-proxy.service` (default
+  `~/.config/systemd/user`), runs the current binary with `serve --port <port>` under
+  `Restart=on-failure`/`RestartSec=5`, and drives `systemctl --user daemon-reload`,
+  `enable --now`, `disable --now` and `is-enabled`/`is-active`. On Linux `systemd` is
+  the default method: `--method systemd` is accepted and `auto` resolves to it.
 - **`npm run models:refresh` generates the bundled catalog.** `scripts/refresh-models.ts`
   merges models.dev metadata for `opencode-go` and `commandcode` with the live
   provider catalogs, so the bundle no longer depends on a hand-edited commit. A
@@ -31,6 +37,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`saros-proxy autostart install` no longer reports success without installing
+  anything.** Platforms without an implementation (macOS today) log a warning with
+  the OS and the alternative, and `install` exits non-zero (`status` stays zero
+  while reporting `unsupported`). A missing `systemctl` or user bus now names the
+  reason instead of returning a silent `false`.
 - **`saros-proxy start` repairs and completes `~/.config/saros/models.json`.** The
   daemon seeded the bundled copy on every start, discarding user edits; it now
   adds only the bundle keys the user file lacks (never overwriting a value the

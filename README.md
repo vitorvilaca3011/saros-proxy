@@ -591,15 +591,20 @@ saros-proxy probe
 # Show per-key quota usage, token totals and most-used models
 saros-proxy usage
 
-# Install autostart (Windows: VBS script or Registry)
-saros-proxy autostart install [--port <port>] [--method vbs|registry|auto]
+# Install autostart (Linux: systemd --user; Windows: VBS script or Registry)
+saros-proxy autostart install [--port <port>] [--method systemd|vbs|registry|auto]
 
 # Uninstall autostart
-saros-proxy autostart uninstall [--method vbs|registry|auto]
+saros-proxy autostart uninstall [--method systemd|vbs|registry|auto]
 
 # Check autostart status
-saros-proxy autostart status [--method vbs|registry|auto]
+saros-proxy autostart status [--method systemd|vbs|registry|auto]
 ```
+
+On Linux the default is a `systemd --user` unit at
+`~/.config/systemd/user/saros-proxy.service` (honouring `$XDG_CONFIG_HOME`), enabled
+with `systemctl --user enable --now`. On Windows the default is AV-aware (`auto`):
+Registry when third-party antivirus is detected, otherwise the Startup-folder VBS.
 
 The `start` command automatically syncs model definitions to all enabled harnesses (see [Multi-Harness Integration](#multi-harness-integration-pi-oh-my-pi--dsh)).
 

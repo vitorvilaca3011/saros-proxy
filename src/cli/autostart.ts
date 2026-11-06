@@ -2,25 +2,28 @@
  * autostart.ts — Register/unregister the daemon to start on user login.
  *
  * Methods:
- *   registry  — HKCU\Software\Microsoft\Windows\CurrentVersion\Run (default)
+ *   registry  — HKCU\Software\Microsoft\Windows\CurrentVersion\Run
  *   vbs       — VBScript in Windows Startup folder (legacy, may trigger AV)
- *   auto      — detect third-party AV → registry, else vbs
+ *   systemd   — ~/.config/systemd/user/saros-proxy.service (Linux default)
+ *   auto      — platform default: systemd on Linux, AV-aware vbs/registry on Windows
  *
- * macOS:    creates a launchd agent plist (TODO)
- * Linux:    creates a systemd --user service (TODO)
+ * macOS:    not implemented (reported as unsupported, never a silent no-op)
  */
 
-import { existsSync, writeFileSync, rmSync, readFileSync } from 'node:fs';
+import { existsSync, mkdirSync, writeFileSync, rmSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { homedir } from 'node:os';
 import { execFileSync } from 'node:child_process';
+import { logger } from '../logger.js';
 import * as ui from './ui.js';
 
 // ---------------------------------------------------------------------------
 // Types
 // ---------------------------------------------------------------------------
 
-export type AutostartMethod = 'vbs' | 'registry' | 'auto';
+export type AutostartMethod = 'vbs' | 'registry' | 'systemd' | 'auto';
+type ResolvedMethod = 'vbs' | 'registry' | 'systemd';
+export type ResolvedAutostartMethod = ResolvedMethod | 'unsupported';
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -118,13 +121,15 @@ export function detectThirdPartyAv(): boolean {
 
 /**
  * Resolve the effective method based on user preference and environment.
+ * Explicit methods are returned as-is; unknown platforms return 'unsupported'
+ * so callers can warn instead of silently doing nothing.
  * Exported for testing.
  */
-export function resolveMethod(method?: AutostartMethod, avDetected?: boolean): 'vbs' | 'registry' {
-  if (method === 'vbs') return 'vbs';
-  if (method === 'registry') return 'registry';
+export function resolveMethod(method?: AutostartMethod, avDetected?: boolean): ResolvedAutostartMethod {
+  if (method === 'vbs' || method === 'registry' || method === 'systemd') return method;
+  if (process.platform === 'linux') return 'systemd';
+  if (process.platform !== 'win32') return 'unsupported';
   // auto or undefined → detect
-  if (process.platform !== 'win32') return 'registry';
   const hasAv = avDetected ?? detectThirdPartyAv();
   if (hasAv) return 'registry';
   // No third-party AV — use VBS (lighter, no registry noise)
@@ -207,61 +212,258 @@ function vbsExists(): boolean {
 }
 
 // ---------------------------------------------------------------------------
+// systemd method (Linux user manager)
+// ---------------------------------------------------------------------------
+
+const SYSTEMD_UNIT_NAME = 'saros-proxy.service';
+const SYSTEMCTL_TIMEOUT_MS = 10_000;
+
+/** `$XDG_CONFIG_HOME/systemd/user`, defaulting to `~/.config/systemd/user`. */
+function systemdUserDir(): string {
+  const configHome = process.env.XDG_CONFIG_HOME || join(homedir(), '.config');
+  return join(configHome, 'systemd', 'user');
+}
+
+function systemdUnitPath(): string {
+  return join(systemdUserDir(), SYSTEMD_UNIT_NAME);
+}
+
+/** Build the unit file contents. Exported for testing. */
+export function buildSystemdUnit(port?: number): string {
+  const portArg = port ? ` --port ${port}` : '';
+  return [
+    '[Unit]',
+    'Description=Saros proxy',
+    'After=network-online.target',
+    'Wants=network-online.target',
+    '',
+    '[Service]',
+    'Type=simple',
+    `ExecStart=${resolveCommand()} serve${portArg}`,
+    'Restart=on-failure',
+    'RestartSec=5',
+    '',
+    '[Install]',
+    'WantedBy=default.target',
+    '',
+  ].join('\n');
+}
+
+/** Run `systemctl --user …`, returning trimmed stdout. Throws on failure. */
+function runSystemctl(args: string[]): string {
+  return execFileSync('systemctl', ['--user', ...args], {
+    stdio: 'pipe',
+    timeout: SYSTEMCTL_TIMEOUT_MS,
+  }).toString().trim();
+}
+
+/** Explain why systemctl failed in a way the CLI can print verbatim. */
+function describeSystemctlError(err: unknown): string {
+  const execError = err as {
+    code?: string;
+    message?: string;
+    stderr?: Buffer | string;
+  };
+  if (execError.code === 'ENOENT') {
+    return '`systemctl` was not found on PATH';
+  }
+  const stderr = execError.stderr?.toString().trim().split('\n')[0];
+  if (stderr) return stderr;
+  return execError.message ?? String(err);
+}
+
+interface SystemctlQuery {
+  output: string;
+  /** Set only when the command could not be run (missing binary, no bus). */
+  reason?: string;
+}
+
+/** Run a read-only systemctl query; `disabled`/`inactive` exit 1 but are answers. */
+function querySystemctl(args: string[]): SystemctlQuery {
+  try {
+    return { output: runSystemctl(args) };
+  } catch (err) {
+    const execError = err as { code?: string; stdout?: Buffer | string; stderr?: Buffer | string };
+    const output = execError.stdout?.toString().trim() ?? '';
+    if (execError.code === 'ENOENT') {
+      return { output, reason: describeSystemctlError(err) };
+    }
+    const stderr = execError.stderr?.toString().trim().split('\n')[0];
+    if (!stderr) return { output };
+    // No user manager (containers, WSL without systemd) is not a missing unit.
+    if (/Failed to connect to bus|not been booted with systemd/i.test(stderr)) {
+      return { output, reason: stderr };
+    }
+    // A unit that simply does not exist is an answer, not a broken systemctl.
+    if (/No such file or directory|could not be found|not loaded/i.test(stderr)) {
+      return { output };
+    }
+    return { output, reason: stderr };
+  }
+}
+
+function systemdInstall(port?: number): void {
+  const unitPath = systemdUnitPath();
+  try {
+    mkdirSync(systemdUserDir(), { recursive: true });
+    writeFileSync(unitPath, buildSystemdUnit(port), 'utf-8');
+  } catch (err) {
+    logger.warn('Could not write the systemd unit file at %s: %s', unitPath, describeSystemctlError(err));
+    process.exitCode = 1;
+    return;
+  }
+
+  try {
+    runSystemctl(['daemon-reload']);
+    runSystemctl(['enable', '--now', SYSTEMD_UNIT_NAME]);
+  } catch (err) {
+    logger.warn(
+      'systemd autostart could not be enabled: %s. The unit file is at %s; check that `systemctl --user` works on this host (containers and WSL without systemd do not provide it).',
+      describeSystemctlError(err),
+      unitPath,
+    );
+    process.exitCode = 1;
+    return;
+  }
+
+  ui.success(`Auto-start installed via systemd --user: ${unitPath}`);
+}
+
+function systemdUninstall(): void {
+  const unitPath = systemdUnitPath();
+  if (!existsSync(unitPath)) {
+    console.log('No systemd auto-start entry found.');
+    return;
+  }
+
+  try {
+    runSystemctl(['disable', '--now', SYSTEMD_UNIT_NAME]);
+  } catch (err) {
+    logger.warn('Could not disable the systemd unit: %s', describeSystemctlError(err));
+  }
+
+  rmSync(unitPath, { force: true });
+
+  try {
+    runSystemctl(['daemon-reload']);
+  } catch (err) {
+    logger.warn('The systemd unit file was removed, but `daemon-reload` failed: %s', describeSystemctlError(err));
+  }
+
+  console.log(`Auto-start removed: ${unitPath}`);
+}
+
+function systemdStatus(): void {
+  const enabled = querySystemctl(['is-enabled', SYSTEMD_UNIT_NAME]);
+  const active = querySystemctl(['is-active', SYSTEMD_UNIT_NAME]);
+  const reason = enabled.reason ?? active.reason;
+  if (reason) {
+    logger.warn('Cannot determine systemd autostart status: %s', reason);
+    return;
+  }
+
+  if (enabled.output === 'enabled' || active.output === 'active') {
+    console.log(`Auto-start is enabled (systemd). Unit: ${systemdUnitPath()}`);
+  } else {
+    console.log('Auto-start is not installed (systemd).');
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Platform dispatch
+// ---------------------------------------------------------------------------
+
+/** Warn (never silently succeed) when this platform has no implementation. */
+function reportUnsupported(action: 'install' | 'uninstall' | 'status'): void {
+  const alternative = process.platform === 'darwin'
+    ? 'On macOS, create a launchd LaunchAgent or start `saros-proxy serve` from a login item.'
+    : 'Start `saros-proxy serve` manually or use the platform login mechanism.';
+  logger.warn(
+    'Autostart is unsupported on %s; %s does nothing. %s',
+    process.platform,
+    action,
+    alternative,
+  );
+}
+
+async function resolveInstallMethod(
+  method?: AutostartMethod,
+): Promise<{ resolved: ResolvedAutostartMethod; prompted: boolean }> {
+  if (method === 'vbs' || method === 'registry' || method === 'systemd') {
+    return { resolved: method, prompted: false };
+  }
+  if (method === 'auto' || process.platform !== 'win32') {
+    return { resolved: resolveMethod(method), prompted: false };
+  }
+
+  // Windows without an explicit method: let the user pick.
+  if (!process.stdin.isTTY) {
+    ui.warn('No --method specified and stdin is not a TTY. Using auto-detect. Pass --method <vbs|registry|auto> to skip this.');
+    return { resolved: resolveMethod(undefined), prompted: false };
+  }
+
+  ui.intro('Saros — Autostart');
+  const choice = ui.assertNotCancelled(await ui.select<AutostartMethod>({
+    message: 'Choose an autostart method',
+    options: [
+      { value: 'registry', label: 'Windows Registry', hint: 'recommended' },
+      { value: 'vbs', label: 'VBScript in Startup folder', hint: 'lighter, may trigger AV' },
+      { value: 'auto', label: 'Detect automatically', hint: 'picks based on AV detection' },
+    ],
+  }));
+  return { resolved: resolveMethod(choice), prompted: true };
+}
+
+// ---------------------------------------------------------------------------
 // Public API
 // ---------------------------------------------------------------------------
 
 export async function autostartInstall(port?: number, method?: AutostartMethod): Promise<void> {
-  let resolved: 'vbs' | 'registry';
-  let wasPrompted = false;
+  const { resolved, prompted } = await resolveInstallMethod(method);
 
-  if (method === 'vbs' || method === 'registry') {
-    resolved = method;
-  } else if (method === 'auto') {
-    resolved = resolveMethod('auto');
-  } else {
-    // No method specified — prompt the user to choose
-    wasPrompted = true;
-    if (process.stdin.isTTY) {
-      ui.intro('Saros — Autostart');
-      const choice = ui.assertNotCancelled(await ui.select<AutostartMethod>({
-        message: 'Choose an autostart method',
-        options: [
-          { value: 'registry', label: 'Windows Registry', hint: 'recommended' },
-          { value: 'vbs', label: 'VBScript in Startup folder', hint: 'lighter, may trigger AV' },
-          { value: 'auto', label: 'Detect automatically', hint: 'picks based on AV detection' },
-        ],
-      }));
-      resolved = resolveMethod(choice);
-    } else {
-      ui.warn('No --method specified and stdin is not a TTY. Using auto-detect. Pass --method <vbs|registry|auto> to skip this.');
-      resolved = resolveMethod(undefined);
-    }
+  if (resolved === 'unsupported') {
+    reportUnsupported('install');
+    process.exitCode = 1;
+    return;
   }
 
-  if (resolved === 'registry') {
+  if (resolved === 'systemd') {
+    systemdInstall(port);
+  } else if (resolved === 'registry') {
     registryInstall(port);
   } else {
     vbsInstall(port);
   }
 
-  if (wasPrompted && process.stdin.isTTY) {
+  if (prompted) {
     ui.outro('Autostart configured');
   }
 }
 
 export function autostartUninstall(method?: AutostartMethod): void {
-  if (method === 'vbs') {
+  if (method === 'systemd') {
+    systemdUninstall();
+  } else if (method === 'vbs') {
     vbsUninstall();
   } else if (method === 'registry') {
     registryUninstall();
-  } else {
-    // Unspecified — clean up both
+  } else if (process.platform === 'linux') {
+    systemdUninstall();
+  } else if (process.platform === 'win32') {
+    // Unspecified — clean up both Windows entries
     vbsUninstall();
     registryUninstall();
+  } else {
+    reportUnsupported('uninstall');
   }
 }
 
 export function autostartStatus(method?: AutostartMethod): void {
+  if (method === 'systemd') {
+    systemdStatus();
+    return;
+  }
+
   if (method === 'vbs') {
     const path = vbsPath();
     if (vbsExists()) {
@@ -284,7 +486,17 @@ export function autostartStatus(method?: AutostartMethod): void {
     return;
   }
 
-  // Check both
+  if (process.platform === 'linux') {
+    systemdStatus();
+    return;
+  }
+
+  if (process.platform !== 'win32') {
+    reportUnsupported('status');
+    return;
+  }
+
+  // Check both Windows entries
   const vbs = vbsExists();
   const reg = registryStatus();
   if (vbs || reg) {

@@ -127,20 +127,20 @@ if (subcommand === 'start') {
         port = Number(args[++i]);
       } else if (args[i] === '--method' && args[i + 1]) {
         const m = args[++i];
-        if (m === 'vbs' || m === 'registry' || m === 'auto') {
+        if (m === 'vbs' || m === 'registry' || m === 'systemd' || m === 'auto') {
           method = m;
         }
       }
     }
     await autostartInstall(port, method);
-    process.exit(0);
+    process.exit();
   } else if (action === 'uninstall') {
     const args = process.argv.slice(4);
     let method: AutostartMethod | undefined;
     for (let i = 0; i < args.length; i++) {
       if (args[i] === '--method' && args[i + 1]) {
         const m = args[++i];
-        if (m === 'vbs' || m === 'registry' || m === 'auto') {
+        if (m === 'vbs' || m === 'registry' || m === 'systemd' || m === 'auto') {
           method = m;
         }
       }
@@ -153,7 +153,7 @@ if (subcommand === 'start') {
     for (let i = 0; i < args.length; i++) {
       if (args[i] === '--method' && args[i + 1]) {
         const m = args[++i];
-        if (m === 'vbs' || m === 'registry' || m === 'auto') {
+        if (m === 'vbs' || m === 'registry' || m === 'systemd' || m === 'auto') {
           method = m;
         }
       }
