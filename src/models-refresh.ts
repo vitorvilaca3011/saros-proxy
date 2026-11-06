@@ -27,6 +27,7 @@ import { isDeepStrictEqual } from 'node:util';
 import {
   DEFAULT_UPSTREAM_COMMANDCODE,
   DEFAULT_UPSTREAM_URL,
+  MODELS_DEV_COMMANDCODE_PROVIDER_ID,
   MODELS_DEV_SAFE_FIELDS,
   MODELS_DEV_TIMEOUT_MS,
   MODELS_DEV_URL,
@@ -35,13 +36,11 @@ import {
 } from './constants.js';
 import { OPENCODE_GO_USER_AGENT } from './providers/opencode-go.js';
 import { parseCatalogObject, serializeCatalogObject } from './models-catalog.js';
+import { extractProviderModels } from './models-dev.js';
 
 // ---------------------------------------------------------------------------
 // Sources
 // ---------------------------------------------------------------------------
-
-/** models.dev's CommandCode provider id. */
-export const MODELS_DEV_COMMANDCODE_PROVIDER_ID = 'commandcode';
 
 /** Public opencode-go catalog — no auth, but Cloudflare wants a CLI signature. */
 export const OPENCODE_GO_MODELS_URL = `${DEFAULT_UPSTREAM_URL}/zen/go/v1/models`;
@@ -207,16 +206,17 @@ export function defaultRefreshFetchers(): RefreshFetchers {
 // models.dev extraction
 // ---------------------------------------------------------------------------
 
-/** Return one provider's `models` map from a parsed models.dev payload. */
+/**
+ * Return one provider's `models` map from a parsed models.dev payload.
+ *
+ * Thin delegate: the parse lives in `models-dev.ts` so the generator and the
+ * runtime read agree on what a provider slice is.
+ */
 export function extractModelsDevProviderModels(
   parsed: Record<string, unknown>,
   providerId: string,
 ): Record<string, Record<string, unknown>> {
-  const provider = parsed[providerId];
-  if (!isPlainObject(provider)) return {};
-  const models = provider.models;
-  if (!isPlainObject(models)) return {};
-  return models as Record<string, Record<string, unknown>>;
+  return extractProviderModels(parsed, providerId);
 }
 
 // ---------------------------------------------------------------------------
