@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.1.0] - 2026-11-06
+
+The surface 1.0 promised to keep is unchanged: the `/v1/*` and `/zen/go/v1/*` routes,
+the `config.yaml` schema and the `saros-proxy` subcommands. One path moved — the bundled
+model catalogue is no longer a data file at the package root — and Linux finally gets a
+real autostart.
+
 ### Added
 
 - **CommandCode models are enriched from models.dev.** The models.dev read is
@@ -560,7 +567,8 @@ First stable release. The public surface — the `/v1/*` and `/zen/go/v1/*` rout
 - Hop-by-hop header sanitization
 - Non-root Docker user
 
-[Unreleased]: https://github.com/vitorvilaca3011/saros-proxy/compare/v1.0.0...HEAD
+[Unreleased]: https://github.com/vitorvilaca3011/saros-proxy/compare/v1.1.0...HEAD
+[1.1.0]: https://github.com/vitorvilaca3011/saros-proxy/compare/v1.0.0...v1.1.0
 [1.0.0]: https://github.com/vitorvilaca3011/saros-proxy/compare/v0.11.0...v1.0.0
 [0.11.0]: https://github.com/vitorvilaca3011/saros-proxy/compare/v0.10.2...v0.11.0
 [0.10.2]: https://github.com/vitorvilaca3011/saros-proxy/compare/v0.10.1...v0.10.2
