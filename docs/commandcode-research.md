@@ -1,5 +1,19 @@
 # CommandCode API support for saros-proxy — Research Findings
 
+> **STATUS UPDATE (2026-11-05 — quota endpoints found, 1.0.0).** The conclusion
+> below that CommandCode exposes no usage API was **wrong**: it looked only at
+> `/v1/account/usage` (a real 404). The quota lives under `/alpha`:
+> `GET /alpha/billing/credits` returns `windowLimits.fiveHour` and
+> `windowLimits.weekly` as `used`/`cap` in credits plus reset epochs, and
+> `credits.monthlyCredits` (what remains of the monthly allowance), while
+> `GET /alpha/usage/summary` reports the period's consumption. All three
+> `/alpha` routes require the CLI identity headers, and so does the chat path:
+> Cloudflare in front of `api.commandcode.ai` answers a missing or browser-like
+> `User-Agent` with `403 error code: 1010`, which is why the provider sends
+> `User-Agent: cli`. `saros-proxy` 1.0.0 reads `/alpha/billing/credits`, derives
+> the monthly percentage from `2 × weekly.cap` (validated in credits) and
+> weighs rotation by it.
+>
 > **STATUS UPDATE (2026-09-20 — token usage implemented).** Per-key token
 > accounting landed (`src/token-usage.ts`): streaming requests to
 > providers that advertise `supportsStreamUsage` get
@@ -99,7 +113,9 @@ Note: one header pair disagrees between sources (`X-Project-Slug`:
 | `/provider/v1/models` | GET | **200 even with a bogus key** — unauthenticated catalog, OpenAI `{object:"list",data:[...]}` shape, ~65 models | model catalog merge (no key check possible) |
 | `/alpha/billing/subscriptions` | GET | 401 `{"success":false,"error":{"code":"UNAUTHORIZED",...}}` with bogus key; returns `planId` for valid keys | **best smoke-test endpoint** (cheap GET, real 401) + plan detection |
 | `/alpha/generate` | POST | With CLI headers + bogus `sk-` key: **400 BAD_REQUEST on body validation** (complains about `memory`, `params`, `config`) — i.e. auth passed. Without CLI headers: 403 `upgrade_required` | actual chat relay; also proves auth separately from body |
-| `/v1/account/usage` | GET | 404 "not a registered API route" on api.commandcode.ai (it exists only on the local opencommand proxy) | not usable directly |
+| `/v1/account/usage` | GET | 404 "not a registered API route" on api.commandcode.ai (it exists only on the local opencommand proxy) | not a route — the real quota endpoints are the `/alpha` ones below |
+| `/alpha/billing/credits` | GET | 200 with CLI identity headers; `{credits:{monthlyCredits,…}, windowLimits:{fiveHour:{used,cap,resetAt}, weekly:{…}}}` | **per-key quota** (5h + weekly; monthly derived) — 1.0.0 |
+| `/alpha/usage/summary` | GET | 200 with CLI identity headers; period totals (`totalCredits`, tokens) | consumption reporting |
 | `/v1/chat/completions` | POST | 404 on api.commandcode.ai (only the local proxy serves it) | not usable directly |
 | root `/` | GET | 200 | — |
 
