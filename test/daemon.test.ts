@@ -11,6 +11,7 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { existsSync, mkdirSync, writeFileSync, appendFileSync, readFileSync, rmSync, mkdtempSync, statSync, readlinkSync, readdirSync, closeSync, chmodSync, openSync, writeSync, symlinkSync } from 'node:fs';
 import { dirname, join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { tmpdir } from 'node:os';
 import { createServer } from 'node:http';
 import type * as Daemon from '../src/cli/daemon.js';
@@ -1552,6 +1553,112 @@ describe('daemonStart', () => {
 
     expect(exitSpy).toHaveBeenCalledWith(0);
     expect(openFdsTo(logPath)).toEqual([]);
+  });
+
+  it('seeds models.json on a start when the user has none', async () => {
+    stubHealthDown();
+    mockSpawn.mockClear();
+    mockProcessExitRecord();
+    vi.spyOn(console, 'log').mockImplementation(() => {});
+    vi.spyOn(process, 'kill').mockImplementation(() => true); // child stays alive
+    vi.useFakeTimers();
+
+    await daemon.daemonStart();
+    await vi.advanceTimersByTimeAsync(2000);
+
+    const bundled = readFileSync(
+      join(dirname(fileURLToPath(import.meta.url)), '..', 'assets', 'models.json'),
+      'utf-8',
+    );
+    expect(readFileSync(join(sarosDir, 'models.json'), 'utf-8')).toBe(bundled);
+    // Let the post-verification work (models sync, update check) settle.
+    await vi.advanceTimersByTimeAsync(60_000);
+  });
+
+  it('adds the bundle keys an older models.json lacks and keeps the user values', async () => {
+    stubHealthDown();
+    mockSpawn.mockClear();
+    mockProcessExitRecord();
+    const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+    vi.spyOn(process, 'kill').mockImplementation(() => true); // child stays alive
+    vi.useFakeTimers();
+
+    const bundledPath = join(dirname(fileURLToPath(import.meta.url)), '..', 'assets', 'models.json');
+    const bundled = JSON.parse(readFileSync(bundledPath, 'utf-8')) as Record<string, Record<string, unknown>>;
+    const bundleKeys = Object.keys(bundled).sort();
+    const partial: Record<string, unknown> = {};
+    for (const key of bundleKeys.slice(0, 37)) partial[key] = bundled[key];
+    partial[bundleKeys[0]] = { ...bundled[bundleKeys[0]], name: 'My Custom Name' };
+    mkdirSync(sarosDir, { recursive: true });
+    writeFileSync(join(sarosDir, 'models.json'), JSON.stringify(partial, null, 2), 'utf-8');
+
+    await daemon.daemonStart();
+    await vi.advanceTimersByTimeAsync(2000);
+
+    const merged = JSON.parse(readFileSync(join(sarosDir, 'models.json'), 'utf-8')) as Record<string, Record<string, unknown>>;
+    expect(Object.keys(merged).sort()).toEqual(bundleKeys);
+    expect(merged[bundleKeys[0]].name).toBe('My Custom Name');
+    const output = logSpy.mock.calls.map((call) => String(call[0])).join('\n');
+    expect(output).toContain(`models.json: added ${bundleKeys.length - 37} missing models`);
+    // Let the post-verification work (models sync, update check) settle.
+    await vi.advanceTimersByTimeAsync(60_000);
+  });
+
+  it('keeps a user copy that already covers the bundle', async () => {
+    stubHealthDown();
+    mockSpawn.mockClear();
+    mockProcessExitRecord();
+    const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+    vi.spyOn(process, 'kill').mockImplementation(() => true); // child stays alive
+    vi.useFakeTimers();
+
+    const bundledPath = join(dirname(fileURLToPath(import.meta.url)), '..', 'assets', 'models.json');
+    const bundled = JSON.parse(readFileSync(bundledPath, 'utf-8')) as Record<string, Record<string, unknown>>;
+    const firstKey = Object.keys(bundled).sort()[0];
+    const userCatalog = {
+      ...bundled,
+      [firstKey]: { ...bundled[firstKey], name: 'My Custom Name' },
+    };
+    const userContent = JSON.stringify(userCatalog, null, 2);
+    mkdirSync(sarosDir, { recursive: true });
+    writeFileSync(join(sarosDir, 'models.json'), userContent, 'utf-8');
+
+    await daemon.daemonStart();
+    await vi.advanceTimersByTimeAsync(2000);
+
+    expect(readFileSync(join(sarosDir, 'models.json'), 'utf-8')).toBe(userContent);
+    const output = logSpy.mock.calls.map((call) => String(call[0])).join('\n');
+    expect(output).toContain('models.json already present, keeping the user copy');
+    // Let the post-verification work (models sync, update check) settle.
+    await vi.advanceTimersByTimeAsync(60_000);
+  });
+
+  it('backs up and re-seeds a corrupt models.json', async () => {
+    stubHealthDown();
+    mockSpawn.mockClear();
+    mockProcessExitRecord();
+    vi.spyOn(console, 'log').mockImplementation(() => {});
+    const warnSpy = vi.spyOn(console, 'warn').mockImplementation(() => {});
+    vi.spyOn(process, 'kill').mockImplementation(() => true); // child stays alive
+    vi.useFakeTimers();
+    const modelsPath = join(sarosDir, 'models.json');
+    const corrupt = '{ not json';
+    mkdirSync(sarosDir, { recursive: true });
+    writeFileSync(modelsPath, corrupt, 'utf-8');
+
+    await daemon.daemonStart();
+    await vi.advanceTimersByTimeAsync(2000);
+
+    expect(readFileSync(`${modelsPath}.corrupt`, 'utf-8')).toBe(corrupt);
+    const bundled = readFileSync(
+      join(dirname(fileURLToPath(import.meta.url)), '..', 'assets', 'models.json'),
+      'utf-8',
+    );
+    expect(readFileSync(modelsPath, 'utf-8')).toBe(bundled);
+    const output = warnSpy.mock.calls.map((call) => String(call[0])).join('\n');
+    expect(output).toContain('backed it up');
+    // Let the post-verification work (models sync, update check) settle.
+    await vi.advanceTimersByTimeAsync(60_000);
   });
 
   it('rotates daemon.log at start when it exceeds 10 MB', async () => {

@@ -147,7 +147,7 @@ export function getMissingModels(current: string[], upstream: string[]): string[
  *
  * Priority (first match wins):
  *   1. models.dev metadata (if provided and found for modelId)
- *   2. Bundled `models.json` catalog
+ *   2. Bundled `assets/models.json` catalog
  *   3. Heuristic title-case of the ID with default limits
  *
  * @param modelId — The upstream model ID (e.g. "glm-5", "kimi-k2.7-code")
@@ -171,7 +171,7 @@ export function buildMinimalStub(
     }
   }
 
-  // 2. models.json bundled definitions
+  // 2. `assets/models.json` bundled definitions
   const bundled = loadModelsCatalog();
   const known = bundled[modelId];
   if (known && typeof known === 'object' && !Array.isArray(known)) {

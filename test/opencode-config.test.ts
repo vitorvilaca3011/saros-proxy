@@ -25,6 +25,7 @@ import {
   syncModelsToOpencodeConfig,
 } from '../src/cli/opencode-config.js';
 import { loadModelsCatalog } from '../src/models-catalog.js';
+import { logger } from '../src/logger.js';
 
 // Mock homedir so path-detection helpers can be pointed at a temp directory.
 // The default is the temp home test/setup-env.ts installs — never the
@@ -526,6 +527,22 @@ describe('OpenCode Config Integration', () => {
       writeFileSync(modelsPath, '{ not json', 'utf-8');
 
       expect(loadModelsFromJson(modelsPath)).toBe(loadModelsCatalog());
+    });
+
+    it('logs the fallback when the file is not a valid catalog', () => {
+      const warnSpy = vi.spyOn(logger, 'warn').mockImplementation(() => {});
+      try {
+        const modelsPath = join(tmpDir, 'broken.json');
+        writeFileSync(modelsPath, '[1]', 'utf-8');
+
+        expect(loadModelsFromJson(modelsPath)).toBe(loadModelsCatalog());
+        expect(warnSpy).toHaveBeenCalledWith(
+          expect.objectContaining({ path: modelsPath }),
+          expect.stringMatching(/bundled/),
+        );
+      } finally {
+        warnSpy.mockRestore();
+      }
     });
 
     it('loads from default models.json path when no path given', () => {

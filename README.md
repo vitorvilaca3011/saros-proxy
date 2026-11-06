@@ -752,7 +752,7 @@ Behavior:
 - Sync never creates a harness config: harnesses whose config file is missing are skipped.
 - Only `providers["saros-proxy"].models` is replaced; all other providers, fields, and settings are preserved, and a `<file>.backup` is created before the first write.
 
-The model list written to each harness comes from the live provider catalogs (opencode-go) enriched with models.dev metadata, merged with any CommandCode-only models — falling back to bundled models when offline — so every harness stays current alongside OpenCode.
+The model list written to each harness comes from the live provider catalogs (opencode-go) enriched with models.dev metadata, merged with any CommandCode-only models — falling back to the bundled `assets/models.json` when offline — so every harness stays current alongside OpenCode.
 
 > **Why a static model list?** The harnesses use a static `models` list on purpose. `pi` has no `/v1/models` discovery for custom providers, and `oh-my-pi`'s discovery cannot recover reasoning/context/output metadata for provider model IDs. `dsh` replaces only `providers["saros-proxy"].models` in its patch layer (`cordis.patch.yml`), which dsh rewrites at every boot — a static, explicitly-managed list is the only reliable source. Dynamic discovery would silently break thinking-level (`:max`/`:high`) role configs.
 
@@ -866,6 +866,18 @@ npm run build
 
 Output goes to `dist/`.
 
+### Refresh the bundled model catalog
+
+`assets/models.json` is generated — do not edit it by hand. The generator merges models.dev metadata with the live opencode-go and CommandCode catalogs: a model that left upstream leaves the bundle, a model the upstream serves but models.dev does not list still enters with the live name and context window, and a field already in the file survives when models.dev omits it.
+
+```bash
+npm run models:refresh -- --dry-run      # print the diff, write nothing
+npm run models:refresh                   # rewrite assets/models.json
+npm run models:refresh -- --allow-shrink # accept removing more than half of the models
+```
+
+A failed fetch — or a 2xx with an empty catalog — aborts before the file is read, and a merge that would remove more than half of the current models aborts unless `--allow-shrink` is given. The write goes through a temp file and an atomic rename, so a crash never leaves a truncated catalog.
+
 ### Project structure
 
 ```
@@ -879,7 +891,8 @@ src/
   providers/            — Multi-provider key abstraction (KeyProvider, adapters, identifyKey)
   models-fetcher.ts     — Upstream model list fetching + caching
   models-sync.ts        — Auto-sync models from upstream to opencode config
-  models-catalog.ts     — Single source of truth: loads bundled models.json
+  models-catalog.ts     — Single source of truth: loads assets/models.json
+  models-refresh.ts     — Generates that catalog (npm run models:refresh)
   cli/
     setup.ts            — Interactive setup wizard
     daemon.ts           — Background process management

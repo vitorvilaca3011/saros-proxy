@@ -1244,7 +1244,7 @@ describe('buildCanonicalModels — provider catalogs', () => {
     // Absent from models.dev but present in the bundled catalog: still listed,
     // with the bundle's metadata (exact id and bare-name matches).
     const bundled = result['deepseek/deepseek-v4-pro@commandcode'] as Record<string, unknown>;
-    expect(bundled.name).toBe('DeepSeek V4 Pro (New) (1)');
+    expect(bundled.name).toBe('DeepSeek V4 Pro (1)');
     expect((bundled.limit as Record<string, unknown>).context).toBe(1000000);
 
     const bundledExact = result['claude-haiku-5-5@commandcode'] as Record<string, unknown>;

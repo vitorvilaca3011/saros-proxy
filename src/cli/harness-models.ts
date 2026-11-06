@@ -5,7 +5,7 @@
  * { id, name, tool_call, reasoning, limit:{context,output},
  *   modalities:{input,output}, cost? }) into the array shape the pi and
  * oh-my-pi harnesses expect, and builds that canonical map from the live
- * upstream + models.dev metadata (falling back to bundled models.json).
+ * upstream + models.dev metadata (falling back to bundled `assets/models.json`).
  */
 
 import type { ProxyConfig } from '../config.js';
@@ -162,7 +162,7 @@ function countServingKeys(
 }
 
 /**
- * Bundled `models.json` entry for a provider-native id, when present.
+ * Bundled `assets/models.json` entry for a provider-native id, when present.
  *
  * Exact id first, then bare name: the live catalog prefixes ids
  * ('deepseek/deepseek-v4-pro') while the bundle keys the bare model
@@ -188,7 +188,7 @@ function bundledModel(nativeId: string): Record<string, unknown> | undefined {
  *
  * Metadata priority (first match wins):
  *   1. models.dev slice of the owning provider (exact id, then bare name)
- *   2. bundled `models.json`
+ *   2. bundled `assets/models.json`
  *   3. the live catalog's own fields, then safe defaults
  *
  * Providers always keep their `owned_by` hint and the entry id carries the
@@ -318,9 +318,9 @@ async function appendProviderCatalogModels(
  * Live path (config provided, not offline): fetch upstream model IDs and
  * enrich each with models.dev metadata via buildMinimalStub, then append
  * provider-specific catalog models (@commandcode etc.) enriched from that
- * provider's own models.dev slice. Falls back to the bundled models.json
- * when the upstream fetch yields nothing.
- * Offline path (or no config): bundled models.json only.
+ * provider's own models.dev slice. Falls back to the bundled
+ * `assets/models.json` when the upstream fetch yields nothing.
+ * Offline path (or no config): bundled `assets/models.json` only.
  */
 export async function buildCanonicalModels(
   config?: ProxyConfig,
