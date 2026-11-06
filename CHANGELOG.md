@@ -7,60 +7,68 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.0.0] - 2026-11-05
+
+First stable release. The public surface — the `/v1/*` and `/zen/go/v1/*` routes, the
+`config.yaml` schema and the `saros-proxy` subcommands — is what 1.x keeps compatible.
+
+### Added
+
+- **CommandCode keys report real quota, and their monthly metric is derived.**
+  `GET /alpha/billing/credits` (undocumented but live; it needs the CLI identity
+  headers) returns the 5-hour and weekly `used`/`cap` plus `credits.monthlyCredits`,
+  the remainder of the monthly allowance. `commandcode.usagePath()` points there and
+  the provider parses it: `fiveHour` → rolling, `weekly` → weekly, reset epochs to
+  ISO. The payload has **no** monthly cap, so it is inferred as `2 × weekly.cap`
+  (falling back to `5 × fiveHour.cap`) and accepted only when the credits agree in
+  the same unit (`remaining <= cap`, `cap − remaining >= max(weekly.used,
+  fiveHour.used)`); an inconsistent derivation yields null and keeps the previous
+  state instead of handing the key maximum weight. `saros-proxy usage` now prints
+  windows for both providers, rounds the fractional percentages and shows `n/a`
+  when the monthly value is unavailable.
+- **`fetchKeyUsage` is provider-driven.** It takes the provider and uses its
+  `usagePath()`, `extraUpstreamHeaders()` and `parseUsageResponse()`, so a provider
+  that needs identity headers can poll its own quota endpoint. The duplicated
+  opencode-go parser in `usage-client.ts` is gone.
+
+### Changed
+
+- **Rotation weighs the monthly window, and a spent window excludes the key.**
+  `KeyUsage.usedPercent` is the monthly percentage of the key's own provider budget
+  (the only unit two providers can be compared in: OpenCode Go publishes percents
+  only). The new `KeyUsage.exhausted` is true when any window — 5h, weekly or
+  monthly — reaches 100%, and such a key weighs 0 even while the month has room.
+  Zero-weight keys are skipped and their round-robin momentum cleared, keys without
+  usage take the median of the **non-exhausted** weights (full weight when no known
+  key has room), and Tier 1 never hands out an exhausted key: when every unbooked
+  candidate weighs 0 it yields to Tier 2, which can share a healthy booked key.
+- **README architecture diagram is a Mermaid flowchart** instead of box-drawing art,
+  so it renders on GitHub and in the mobile app.
+
 ### Fixed
 
-- **Anthropic Messages streams book their prompt tokens.** The stream reader
-  only recognized top-level `usage` and `response.usage`. Anthropic reports
-  the prompt count once, in `message_start.message.usage`, and
-  `message_delta.usage` carries the cumulative output count — often without
-  input tokens — so every `/v1/messages` stream booked 0 prompt tokens.
-  Per-field counts are now merged across the stream (largest cumulative value
-  wins), which also keeps the duplicated `usage` chunk that CommandCode sends
-  on chat completions booking a single request with the full counts.
-- **Merged stream totals never undercut their parts, and only Anthropic
-  `message_start` owns `message.usage`.** When a later chunk raises
-  prompt/completion without repeating `total_tokens`, the booked total uses
-  the larger of the reported total and the sum. Events of other types that
-  carry a business `message.usage` (streamed decision payloads) no longer feed
-  the token counters.
-- **opencode-go requests no longer inherit the client's `User-Agent`.** The
-  zen upstream sits behind Cloudflare, which answers known browser signatures
-  with `403 error code: 1010`; every request routed through an opencode-go key
-  died there while the client UA was forwarded verbatim. The provider now
-  sends the CLI identity (`User-Agent: cli`, verified live) on chat requests,
-  smoke tests and usage fetches.
-- **CommandCode per-key usage is queryable again, with a derived monthly
-  metric.** `GET /alpha/billing/credits` (undocumented but live; requires the
-  CLI identity headers) reports the 5-hour and weekly caps plus
-  `credits.monthlyCredits` (what remains of the monthly allowance), so
-  `commandcode.usagePath()` points there and its parser maps `used / cap` to
-  `rollingPercent` / `weeklyPercent` with ISO reset times. The payload has no
-  explicit monthly cap: it is **inferred** as `2 × weekly.cap` (falling back
-  to `5 × fiveHour.cap`), then accepted only when the credits agree with the
-  candidate cap in the same unit (`remaining <= cap` and
-  `cap − remaining >= max(weekly.used, fiveHour.used)`); an inconsistent
-  derivation yields null and keeps the previous state instead of handing the
-  key maximum weight. Monthly consumption is `cap − monthlyCredits`, clamped
-  to 0-100. `fetchKeyUsage` now takes the provider, sends its
-  `extraUpstreamHeaders()` and parses with its `parseUsageResponse()` (the
-  duplicated opencode-go parser in `usage-client.ts` is gone), which restores
-  usage-weighted rotation for CommandCode keys. The console rounds fractional
-  percentages and prints `n/a` when the monthly metric is unavailable; an
-  underivable monthly value is null, so the previous monthly percent is kept
-  instead of being reset to 0% (maximum weight).
-- **Rotation now weighs the monthly window, and a spent window excludes the
-  key.** `KeyUsage.usedPercent` is the monthly percentage of the key's own
-  provider budget, and the new `KeyUsage.exhausted` is true when any window
-  (5h, weekly or monthly) reaches 100%. `pickWeighted` gives an exhausted key
-  weight 0 even when the month still has room — without it, a key at 50% of the
-  month but 100% of the week would keep receiving traffic and failing upstream.
-  Zero-weight keys are skipped (their residual round-robin momentum is
-  cleared), so they cannot win behind an exhausted flag. Tier 1 (unbooked
-  candidates) never hands out an exhausted key: when every unbooked candidate
-  weighs 0 it yields to Tier 2, which can share a healthy booked key. Keys
-  without usage data take the median of the **non-exhausted** weights, or full
-  weight when no known key has room — the zeros of exhausted keys no longer
-  drag the neutral weight down.
+- **Anthropic Messages streams book their prompt tokens.** The stream reader only
+  recognized a top-level `usage` and `response.usage`. Anthropic reports the prompt
+  count once, in `message_start.message.usage`, and `message_delta.usage` carries
+  the cumulative output count — often without input tokens — so every
+  `/v1/messages` stream booked 0 prompt tokens. Counts are now merged per field
+  across the stream (largest cumulative value wins) and booked once at the end,
+  which also keeps the duplicated `usage` chunk CommandCode sends on chat
+  completions booking a single request.
+- **Merged totals never undercut their parts, and only `message_start` owns
+  `message.usage`.** A later chunk that raises prompt/completion without repeating
+  `total_tokens` now books the larger of the reported total and the sum; events of
+  other types that carry a business `message.usage` no longer feed the counters.
+- **opencode-go requests no longer inherit the client's `User-Agent`.** The zen
+  upstream sits behind Cloudflare, which answers browser signatures with
+  `403 error code: 1010`; forwarding the client's UA killed every request routed
+  through an opencode-go key, which looked like "half the pool fails at random".
+  The provider sends the CLI identity (`User-Agent: cli`, verified live) on chat
+  requests, smoke tests, usage fetches and the public catalog.
+- **A payload without caps no longer resets a key's usage.** A 200 with no usable
+  window or monthly value used to produce a zeroed `KeyUsage`, wiping an exhausted
+  key's state and giving it maximum weight; the parsers now return null and the
+  previous state stays.
 
 ## [0.11.0] - 2026-11-03
 
@@ -455,7 +463,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Hop-by-hop header sanitization
 - Non-root Docker user
 
-[Unreleased]: https://github.com/vitorvilaca3011/saros-proxy/compare/v0.11.0...HEAD
+[Unreleased]: https://github.com/vitorvilaca3011/saros-proxy/compare/v1.0.0...HEAD
+[1.0.0]: https://github.com/vitorvilaca3011/saros-proxy/compare/v0.11.0...v1.0.0
 [0.11.0]: https://github.com/vitorvilaca3011/saros-proxy/compare/v0.10.2...v0.11.0
 [0.10.2]: https://github.com/vitorvilaca3011/saros-proxy/compare/v0.10.1...v0.10.2
 [0.10.1]: https://github.com/vitorvilaca3011/saros-proxy/compare/v0.10.0...v0.10.1
