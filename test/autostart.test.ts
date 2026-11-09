@@ -12,6 +12,7 @@ import type * as NodeFs from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import type * as NodeOs from 'node:os';
+import { restoreEnv, snapshotEnv } from './env-isolation.js';
 
 // ---------------------------------------------------------------------------
 // Mock child_process so Registry tests never touch the real registry
@@ -103,7 +104,7 @@ function createStartupDir(): string {
 describe('autostart — VBS method', () => {
   let startupDir: string;
   let originalPlatform: PropertyDescriptor | undefined;
-  const OENV = process.env;
+  const OENV = snapshotEnv();
 
   beforeEach(() => {
     // vbs is Windows-only; the method gate must see win32 even on Linux CI.
@@ -120,7 +121,7 @@ describe('autostart — VBS method', () => {
     }
     const base = join(startupDir, '..', '..', '..', '..', '..');
     try { rmSync(base, { recursive: true, force: true }); } catch { /* ok */ }
-    process.env = { ...OENV };
+    restoreEnv(OENV);
   });
 
   it('install creates the VBS file in the startup directory', async () => {
@@ -343,7 +344,7 @@ describe('autostart — Registry method', () => {
 
 describe('autostart — combined status/uninstall (no method)', () => {
   let startupDir: string;
-  const OENV = process.env;
+  const OENV = snapshotEnv();
   let originalPlatform: PropertyDescriptor | undefined;
 
   beforeEach(() => {
@@ -358,7 +359,7 @@ describe('autostart — combined status/uninstall (no method)', () => {
   afterEach(() => {
     const base = join(startupDir, '..', '..', '..', '..', '..');
     try { rmSync(base, { recursive: true, force: true }); } catch { /* ok */ }
-    process.env = { ...OENV };
+    restoreEnv(OENV);
     if (originalPlatform) {
       Object.defineProperty(process, 'platform', originalPlatform);
     }
@@ -587,7 +588,7 @@ describe('resolveMethod', () => {
 
 describe('autostart — interactive method prompt', () => {
   let startupDir: string;
-  const OENV = process.env;
+  const OENV = snapshotEnv();
   let originalIsTTY: boolean | undefined;
   let originalPlatform: PropertyDescriptor | undefined;
 
@@ -612,7 +613,7 @@ describe('autostart — interactive method prompt', () => {
   afterEach(() => {
     const base = join(startupDir, '..', '..', '..', '..', '..');
     try { rmSync(base, { recursive: true, force: true }); } catch { /* ok */ }
-    process.env = { ...OENV };
+    restoreEnv(OENV);
     Object.defineProperty(process.stdin, 'isTTY', { value: originalIsTTY, configurable: true });
     if (originalPlatform) {
       Object.defineProperty(process, 'platform', originalPlatform);

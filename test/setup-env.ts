@@ -23,13 +23,56 @@
  * the worker's `process.env` copy — assigning HOME above is invisible to it.
  * The mock closes over a hoisted ref because the factory can run before this
  * module's body (the setup file imports from that same module).
+ *
+ * Every test also gets its environment restored (in place, see
+ * test/env-isolation.ts), and a suite that replaces the `process.env` object
+ * is re-bound to the worker's original one. Under `vmThreads` all files in one
+ * worker share the worker's `process.env`, so state a test leaves behind is
+ * visible to the next test in the file and to later files on the same worker.
+ * `vi.unstubAllEnvs` covers its own stubs only where the env object has not
+ * been replaced, and direct assignments are never covered. The snapshot,
+ * restore and re-bind below are the deterministic boundary: a test starts with
+ * the environment it inherited and nothing it wrote can reach the next one.
  */
 import { mkdtempSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import * as Os from 'node:os';
-import { afterAll, vi } from 'vitest';
+import { afterAll, afterEach, beforeEach, vi } from 'vitest';
+import { restoreEnv, snapshotEnv, type EnvSnapshot } from './env-isolation.js';
 
 const homeRef = vi.hoisted(() => ({ home: '' }));
+
+/**
+ * The `process.env` object this worker started with. Vitest builds its stub
+ * proxy around that object once per worker; after any suite assigns a new
+ * object to `process.env`, the proxy's `delete` path (used by
+ * `vi.unstubAllEnvs` for variables whose original was undefined) misses the
+ * live object and the stub survives the test. Keep the reference on `process`
+ * itself — the one object every file in the worker shares — and re-bind a
+ * replaced env before it can poison a later test.
+ */
+const SHARED_ENV_KEY = '__sarosSharedEnvObject';
+const processWithEnv = process as unknown as Record<string, unknown>;
+const sharedEnv = (processWithEnv[SHARED_ENV_KEY] as NodeJS.ProcessEnv | undefined) ??
+  (() => {
+    Object.defineProperty(process, SHARED_ENV_KEY, {
+      value: process.env,
+      configurable: true,
+      enumerable: false,
+      writable: false,
+    });
+    return process.env;
+  })();
+
+/** Point `process.env` back at the worker's object, keeping current values. */
+function adoptSharedEnvObject(): void {
+  if (process.env === sharedEnv) return;
+  const replaced = snapshotEnv();
+  process.env = sharedEnv;
+  restoreEnv(replaced);
+}
+
+adoptSharedEnvObject();
 
 vi.mock('node:os', async (importOriginal) => {
   const actual = await importOriginal<typeof Os>();
@@ -47,6 +90,45 @@ if (process.platform === 'win32') {
 // Opt-in in the operator's shell must not opt a test run in: tests never
 // consult the legacy pid path, and a stray exported flag must not change that.
 delete process.env.SAROS_ALLOW_LEGACY_PID;
+
+/**
+ * Environment the file inherited from the setup, captured in this module body:
+ * the only point that runs before the test file is evaluated. `beforeAll` is
+ * too late — module-scope assignments have already run by then, so a baseline
+ * captured there would fold those writes in and the boundary restore below
+ * would keep them instead of removing them.
+ */
+export const fileEnvBaseline = snapshotEnv();
+
+/**
+ * File-boundary restore, registered as a setup `afterAll` below. Setup hooks
+ * are registered before the file's own, and `afterAll` runs in reverse order,
+ * so this runs after the file's `afterAll` writes. Re-adopt first: a suite
+ * that replaced `process.env` at module scope or in `afterAll` would otherwise
+ * hide its values from the restore.
+ */
+export function restoreFileEnv(): void {
+  adoptSharedEnvObject();
+  restoreEnv(fileEnvBaseline);
+}
+
+/**
+ * The env each test inherits. Captured before the test file's own `beforeEach`
+ * hooks run, so stubs a suite installs per test are removed afterwards rather
+ * than becoming the next test's baseline. The restore runs after the test
+ * file's hooks (setup-file hooks are registered first, and vitest runs
+ * `afterEach` in reverse order), which makes it the final word on the env.
+ */
+let inheritedEnv: EnvSnapshot = {};
+beforeEach(() => {
+  adoptSharedEnvObject();
+  inheritedEnv = snapshotEnv();
+});
+afterEach(() => {
+  restoreEnv(inheritedEnv);
+});
+// Same reverse-order rule for afterAll: runs after the file's afterAll writes.
+afterAll(restoreFileEnv);
 
 // The account's real home, read from the passwd record (`userInfo` ignores
 // $HOME, so no env var and no `node:os` mock above can change it). Published

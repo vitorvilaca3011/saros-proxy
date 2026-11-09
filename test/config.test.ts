@@ -10,6 +10,7 @@ import * as os from 'node:os';
 import type * as NodeFs from 'node:fs';
 import type * as NodeOs from 'node:os';
 import { loadConfig, validateConfig, getDefaultConfigPath, type ProxyConfig } from '../src/config.js';
+import { restoreEnv } from './env-isolation.js';
 import { encryptKey } from '../src/key-encryption.js';
 
 // ---------------------------------------------------------------------------
@@ -561,7 +562,7 @@ describe('loadConfig', () => {
 
   afterEach(() => {
     process.argv = [...originalArgv];
-    process.env = { ...originalEnv };
+    restoreEnv(originalEnv);
   });
 
   // --- Priority: CLI > YAML > env > defaults ---
@@ -913,7 +914,7 @@ describe('loadConfig — encryption', () => {
 
   afterEach(() => {
     rmSync(tempDir, { recursive: true, force: true });
-    process.env = { ...originalEnv };
+    restoreEnv(originalEnv);
     process.argv = ['node', 'script.js'];
   });
 
@@ -972,7 +973,7 @@ describe('getDefaultConfigPath', () => {
   const originalEnv = { ...process.env };
 
   afterEach(() => {
-    process.env = { ...originalEnv };
+    restoreEnv(originalEnv);
   });
 
   it('returns path ending with saros/config.yaml', () => {
