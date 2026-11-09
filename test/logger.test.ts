@@ -1,5 +1,5 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { maskKey } from '../src/logger.js';
+import { isJsonLogMode, maskKey } from '../src/logger.js';
 import { restoreEnv, snapshotEnv } from './env-isolation.js';
 
 // ---------------------------------------------------------------------------
@@ -90,12 +90,53 @@ describe('maskKey', () => {
   });
 });
 
+describe('isJsonLogMode', () => {
+  const ENTRYPOINT = '/usr/lib/node_modules/saros-proxy/dist/index.js';
+  const argvFor = (subcommand: string): string[] => ['/usr/bin/node', ENTRYPOINT, subcommand];
+
+  it('selects JSON for serve under NODE_ENV=production', () => {
+    expect(isJsonLogMode({ NODE_ENV: 'production' }, argvFor('serve'))).toBe(true);
+  });
+
+  it('stays human for status under NODE_ENV=production', () => {
+    expect(isJsonLogMode({ NODE_ENV: 'production' }, argvFor('status'))).toBe(false);
+  });
+
+  it('stays human for start under NODE_ENV=production', () => {
+    expect(isJsonLogMode({ NODE_ENV: 'production' }, argvFor('start'))).toBe(false);
+  });
+
+  it('stays human when production mode carries no subcommand', () => {
+    expect(isJsonLogMode({ NODE_ENV: 'production' }, ['/usr/bin/node', ENTRYPOINT])).toBe(false);
+  });
+
+  it('reads the subcommand from argv[2] for a tsx-style entrypoint', () => {
+    expect(
+      isJsonLogMode({ NODE_ENV: 'production' }, ['/usr/bin/node', '/repo/src/index.ts', 'serve']),
+    ).toBe(true);
+  });
+
+  it('keeps SAROS_DAEMON=1 for any command', () => {
+    expect(isJsonLogMode({ SAROS_DAEMON: '1' }, argvFor('status'))).toBe(true);
+  });
+
+  it('keeps SAROS_LOG_JSON=1 for any command', () => {
+    expect(isJsonLogMode({ SAROS_LOG_JSON: '1' }, argvFor('status'))).toBe(true);
+  });
+
+  it('does not treat a non-production NODE_ENV as JSON for serve', () => {
+    expect(isJsonLogMode({ NODE_ENV: 'development' }, argvFor('serve'))).toBe(false);
+  });
+});
+
 describe('logger creation', () => {
   const OENV = snapshotEnv();
+  const originalArgv = process.argv;
 
   beforeEach(() => {
     vi.resetModules();
     restoreEnv(OENV);
+    process.argv = originalArgv;
     // Default: no logging mode override → human CLI destination
     clearLogEnv();
     vi.restoreAllMocks();
@@ -103,6 +144,7 @@ describe('logger creation', () => {
 
   afterEach(() => {
     restoreEnv(OENV);
+    process.argv = originalArgv;
     vi.restoreAllMocks();
   });
 
@@ -133,13 +175,36 @@ describe('logger creation', () => {
 
   it.each([
     ['SAROS_DAEMON=1', { SAROS_DAEMON: '1' }],
-    ['NODE_ENV=production', { NODE_ENV: 'production' }],
     ['SAROS_LOG_JSON=1', { SAROS_LOG_JSON: '1' }],
   ])('keeps NDJSON mode (no destination stream) for %s', async (_name, env) => {
     Object.assign(process.env, env);
     await importLogger();
     const { destination } = await latestPinoCall();
     expect(destination).toBeUndefined();
+  });
+
+  it('keeps NDJSON for a serve run under NODE_ENV=production', async () => {
+    process.env.NODE_ENV = 'production';
+    process.argv = [
+      '/usr/bin/node',
+      '/usr/lib/node_modules/saros-proxy/dist/index.js',
+      'serve',
+    ];
+    await importLogger();
+    const { destination } = await latestPinoCall();
+    expect(destination).toBeUndefined();
+  });
+
+  it('installs the human destination for a status run under NODE_ENV=production', async () => {
+    process.env.NODE_ENV = 'production';
+    process.argv = [
+      '/usr/bin/node',
+      '/usr/lib/node_modules/saros-proxy/dist/index.js',
+      'status',
+    ];
+    await importLogger();
+    const { destination } = await latestPinoCall();
+    expect(destination).toBeDefined();
   });
 
   it('installs an in-process destination by default (human CLI mode)', async () => {

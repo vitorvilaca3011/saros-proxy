@@ -98,6 +98,73 @@ describe('formatLogRecord', () => {
     expect(line.text).toBe(`${chalk.gray('·')} no level`);
   });
 
+  it('strips terminal control characters and keeps multi-line indentation', () => {
+    const line = formatLogRecord({
+      level: 40,
+      msg: 'Security: bad\nsecond \u001b]0;pwned\u0007\nthird\tkept',
+    });
+    expect(line.text).toBe(
+      `${chalk.yellow('⚠')} Security: bad\n  second ]0;pwned\n  third\tkept`,
+    );
+    // chalk's own SGR sequences are ESC; the record's ESC/BEL must not survive.
+    const plain = line.text.replace(/\u001b\[[0-9;]*m/g, '');
+    expect(plain).toBe('⚠ Security: bad\n  second ]0;pwned\n  third\tkept');
+    expect(plain).not.toContain('\u001b');
+    expect(plain).not.toContain('\u0007');
+  });
+
+  it('renders the public-field tail in order for an access log record', () => {
+    const line = formatLogRecord({
+      level: 30,
+      msg: 'request complete',
+      requestId: 'req-1',
+      keyLabel: 'key-a',
+      provider: 'opencode-go',
+      status: 200,
+      durationMs: 120,
+      evt: 'request.complete',
+      model: 'ox-alpha',
+    });
+    expect(line.text).toBe(
+      `${chalk.gray('·')} request complete ${chalk.gray(
+        '200 · key-a · opencode-go · 120ms · req-1',
+      )}`,
+    );
+    expect(line.text).not.toContain('request.complete');
+    expect(line.text).not.toContain('ox-alpha');
+  });
+
+  it('omits absent fields from the tail', () => {
+    const line = formatLogRecord({
+      level: 40,
+      msg: 'Key left rotation',
+      status: 429,
+      keyLabel: 'key-b',
+      provider: 'commandcode',
+    });
+    expect(line.text).toBe(
+      `${chalk.yellow('⚠')} Key left rotation ${chalk.gray('429 · key-b · commandcode')}`,
+    );
+  });
+
+  it('keeps the line unchanged when the record has none of the tail fields', () => {
+    const line = formatLogRecord({ level: 30, msg: 'Loaded config', evt: 'boot', model: 'x' });
+    expect(line.text).toBe(`${chalk.gray('·')} Loaded config`);
+  });
+
+  it('ignores empty strings and mistyped values in the tail', () => {
+    const line = formatLogRecord({
+      level: 30,
+      msg: 'x',
+      status: '200',
+      keyLabel: '',
+      provider: '',
+      durationMs: '9',
+      requestId: '',
+    });
+    expect(line.text).toBe(`${chalk.gray('·')} x`);
+  });
+
   it('never prints the raw record', () => {
     const line = formatLogRecord({
       level: 30,

@@ -2,8 +2,9 @@
  * logger.ts — Structured logging with Pino and automatic API key masking.
  *
  * Two destinations:
- *  - JSON (daemon child, systemd journal, `SAROS_LOG_JSON=1`): pino's default
- *    NDJSON stream. Lines are parsed by tools and by `daemon.log` readers.
+ *  - JSON (daemon child, systemd journal, `SAROS_LOG_JSON=1`, `serve` under
+ *    NODE_ENV=production): pino's default NDJSON stream. Lines are parsed by
+ *    tools and by `daemon.log` readers.
  *  - Human (every other CLI process, including a foreground `serve`): one
  *    rendered line per record, written synchronously in-process so CLI output
  *    and log lines keep their order.
@@ -56,11 +57,18 @@ export function maskKey(key: string): string {
 }
 
 /**
- * The daemon child and the systemd unit are configured for JSON; the escape
- * hatch forces it for a CLI run whose output is being parsed (scripts, CI).
+ * JSON is selected by the daemon child (`SAROS_DAEMON=1`), by the explicit
+ * escape hatch (`SAROS_LOG_JSON=1`), or by `serve` under NODE_ENV=production
+ * (the systemd unit and the Docker service). Any other CLI command stays human
+ * even when NODE_ENV=production is inherited, e.g. `docker compose exec …
+ * saros-proxy status`.
  */
-export function isJsonLogMode(env: NodeJS.ProcessEnv = process.env): boolean {
-  return env.SAROS_LOG_JSON === '1' || env.SAROS_DAEMON === '1' || env.NODE_ENV === 'production';
+export function isJsonLogMode(
+  env: NodeJS.ProcessEnv = process.env,
+  argv: readonly string[] = process.argv,
+): boolean {
+  if (env.SAROS_LOG_JSON === '1' || env.SAROS_DAEMON === '1') return true;
+  return argv[2] === 'serve' && env.NODE_ENV === 'production';
 }
 
 function parseRecord(line: string): Record<string, unknown> | null {

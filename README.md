@@ -821,7 +821,10 @@ Returns JSON with key counts, active requests, and circuit-breaker state.
 
 CLI commands (`status`, `start`, `usage`, …) and a foreground `serve` render
 each log record as one human line: `·` info on stdout, `⚠` warning and `✗`
-error on stderr. Nothing else from the logger reaches the terminal:
+error on stderr. The line is the message plus, when the record carries them, a
+gray tail with the public request fields
+`status · keyLabel · provider · durationMs · requestId`. Nothing else from the
+logger reaches the terminal:
 
 ```bash
 saros-proxy status
@@ -835,8 +838,10 @@ SAROS_LOG_JSON=1 saros-proxy status
 ```
 
 The daemon child, `daemon.log` and the systemd journal are always NDJSON
-(`SAROS_DAEMON=1` and `NODE_ENV=production` select that mode); those lines are
-never rendered for a terminal.
+(`SAROS_DAEMON=1`, or `NODE_ENV=production` on `serve` — which is what the
+systemd unit and the Docker service use); those lines are never rendered for a
+terminal. Other commands stay human even when `NODE_ENV=production` is
+inherited.
 
 ### See which key and provider served a request
 

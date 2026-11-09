@@ -11,9 +11,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - **CLI log lines are rendered for a human.** Every CLI process (`status`, `start`, `usage`,
   a foreground `serve`, …) prints one line per record — `·` info on stdout, `⚠`/`✗` on
-  stderr — instead of pino NDJSON; `SAROS_LOG_JSON=1` forces the raw NDJSON back.
-  `daemon.log` and the systemd journal keep NDJSON, and `pino-pretty` is gone. `start` now
-  loads config once, so the plaintext/legacy-encryption warnings no longer print twice.
+  stderr — instead of pino NDJSON. The line carries the message plus a gray tail with only
+  the public request fields (`status`, `keyLabel`, `provider`, `durationMs`, `requestId`),
+  and control characters (ESC/OSC/BEL) are stripped. `SAROS_LOG_JSON=1` forces the raw
+  NDJSON back. `NODE_ENV=production` now selects JSON only for `serve` (the systemd unit and
+  the Docker service), so `docker compose exec proxy saros-proxy status` stays human;
+  `daemon.log` and the journal keep NDJSON, and `pino-pretty` is gone. `start` now loads
+  config once, so the plaintext/legacy-encryption warnings no longer print twice.
 
 ## [1.1.0] - 2026-11-06
 
