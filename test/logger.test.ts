@@ -1,22 +1,51 @@
-import { describe, it, expect, vi, beforeEach } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { maskKey } from '../src/logger.js';
 
 // ---------------------------------------------------------------------------
-// Mock pino so the tryTransport fallback path can be exercised: pino.transport
-// throws when the target package is missing, and createLogger() falls back to
-// JSON-only logging. The pino() factory honors the level option so existing
-// LOG_LEVEL/NODE_ENV assertions keep working.
+// Mock pino so the mode decision is observable: createLogger() either passes a
+// destination stream (human CLI mode) or leaves pino on its NDJSON stdout
+// destination (daemon / production / SAROS_LOG_JSON=1). Logging is mocked, so
+// these tests assert the options pino actually received, then drive the
+// destination with a real NDJSON line.
 // ---------------------------------------------------------------------------
 
 vi.mock('pino', () => {
-  const transport = vi.fn(() => {
-    throw new Error('pino-pretty not installed');
-  });
-  const pino = vi.fn((opts?: { level?: string }) => ({
-    level: opts?.level ?? 'info',
-  }));
-  return { default: Object.assign(pino, { transport }) };
+  const pino = vi.fn(
+    (opts?: { level?: string }, stream?: { write: (line: string) => void }) => ({
+      level: opts?.level ?? 'info',
+      stream,
+    }),
+  );
+  return { default: pino };
 });
+
+interface PinoCall {
+  opts: { level?: string; redact?: { paths: string[]; censor: string } };
+  destination?: { write: (line: string) => void };
+}
+
+/** Latest pino factory call — options plus the optional destination stream. */
+async function latestPinoCall(): Promise<PinoCall> {
+  const pinoMock = (await import('pino')).default as unknown as {
+    mock: { calls: Array<[PinoCall['opts'], PinoCall['destination']?]> };
+  };
+  const [opts, destination] = pinoMock.mock.calls.at(-1)!;
+  return { opts, destination };
+}
+
+// Dynamic import is the seam: createLogger() reads the environment at module
+// evaluation time, so each case needs a fresh module graph (vi.resetModules).
+async function importLogger() {
+  vi.resetModules();
+  return import('../src/logger.js');
+}
+
+function clearLogEnv(): void {
+  delete process.env.NODE_ENV;
+  delete process.env.SAROS_DAEMON;
+  delete process.env.SAROS_LOG_JSON;
+  delete process.env.LOG_LEVEL;
+}
 
 describe('maskKey', () => {
   it('returns **** for empty string', () => {
@@ -61,73 +90,96 @@ describe('maskKey', () => {
 });
 
 describe('logger creation', () => {
-  const OENV = process.env;
+  const originalEnv = { ...process.env };
 
   beforeEach(() => {
-    vi.resetModules();
-    process.env = { ...OENV };
-    // Default: not production → pino-pretty should be attempted
-    delete process.env.NODE_ENV;
+    process.env = { ...originalEnv };
+    clearLogEnv();
+    vi.restoreAllMocks();
   });
 
-  it('creates a logger with JSON transport in production', async () => {
-    process.env.NODE_ENV = 'production';
-    const { logger } = await import('../src/logger.js');
-    expect(logger).toBeDefined();
-    expect(logger.level).toBe('info');
+  afterEach(() => {
+    process.env = { ...originalEnv };
+    vi.restoreAllMocks();
   });
 
   it('respects LOG_LEVEL env var', async () => {
     process.env.LOG_LEVEL = 'debug';
-    const { logger } = await import('../src/logger.js');
+    const { logger } = await importLogger();
     expect(logger.level).toBe('debug');
+    expect((await latestPinoCall()).opts.level).toBe('debug');
   });
 
   it('redacts credentials at the logger, not only at the call sites', async () => {
     process.env.NODE_ENV = 'production';
-    // LOG_REDACT_PATHS is the contract; assert the options pino actually got.
-    const { LOG_REDACT_PATHS } = await import('../src/logger.js');
+    const { LOG_REDACT_PATHS } = await importLogger();
     expect(LOG_REDACT_PATHS).toEqual(
       expect.arrayContaining(['authorization', 'cookie', 'x-api-key', 'apiKey']),
     );
 
-    const pinoMock = (await import('pino')).default as unknown as {
-      mock: { calls: Array<[{ redact?: { paths: string[]; censor: string } }]> };
-    };
-    const options = pinoMock.mock.calls.at(-1)?.[0];
-    expect(options?.redact?.censor).toBe('[redacted]');
-    expect(options?.redact?.paths).toEqual([...LOG_REDACT_PATHS]);
-  });
-
-  it('falls back to JSON logging when pino-pretty is unavailable', async () => {
-    // Simulate NODE_ENV=development (tries pretty transport)
-    // but pino-pretty IS available here (dev incl. devDeps) — so we can only
-    // verify the path doesn't throw; the real fallback is at runtime on global install.
-    process.env.NODE_ENV = 'development';
-    const { logger } = await import('../src/logger.js');
-    expect(logger).toBeDefined();
-    expect(logger.level).toBe('info');
-  });
-
-  it('returns undefined transport when pino.transport throws (fallback to JSON)', async () => {
-    process.env.NODE_ENV = 'development';
-    const { logger } = await import('../src/logger.js');
-    expect(logger).toBeDefined();
-    expect(logger.level).toBe('info');
-
-    // pino.transport was attempted and threw → tryTransport returned undefined
-    const pinoMock = (await import('pino')).default as unknown as {
-      transport: ReturnType<typeof vi.fn>;
-    };
-    expect(pinoMock.transport).toHaveBeenCalledWith({
-      target: 'pino-pretty',
-      options: { colorize: true },
-    });
+    const { opts } = await latestPinoCall();
+    expect(opts.redact?.censor).toBe('[redacted]');
+    expect(opts.redact?.paths).toEqual([...LOG_REDACT_PATHS]);
   });
 
   it('uses default log level when LOG_LEVEL not set', async () => {
     process.env.NODE_ENV = 'production';
-    const { logger } = await import('../src/logger.js');
+    const { logger } = await importLogger();
     expect(logger.level).toBe('info');
+  });
+
+  it.each([
+    ['SAROS_DAEMON=1', { SAROS_DAEMON: '1' }],
+    ['NODE_ENV=production', { NODE_ENV: 'production' }],
+    ['SAROS_LOG_JSON=1', { SAROS_LOG_JSON: '1' }],
+  ])('keeps NDJSON mode (no destination stream) for %s', async (_name, env) => {
+    Object.assign(process.env, env);
+    await importLogger();
+    const { destination } = await latestPinoCall();
+    expect(destination).toBeUndefined();
+  });
+
+  it('installs an in-process destination by default (human CLI mode)', async () => {
+    await importLogger();
+    const { destination } = await latestPinoCall();
+    expect(destination).toBeDefined();
+    expect(typeof destination!.write).toBe('function');
+  });
+
+  it('renders info records to stdout through the destination', async () => {
+    await importLogger();
+    const { destination } = await latestPinoCall();
+    const outSpy = vi.spyOn(process.stdout, 'write').mockImplementation(() => true);
+    const errSpy = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+
+    destination!.write('{"level":30,"msg":"Loaded config from /tmp/c.yaml"}\n');
+
+    expect(outSpy).toHaveBeenCalledWith(
+      expect.stringContaining('Loaded config from /tmp/c.yaml'),
+    );
+    expect(errSpy).not.toHaveBeenCalled();
+  });
+
+  it('sends warn records to stderr through the destination', async () => {
+    await importLogger();
+    const { destination } = await latestPinoCall();
+    const outSpy = vi.spyOn(process.stdout, 'write').mockImplementation(() => true);
+    const errSpy = vi.spyOn(process.stderr, 'write').mockImplementation(() => true);
+
+    destination!.write('{"level":40,"msg":"plaintext keys"}\n');
+
+    expect(errSpy).toHaveBeenCalledWith(expect.stringContaining('⚠'));
+    expect(errSpy).toHaveBeenCalledWith(expect.stringContaining('plaintext keys'));
+    expect(outSpy).not.toHaveBeenCalled();
+  });
+
+  it('passes a line that is not NDJSON through untouched', async () => {
+    await importLogger();
+    const { destination } = await latestPinoCall();
+    const outSpy = vi.spyOn(process.stdout, 'write').mockImplementation(() => true);
+
+    destination!.write('not json at all\n');
+
+    expect(outSpy).toHaveBeenCalledWith('not json at all\n');
   });
 });
