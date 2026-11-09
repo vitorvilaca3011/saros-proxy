@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { maskKey } from '../src/logger.js';
+import { restoreEnv, snapshotEnv } from './env-isolation.js';
 
 // ---------------------------------------------------------------------------
 // Mock pino so the mode decision is observable: createLogger() either passes a
@@ -90,16 +91,18 @@ describe('maskKey', () => {
 });
 
 describe('logger creation', () => {
-  const originalEnv = { ...process.env };
+  const OENV = snapshotEnv();
 
   beforeEach(() => {
-    process.env = { ...originalEnv };
+    vi.resetModules();
+    restoreEnv(OENV);
+    // Default: no logging mode override → human CLI destination
     clearLogEnv();
     vi.restoreAllMocks();
   });
 
   afterEach(() => {
-    process.env = { ...originalEnv };
+    restoreEnv(OENV);
     vi.restoreAllMocks();
   });
 
