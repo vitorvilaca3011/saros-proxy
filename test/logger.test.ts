@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest';
 import { maskKey } from '../src/logger.js';
+import { restoreEnv, snapshotEnv } from './env-isolation.js';
 
 // ---------------------------------------------------------------------------
 // Mock pino so the tryTransport fallback path can be exercised: pino.transport
@@ -61,11 +62,11 @@ describe('maskKey', () => {
 });
 
 describe('logger creation', () => {
-  const OENV = process.env;
+  const OENV = snapshotEnv();
 
   beforeEach(() => {
     vi.resetModules();
-    process.env = { ...OENV };
+    restoreEnv(OENV);
     // Default: not production → pino-pretty should be attempted
     delete process.env.NODE_ENV;
   });

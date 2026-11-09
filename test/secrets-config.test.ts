@@ -22,6 +22,7 @@ vi.mock('../src/logger.js', async (importOriginal) => {
 
 import { loadConfig, resolveConfigPath } from '../src/config.js';
 import { encryptKey } from '../src/key-encryption.js';
+import { restoreEnv } from './env-isolation.js';
 import type * as LoggerModule from '../src/logger.js';
 import { encryptValue } from '../src/secrets/envelope.js';
 import {
@@ -68,7 +69,7 @@ describe('loadConfig — enc:v1 envelopes', () => {
     yamlPath = join(tempDir, 'config.yaml');
     emptyPath = join(tempDir, 'empty-path');
     mkdirSync(emptyPath);
-    process.env = { ...originalEnv };
+    restoreEnv(originalEnv);
     delete process.env.SAROS_PASSPHRASE;
     delete process.env.OPENCODE_GO_ENCRYPTION_KEY;
     delete process.env.OPENCODE_GO_KEYS;
@@ -83,7 +84,7 @@ describe('loadConfig — enc:v1 envelopes', () => {
   });
 
   afterEach(() => {
-    process.env = { ...originalEnv };
+    restoreEnv(originalEnv);
     process.argv = ['node', 'saros-proxy'];
     rmSync(tempDir, { recursive: true, force: true });
   });
@@ -284,14 +285,14 @@ describe('prepareBootPassphrase', () => {
     yamlPath = join(tempDir, 'config.yaml');
     emptyPath = join(tempDir, 'empty-path');
     mkdirSync(emptyPath);
-    process.env = { ...originalEnv };
+    restoreEnv(originalEnv);
     delete process.env.SAROS_PASSPHRASE;
     delete process.env.SAROS_DAEMON;
     process.env.PATH = emptyPath;
   });
 
   afterEach(() => {
-    process.env = { ...originalEnv };
+    restoreEnv(originalEnv);
     rmSync(tempDir, { recursive: true, force: true });
   });
 
