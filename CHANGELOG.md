@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.1.1] - 2026-11-09
+
 ### Changed
 
 - **CLI log lines are rendered for a human.** Every CLI process (`status`, `start`, `usage`,
@@ -579,7 +581,8 @@ First stable release. The public surface — the `/v1/*` and `/zen/go/v1/*` rout
 - Hop-by-hop header sanitization
 - Non-root Docker user
 
-[Unreleased]: https://github.com/vitorvilaca3011/saros-proxy/compare/v1.1.0...HEAD
+[Unreleased]: https://github.com/vitorvilaca3011/saros-proxy/compare/v1.1.1...HEAD
+[1.1.1]: https://github.com/vitorvilaca3011/saros-proxy/compare/v1.1.0...v1.1.1
 [1.1.0]: https://github.com/vitorvilaca3011/saros-proxy/compare/v1.0.0...v1.1.0
 [1.0.0]: https://github.com/vitorvilaca3011/saros-proxy/compare/v0.11.0...v1.0.0
 [0.11.0]: https://github.com/vitorvilaca3011/saros-proxy/compare/v0.10.2...v0.11.0
