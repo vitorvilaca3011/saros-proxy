@@ -16,6 +16,8 @@ import { fileURLToPath } from 'node:url';
 import { tmpdir } from 'node:os';
 import { createServer } from 'node:http';
 import type * as Daemon from '../src/cli/daemon.js';
+import type * as ConfigModule from '../src/config.js';
+import type * as HarnessSyncModule from '../src/cli/harness-sync.js';
 
 // ---------------------------------------------------------------------------
 // Module-level mocks
@@ -49,6 +51,21 @@ const mockLoggerWarn = vi.hoisted(() => vi.fn());
 vi.mock('../src/logger.js', () => ({
   logger: { debug: vi.fn(), info: vi.fn(), warn: mockLoggerWarn, error: vi.fn() },
 }));
+
+// loadConfig is wrapped (not replaced) so the number of loads per `start` is
+// observable: the double load (#cli-log-render) duplicated the CLI warnings.
+const mockLoadConfig = vi.hoisted(() => vi.fn());
+vi.mock('../src/config.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof ConfigModule>();
+  return { ...actual, loadConfig: mockLoadConfig };
+});
+
+// The models sync would otherwise reach the network from the startup timer.
+const mockSyncModels = vi.hoisted(() => vi.fn());
+vi.mock('../src/cli/harness-sync.js', async (importOriginal) => {
+  const actual = await importOriginal<typeof HarnessSyncModule>();
+  return { ...actual, syncModelsInAllHarnesses: mockSyncModels };
+});
 
 // Force the bundled catalog read to fail when a test sets a fault mode. The
 // daemon imports readFileSync directly, so an ESM spy cannot intercept it.
@@ -199,6 +216,18 @@ function openFdsTo(target: string): number[] {
     }
   });
 }
+
+// vi.restoreAllMocks() (each describe's afterEach) can wipe a vi.fn
+// implementation, so every test re-attaches the delegating implementation
+// before daemon.js is imported. The real loadConfig still runs — only the
+// number of loads is observed.
+beforeEach(async () => {
+  const actual = await vi.importActual<typeof ConfigModule>('../src/config.js');
+  mockLoadConfig.mockReset();
+  mockLoadConfig.mockImplementation(actual.loadConfig);
+  mockSyncModels.mockReset();
+  mockSyncModels.mockResolvedValue([]);
+});
 
 // ---------------------------------------------------------------------------
 // probeProxyHealth
@@ -1367,6 +1396,35 @@ describe('daemonStart', () => {
     await expect(daemon.daemonStart()).rejects.toThrow('process.exit(1)');
     expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining('already in use'));
     expect(mockSpawn).not.toHaveBeenCalled();
+  });
+
+  it('loads config once and reuses that object for the harness sync', async () => {
+    stubHealthDown();
+    mockSpawn.mockClear();
+    mockLoadConfig.mockClear();
+    mockSyncModels.mockClear();
+    mockProcessExitRecord();
+    const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+    vi.spyOn(process, 'kill').mockImplementation(() => true);
+    vi.useFakeTimers();
+
+    mkdirSync(sarosDir, { recursive: true });
+    writeFileSync(
+      join(sarosDir, 'config.yaml'),
+      'port: 3099\nkeys:\n  - label: test\n    key: sk-boot-test-key-that-is-long-enough-0001\n',
+      'utf-8',
+    );
+
+    await daemon.daemonStart();
+    await vi.advanceTimersByTimeAsync(2000);
+
+    // One load: the port decision and the sync share the same snapshot, so the
+    // config warnings (plaintext, legacy encryption) cannot be printed twice.
+    expect(mockLoadConfig).toHaveBeenCalledTimes(1);
+    expect(mockLoadConfig).toHaveBeenCalledWith(undefined);
+    expect(logSpy).toHaveBeenCalledWith(expect.stringContaining('on port 3099'));
+    expect(mockSyncModels).toHaveBeenCalledTimes(1);
+    expect(mockSyncModels.mock.calls[0][0]).toMatchObject({ port: 3099 });
   });
 
   it('reports the real failure when the child dies during startup', async () => {

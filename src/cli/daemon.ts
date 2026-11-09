@@ -40,7 +40,7 @@ import { mergeMissingModels, parseCatalogObject, serializeCatalogObject } from '
 import { formatKeyBlock } from './key-state.js';
 import { logger } from '../logger.js';
 import { checkForUpdate } from './update-check.js';
-import { loadConfig, getSarosDir } from '../config.js';
+import { loadConfig, getSarosDir, type ProxyConfig } from '../config.js';
 import { DAEMON_SYNC_TIMEOUT_MS } from '../constants.js';
 import { syncModelsInAllHarnesses, readHarnessSettings } from './harness-sync.js';
 
@@ -588,6 +588,21 @@ function getConfigPort(configPath?: string): number {
   }
 }
 
+/**
+ * Load config once for `start` and keep the object: the port decision and the
+ * harness model sync must see the same snapshot, and a CLI run must not print
+ * the load warnings (plaintext keys, legacy encryption) twice. A config that
+ * cannot load keeps the historical behavior — default port, start proceeds.
+ */
+function loadStartupConfig(configPath?: string): { port: number; config: ProxyConfig | null } {
+  try {
+    const config = loadConfig(configPath);
+    return { port: config.port, config };
+  } catch {
+    return { port: 3000, config: null };
+  }
+}
+
 /** Print the harness selection (which harnesses saros-proxy syncs into). */
 function printHarnesses(): void {
   const enabled = readHarnessSettings();
@@ -656,7 +671,8 @@ export async function daemonStart(port?: number, configPath?: string): Promise<v
   if (!assertStateDir(PID_FILE, 'write')) process.exit(1);
   ensurePidDir();
 
-  const effectivePort = port ?? getConfigPort(configPath);
+  const startup = loadStartupConfig(configPath);
+  const effectivePort = port ?? startup.port;
 
   // Refuse to start when the port is already serving: a second instance
   // would die with EADDRINUSE, which the old code misreported as
@@ -736,11 +752,12 @@ export async function daemonStart(port?: number, configPath?: string): Promise<v
       // Sync models to all enabled harnesses — await with timeout before exit
       ensureModelsJson();
       try {
-        const cfg = loadConfig();
-        await Promise.race([
-          syncModelsInAllHarnesses(cfg),
-          new Promise((resolve) => setTimeout(resolve, DAEMON_SYNC_TIMEOUT_MS)),
-        ]);
+        if (startup.config) {
+          await Promise.race([
+            syncModelsInAllHarnesses(startup.config),
+            new Promise((resolve) => setTimeout(resolve, DAEMON_SYNC_TIMEOUT_MS)),
+          ]);
+        }
       } catch {
         /* silent — daemon exits regardless */
       }
