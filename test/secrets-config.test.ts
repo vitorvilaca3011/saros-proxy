@@ -236,11 +236,30 @@ describe('loadConfig — enc:v1 envelopes', () => {
     process.env.OPENCODE_GO_ENCRYPTION_KEY = master;
     const config = loadConfig(yamlPath);
     expect(config.keys[0]).toMatchObject({ key: KEY, encrypted: true });
-    expect(loggerMock.warn).toHaveBeenCalledWith(
-      { evt: 'security.legacy-encryption' },
-      expect.stringContaining('legacy enc:scrypt'),
-      'legacy',
-    );
+    expect(loggerMock.warn).toHaveBeenCalledTimes(1);
+    const [fields, message] = loggerMock.warn.mock.calls[0];
+    expect(fields).toEqual({ evt: 'security.legacy-encryption' });
+    expect(message).toContain('1 key uses legacy enc:scrypt');
+    expect(message).toContain('legacy');
+    expect(message).toContain('saros-proxy keys encrypt');
+  });
+
+  it('emits one legacy warning for two keys, listing both labels', () => {
+    const master = 'legacy-master-key-fixture-at-least-16';
+    writeConfig([
+      { label: 'legacy-a', key: encryptKey(KEY, master) },
+      { label: 'legacy-b', key: encryptKey('sk-boot-test-key-that-is-long-enough-0002', master) },
+    ]);
+    process.env.OPENCODE_GO_ENCRYPTION_KEY = master;
+    const config = loadConfig(yamlPath);
+
+    expect(config.keys).toHaveLength(2);
+    expect(loggerMock.warn).toHaveBeenCalledTimes(1);
+    const [fields, message] = loggerMock.warn.mock.calls[0];
+    expect(fields).toEqual({ evt: 'security.legacy-encryption' });
+    expect(message).toContain('2 keys use legacy enc:scrypt');
+    expect(message).toContain('legacy-a, legacy-b');
+    expect(message).toContain('saros-proxy keys encrypt');
   });
 
   it('still refuses legacy keys without the legacy env var', () => {

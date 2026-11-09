@@ -404,13 +404,34 @@ function withoutEncryptedFlag(entry: KeyEntry): KeyEntry {
 function resolveEncryptedKeys(config: ProxyConfig, explicitPassphrase: string | undefined): void {
   const hasEnvelopes = config.keys.some((key) => isEnvelope(key.key));
   const passphrase = hasEnvelopes ? resolveEnvelopePassphrase(explicitPassphrase) : '';
+  const legacyLabels: string[] = [];
   config.keys = config.keys.map((entry) => {
     if (isEnvelope(entry.key)) return decryptEnvelopeEntry(entry, passphrase);
     if (typeof entry.key === 'string' && isEncryptedKey(entry.key)) {
-      return { ...entry, key: decryptLegacyEntry(entry), encrypted: true };
+      const key = decryptLegacyEntry(entry);
+      legacyLabels.push(entry.label);
+      return { ...entry, key, encrypted: true };
     }
     return withoutEncryptedFlag(entry);
   });
+  if (legacyLabels.length > 0) warnLegacyEncryption(legacyLabels);
+}
+
+/**
+ * One record per config load, not one per key: on a fresh CLI invocation the
+ * actionable line must not be buried between N copies of itself.
+ */
+function warnLegacyEncryption(labels: string[]): void {
+  const count = labels.length;
+  const plural = count === 1 ? '' : 's';
+  logger.warn(
+    { evt: 'security.legacy-encryption' },
+    [
+      `Security: ${count} key${plural} ${count === 1 ? 'uses' : 'use'} legacy enc:scrypt with OPENCODE_GO_ENCRYPTION_KEY.`,
+      labels.join(', '),
+      `Replace ${count === 1 ? 'it' : 'them'} with plaintext and run \`saros-proxy keys encrypt\` to migrate to the enc:v1 envelope.`,
+    ].join('\n'),
+  );
 }
 
 /**
@@ -447,13 +468,7 @@ function decryptLegacyEntry(entry: KeyEntry): string {
     );
   }
   try {
-    const plaintext = decryptKey(entry.key, legacyKey);
-    logger.warn(
-      { evt: 'security.legacy-encryption' },
-      'Key "%s" uses legacy enc:scrypt encryption with OPENCODE_GO_ENCRYPTION_KEY — replace it with plaintext and run `saros-proxy keys encrypt` to migrate',
-      entry.label,
-    );
-    return plaintext;
+    return decryptKey(entry.key, legacyKey);
   } catch {
     throw new Error(`Failed to decrypt API key "${entry.label}" — check OPENCODE_GO_ENCRYPTION_KEY`);
   }
