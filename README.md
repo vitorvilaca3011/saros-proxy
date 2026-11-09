@@ -551,7 +551,6 @@ export CIRCUIT_BREAKER_THRESHOLD=5
 export CIRCUIT_BREAKER_COOLDOWN_MS=120000
 export REQUEST_TIMEOUT_MS=45000
 export LOG_LEVEL=debug
-export NODE_ENV=development
 
 npx tsx src/index.ts
 ```
@@ -820,13 +819,29 @@ Returns JSON with key counts, active requests, and circuit-breaker state.
 
 ### View logs
 
-```bash
-# Dev mode (pretty-printed, colorized)
-NODE_ENV=development npx tsx src/index.ts
+CLI commands (`status`, `start`, `usage`, …) and a foreground `serve` render
+each log record as one human line: `·` info on stdout, `⚠` warning and `✗`
+error on stderr. The line is the message plus, when the record carries them, a
+gray tail with the public request fields
+`status · keyLabel · provider · durationMs · requestId`. Nothing else from the
+logger reaches the terminal:
 
-# Production (structured JSON)
-NODE_ENV=production npx tsx src/index.ts
+```bash
+saros-proxy status
 ```
+
+Parsing the output from a script? Set `SAROS_LOG_JSON=1` to force the raw
+NDJSON format in any mode:
+
+```bash
+SAROS_LOG_JSON=1 saros-proxy status
+```
+
+The daemon child, `daemon.log` and the systemd journal are always NDJSON
+(`SAROS_DAEMON=1`, or `NODE_ENV=production` on `serve` — which is what the
+systemd unit and the Docker service use); those lines are never rendered for a
+terminal. Other commands stay human even when `NODE_ENV=production` is
+inherited.
 
 ### See which key and provider served a request
 

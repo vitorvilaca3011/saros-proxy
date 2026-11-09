@@ -297,7 +297,7 @@ export function buildSystemdUnit(port?: number): string {
     '',
     '[Service]',
     'Type=simple',
-    // The journal keeps the JSON lines; pino-pretty only runs outside production.
+    // The journal keeps the JSON lines; human rendering is CLI-only.
     'Environment=NODE_ENV=production',
     `ExecStart=${resolveSystemdCommand()} serve${portArg}`,
     'Restart=on-failure',

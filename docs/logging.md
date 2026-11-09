@@ -1,17 +1,29 @@
 # Logging
 
-Saros logs structured JSON lines (pino). The point of the format is that a single line
-answers "who served this, with which key, how did it end, and how long did it take" —
-without reading the source.
+Saros logs structured JSON lines (pino) wherever the output is read by a tool. In JSON
+mode a single line answers "who served this, with which key, how did it end, and how long
+did it take" — without reading the source. In the terminal the CLI renders one line per
+record: icon, message, and only the public request fields as a gray tail.
 
 ## Where the lines go
 
 | Mode | Destination | Format |
 |---|---|---|
-| `saros-proxy serve` (foreground) | stdout | pretty-printed unless `NODE_ENV=production` |
-| `saros-proxy start` (daemon) | `daemon.log` in the state dir (`~/.config/saros` on Linux/macOS, `%LOCALAPPDATA%\saros` on Windows) | NDJSON, pretty-printing off |
+| `saros-proxy serve` (foreground) | stdout (info) / stderr (warn, error) | human-rendered; NDJSON with `SAROS_LOG_JSON=1`, or with `NODE_ENV=production` |
+| Other CLI commands (`status`, `usage`, `keys`, …) | stdout (info) / stderr (warn, error) | human-rendered; NDJSON with `SAROS_LOG_JSON=1` |
+| `saros-proxy start` (daemon) | `daemon.log` in the state dir (`~/.config/saros` on Linux/macOS, `%LOCALAPPDATA%\saros` on Windows) | NDJSON, never rendered for a terminal |
 | `saros-proxy start`, second stream | same file, same descriptor as stdout (no pipe) | NDJSON |
 
+- Mode: JSON is selected by `SAROS_LOG_JSON=1`, `SAROS_DAEMON=1`, or `NODE_ENV=production`
+  **on the `serve` subcommand**. The daemon child and the systemd unit set those, and the
+  Docker service runs `serve`, so `daemon.log`, the journal and `docker logs` stay
+  parseable. Other commands stay human even when `NODE_ENV=production` is inherited —
+  `docker compose exec proxy node dist/index.js status` prints the report, not NDJSON.
+- Human format: icon + message, continuation lines indented two spaces, control characters
+  (ESC/OSC/BEL) stripped, followed by a gray tail with the public fields `status`,
+  `keyLabel`, `provider`, `durationMs` (as `<n>ms`) and `requestId`, in that order and
+  separated by ` · `; absent fields are omitted. Nothing else reaches the terminal, so the
+  `Fields` column below describes the JSON record — use `SAROS_LOG_JSON=1` to see it.
 - Level: `LOG_LEVEL` (default `info`). `debug` adds `key.selected`; per-attempt forwarding (`Forwarding request…`) is `info` because it is what a failed attempt needs in order to be reconstructible.
 - The daemon log rotates **at start**: past 10 MB it becomes `daemon.log.1` and up to five
   files are kept. Rotation is deliberately not a runtime dependency.
