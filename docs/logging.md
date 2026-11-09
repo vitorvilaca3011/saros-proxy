@@ -8,10 +8,12 @@ without reading the source.
 
 | Mode | Destination | Format |
 |---|---|---|
-| `saros-proxy serve` (foreground) | stdout | pretty-printed unless `NODE_ENV=production` |
-| `saros-proxy start` (daemon) | `daemon.log` in the state dir (`~/.config/saros` on Linux/macOS, `%LOCALAPPDATA%\saros` on Windows) | NDJSON, pretty-printing off |
+| `saros-proxy serve` (foreground) | stdout (info) / stderr (warn, error) | human-rendered; NDJSON with `SAROS_LOG_JSON=1` |
+| Other CLI commands (`status`, `usage`, `keys`, …) | stdout (info) / stderr (warn, error) | human-rendered; NDJSON with `SAROS_LOG_JSON=1` |
+| `saros-proxy start` (daemon) | `daemon.log` in the state dir (`~/.config/saros` on Linux/macOS, `%LOCALAPPDATA%\saros` on Windows) | NDJSON, never rendered for a terminal |
 | `saros-proxy start`, second stream | same file, same descriptor as stdout (no pipe) | NDJSON |
 
+- Mode: JSON is selected by `SAROS_LOG_JSON=1`, `SAROS_DAEMON=1` or `NODE_ENV=production`. The daemon child and the systemd unit set the latter two, so `daemon.log` and the journal stay parseable.
 - Level: `LOG_LEVEL` (default `info`). `debug` adds `key.selected`; per-attempt forwarding (`Forwarding request…`) is `info` because it is what a failed attempt needs in order to be reconstructible.
 - The daemon log rotates **at start**: past 10 MB it becomes `daemon.log.1` and up to five
   files are kept. Rotation is deliberately not a runtime dependency.

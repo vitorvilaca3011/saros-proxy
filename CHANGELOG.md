@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **CLI log lines are rendered for a human.** Every CLI process (`status`, `start`, `usage`,
+  a foreground `serve`, …) prints one line per record — `·` info on stdout, `⚠`/`✗` on
+  stderr — instead of pino NDJSON; `SAROS_LOG_JSON=1` forces the raw NDJSON back.
+  `daemon.log` and the systemd journal keep NDJSON, and `pino-pretty` is gone. `start` now
+  loads config once, so the plaintext/legacy-encryption warnings no longer print twice.
+
 ## [1.1.0] - 2026-11-06
 
 The surface 1.0 promised to keep is unchanged: the `/v1/*` and `/zen/go/v1/*` routes,
