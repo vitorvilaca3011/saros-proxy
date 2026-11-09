@@ -101,16 +101,22 @@ describe('formatLogRecord', () => {
   it('strips terminal control characters and keeps multi-line indentation', () => {
     const line = formatLogRecord({
       level: 40,
-      msg: 'Security: bad\nsecond \u001b]0;pwned\u0007\nthird\tkept',
+      // ESC/OSC/BEL, CR inside "second" and an 8-bit CSI (0x9b) before "2J".
+      msg: 'Security: bad\nsec\rond \u001b]0;pwned\u0007\nthird\u009b2J\tkept',
     });
     expect(line.text).toBe(
-      `${chalk.yellow('⚠')} Security: bad\n  second ]0;pwned\n  third\tkept`,
+      `${chalk.yellow('⚠')} Security: bad\n  second ]0;pwned\n  third2J\tkept`,
     );
-    // chalk's own SGR sequences are ESC; the record's ESC/BEL must not survive.
+    // chalk's own SGR sequences are ESC; the record's control characters must not survive.
     const plain = line.text.replace(/\u001b\[[0-9;]*m/g, '');
-    expect(plain).toBe('⚠ Security: bad\n  second ]0;pwned\n  third\tkept');
+    expect(plain).toBe('⚠ Security: bad\n  second ]0;pwned\n  third2J\tkept');
     expect(plain).not.toContain('\u001b');
     expect(plain).not.toContain('\u0007');
+    expect(plain).not.toContain('\r');
+    expect(plain).not.toContain('\u009b');
+    // \n keeps the indented continuation and \t survives inside a line.
+    expect(plain).toContain('\n  second');
+    expect(plain).toContain('\tkept');
   });
 
   it('renders the public-field tail in order for an access log record', () => {

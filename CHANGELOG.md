@@ -15,7 +15,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the public request fields (`status`, `keyLabel`, `provider`, `durationMs`, `requestId`),
   and control characters (ESC/OSC/BEL) are stripped. `SAROS_LOG_JSON=1` forces the raw
   NDJSON back. `NODE_ENV=production` now selects JSON only for `serve` (the systemd unit and
-  the Docker service), so `docker compose exec proxy saros-proxy status` stays human;
+  the Docker service), so `docker compose exec proxy node dist/index.js status` stays human;
   `daemon.log` and the journal keep NDJSON, and `pino-pretty` is gone. `start` now loads
   config once, so the plaintext/legacy-encryption warnings no longer print twice.
 

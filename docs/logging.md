@@ -18,7 +18,7 @@ record: icon, message, and only the public request fields as a gray tail.
   **on the `serve` subcommand**. The daemon child and the systemd unit set those, and the
   Docker service runs `serve`, so `daemon.log`, the journal and `docker logs` stay
   parseable. Other commands stay human even when `NODE_ENV=production` is inherited —
-  `docker compose exec proxy saros-proxy status` prints the report, not NDJSON.
+  `docker compose exec proxy node dist/index.js status` prints the report, not NDJSON.
 - Human format: icon + message, continuation lines indented two spaces, control characters
   (ESC/OSC/BEL) stripped, followed by a gray tail with the public fields `status`,
   `keyLabel`, `provider`, `durationMs` (as `<n>ms`) and `requestId`, in that order and

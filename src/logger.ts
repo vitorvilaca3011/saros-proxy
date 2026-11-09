@@ -60,8 +60,8 @@ export function maskKey(key: string): string {
  * JSON is selected by the daemon child (`SAROS_DAEMON=1`), by the explicit
  * escape hatch (`SAROS_LOG_JSON=1`), or by `serve` under NODE_ENV=production
  * (the systemd unit and the Docker service). Any other CLI command stays human
- * even when NODE_ENV=production is inherited, e.g. `docker compose exec …
- * saros-proxy status`.
+ * even when NODE_ENV=production is inherited, e.g. `docker compose exec proxy
+ * node dist/index.js status`.
  */
 export function isJsonLogMode(
   env: NodeJS.ProcessEnv = process.env,
