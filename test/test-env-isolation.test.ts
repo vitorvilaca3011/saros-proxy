@@ -11,6 +11,12 @@
  */
 import { describe, it, expect, vi } from 'vitest';
 import { homedir, userInfo } from 'node:os';
+import { fileEnvBaseline, restoreFileEnv } from './setup-env.js';
+
+// Written at module scope: executes after the setup file and before `beforeAll`.
+// The file baseline must be captured before this point (see the per-file case).
+const FILE_SCOPE_PROBE = 'SAROS_TEST_FILE_SCOPE_PROBE';
+process.env[FILE_SCOPE_PROBE] = 'file-scope';
 
 describe('test environment isolation', () => {
   it('resolves homedir() inside the per-file temp dir, not the real home', () => {
@@ -42,7 +48,7 @@ describe('test environment isolation', () => {
  * daemon case reached the next two. `setup-env.ts` snapshots the env before
  * each test and reconciles it afterwards; these cases are the contract.
  */
-describe('per-test environment restoration', () => {
+describe('per-test environment restoration', { shuffle: false }, () => {
   const DIRECT = 'SAROS_TEST_ENV_LEAK_PROBE';
   const STUBBED = 'SAROS_TEST_STUB_LEAK_PROBE';
 
@@ -73,7 +79,7 @@ describe('per-test environment restoration', () => {
  * previously-undefined variable deletes it from the wrong object. The setup
  * file re-binds a replaced env before each test; this is that contract.
  */
-describe('per-test environment object identity', () => {
+describe('per-test environment object identity', { shuffle: false }, () => {
   const workerEnv = process.env;
 
   it('starts on the worker env object', () => {
@@ -87,5 +93,22 @@ describe('per-test environment object identity', () => {
 
   it('is back on the worker env object in the next test', () => {
     expect(process.env).toBe(workerEnv);
+  });
+});
+
+/**
+ * Module-scope code runs before `beforeAll`, so a baseline captured in a hook
+ * would already contain these writes and the file-boundary restore would keep
+ * them. The baseline is captured in the setup module body instead; this case
+ * fails if that capture moves into `beforeAll` (or disappears).
+ */
+describe('per-file environment restoration', () => {
+  it('keeps module-scope writes out of the baseline and drops them at the boundary', () => {
+    expect(fileEnvBaseline[FILE_SCOPE_PROBE]).toBeUndefined();
+    expect(process.env[FILE_SCOPE_PROBE]).toBe('file-scope');
+
+    restoreFileEnv();
+
+    expect(process.env[FILE_SCOPE_PROBE]).toBeUndefined();
   });
 });

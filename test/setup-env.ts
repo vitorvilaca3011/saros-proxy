@@ -92,6 +92,27 @@ if (process.platform === 'win32') {
 delete process.env.SAROS_ALLOW_LEGACY_PID;
 
 /**
+ * Environment the file inherited from the setup, captured in this module body:
+ * the only point that runs before the test file is evaluated. `beforeAll` is
+ * too late — module-scope assignments have already run by then, so a baseline
+ * captured there would fold those writes in and the boundary restore below
+ * would keep them instead of removing them.
+ */
+export const fileEnvBaseline = snapshotEnv();
+
+/**
+ * File-boundary restore, registered as a setup `afterAll` below. Setup hooks
+ * are registered before the file's own, and `afterAll` runs in reverse order,
+ * so this runs after the file's `afterAll` writes. Re-adopt first: a suite
+ * that replaced `process.env` at module scope or in `afterAll` would otherwise
+ * hide its values from the restore.
+ */
+export function restoreFileEnv(): void {
+  adoptSharedEnvObject();
+  restoreEnv(fileEnvBaseline);
+}
+
+/**
  * The env each test inherits. Captured before the test file's own `beforeEach`
  * hooks run, so stubs a suite installs per test are removed afterwards rather
  * than becoming the next test's baseline. The restore runs after the test
@@ -106,6 +127,8 @@ beforeEach(() => {
 afterEach(() => {
   restoreEnv(inheritedEnv);
 });
+// Same reverse-order rule for afterAll: runs after the file's afterAll writes.
+afterAll(restoreFileEnv);
 
 // The account's real home, read from the passwd record (`userInfo` ignores
 // $HOME, so no env var and no `node:os` mock above can change it). Published
