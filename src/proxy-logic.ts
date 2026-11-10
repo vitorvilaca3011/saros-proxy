@@ -32,7 +32,8 @@ interface ApiKey {
    * Consumption as a percentage of the monthly budget, derived from the
    * tightest quota window (5h = 20%, weekly = 50%, monthly = 100% of the
    * month). Drives the rotation weight; null until a usage snapshot supplies
-   * at least one window. A partial snapshot can only raise it, never lower it.
+   * a monthly anchor. A partial snapshot can only raise an already anchored
+   * value, never lower it, and never anchors a key by itself.
    */
   effectivePercent: number | null;
   /**
@@ -401,9 +402,10 @@ export interface KeyUsageMetrics {
    * Consumption as a percentage of the monthly budget from the tightest quota
    * window (`effectiveMonthlyPercent` in `usage-client.ts`). Derived from the
    * windows present in the payload (monthly counts as 0 when absent). A null
-   * means no window was usable and the previous value must stay; for a partial
-   * payload (`usedPercent === null`) `updateKeyUsage` keeps the larger of this
-   * and the previous value, so a missing monthly can never add slack.
+   * means no window was usable and the previous value must stay. For a partial
+   * payload (`usedPercent === null`) `updateKeyUsage` only applies it to an
+   * already anchored key (max with the previous value); an unanchored key
+   * stays null and keeps the median/round-robin fallback.
    */
   effectivePercent: number | null;
   /** True when any quota window is at 100%. */
@@ -422,8 +424,9 @@ export interface KeyUsageMetrics {
  * hit its cap, so the key weighs 0 even when the month has room. A null
  * metric means the payload had no derivable value and the previous one is
  * kept. A partial payload (null `usedPercent`) can only raise
- * `effectivePercent`, never lower it. Keys absent from the map keep their
- * previous values.
+ * `effectivePercent` on a key that already has a monthly anchor; it never
+ * anchors a key by itself. Keys absent from the map keep their previous
+ * values.
  */
 export function updateKeyUsage(state: ProxyState, usage: Map<string, KeyUsageMetrics>): void {
   for (const key of state.keys) {
@@ -433,12 +436,16 @@ export function updateKeyUsage(state: ProxyState, usage: Map<string, KeyUsageMet
     // underivable payload can never turn into maximum weight.
     if (metrics.usedPercent !== null) key.usagePercent = metrics.usedPercent;
     if (metrics.effectivePercent !== null) {
-      // A partial payload (no monthly window) only knows a lower bound for
-      // the effective usage: never let it lower the previous value, or the
-      // key would gain slack exactly when a shorter window tightened.
-      key.effectivePercent = metrics.usedPercent === null
-        ? Math.max(key.effectivePercent ?? 0, metrics.effectivePercent)
-        : metrics.effectivePercent;
+      if (metrics.usedPercent !== null) {
+        key.effectivePercent = metrics.effectivePercent;
+      } else if (key.effectivePercent !== null) {
+        // A partial payload only knows a lower bound for an already anchored
+        // key: never let it lower the previous value, or the key would gain
+        // slack exactly when a shorter window tightened. It must not anchor a
+        // key by itself: with no monthly metric, a present window at 0% would
+        // otherwise become maximum weight.
+        key.effectivePercent = Math.max(key.effectivePercent, metrics.effectivePercent);
+      }
     }
     key.exhausted = metrics.exhausted;
   }

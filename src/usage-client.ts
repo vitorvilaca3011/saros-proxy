@@ -208,9 +208,9 @@ export function maybeRefreshUsage(state: ProxyState, config: ProxyConfig): void 
             usedPercent: usage.usedPercent,
             // A partial payload still carries rolling/weekly data, so derive
             // the effective percent from the windows that came (monthly is 0
-            // when absent). `updateKeyUsage` keeps the larger of this and the
-            // previous value for a partial payload, so a missing monthly can
-            // never increase the key's slack.
+            // when absent). `updateKeyUsage` applies it only to a key that
+            // already has a monthly anchor (max with the previous value), so a
+            // missing monthly can never anchor a new key or increase slack.
             effectivePercent: effectiveMonthlyPercent(
               usage.rollingPercent,
               usage.weeklyPercent,
