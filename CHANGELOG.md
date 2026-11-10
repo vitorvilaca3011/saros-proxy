@@ -7,6 +7,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.1.2] - 2026-11-10
+
+### Changed
+
+- **Rotation weighs the tightest quota window, not only the monthly one.** The
+  provider windows are fractions of the monthly allowance (5-hour = 20%, weekly
+  = 50%, monthly = 100%), so each reported percent is now scaled onto the
+  monthly scale and the weight uses the largest: `effective =
+  max(monthly%, 0.5 × weekly%, 0.2 × rolling%)`, `weight = 100 − effective`. A
+  key at monthly 10% with weekly 99% used to weigh 90 against 80 for a key at
+  monthly 20% with weekly 10% — it now weighs 50.5, so a key close to a shorter
+  cap stops collecting most of the traffic. When no shorter window is tighter
+  the weight is unchanged (monthly 28 / weekly 2 / rolling 0 still weighs 72),
+  any window at 100% still weighs 0, and a key with no usage data keeps the
+  median/round-robin fallback. `saros-proxy usage` and `/health` still report
+  the monthly percentage — only the rotation weight uses the combined number.
+- **Edge cases the review tightened.** An exhausted key now weighs 0 even when
+  the payload carries no monthly anchor; a partial payload can no longer add
+  slack to an already anchored key, and can no longer anchor a new one
+  (CommandCode without `credits.monthlyCredits` returns no monthly percent while
+  still reporting the 5-hour and weekly windows).
+
 ## [1.1.1] - 2026-11-09
 
 ### Changed
@@ -581,7 +603,8 @@ First stable release. The public surface — the `/v1/*` and `/zen/go/v1/*` rout
 - Hop-by-hop header sanitization
 - Non-root Docker user
 
-[Unreleased]: https://github.com/vitorvilaca3011/saros-proxy/compare/v1.1.1...HEAD
+[Unreleased]: https://github.com/vitorvilaca3011/saros-proxy/compare/v1.1.2...HEAD
+[1.1.2]: https://github.com/vitorvilaca3011/saros-proxy/compare/v1.1.1...v1.1.2
 [1.1.1]: https://github.com/vitorvilaca3011/saros-proxy/compare/v1.1.0...v1.1.1
 [1.1.0]: https://github.com/vitorvilaca3011/saros-proxy/compare/v1.0.0...v1.1.0
 [1.0.0]: https://github.com/vitorvilaca3011/saros-proxy/compare/v0.11.0...v1.0.0
