@@ -13,6 +13,7 @@ import { commandcodeProvider, opencodeGoProvider } from '../src/providers/index.
 import {
   completeRequest,
   createProxyState,
+  rotationWeight,
   selectKeyForRequest,
   type ProxyState,
 } from '../src/proxy-logic.js';
@@ -329,6 +330,76 @@ describe('maybeRefreshUsage', () => {
     const a = state.keys.find((k) => k.label === 'a')!;
     expect(a.usagePercent).toBe(70);
     expect(a.exhausted).toBe(false);
+  });
+
+  it('never increases slack from a partial payload without the monthly window', async () => {
+    const state = makeState();
+    const config = makeConfig();
+
+    // Seed: 'a' effective 10, 'b' effective 80.
+    vi.spyOn(globalThis, 'fetch').mockImplementation(async (_url, init) => {
+      const auth = (init as RequestInit).headers as Record<string, string>;
+      const isA = auth.Authorization.includes('sk-a');
+      return new Response(
+        JSON.stringify({
+          usage: { rolling: {}, weekly: {}, monthly: { percent: isA ? 10 : 80 } },
+        }),
+        { status: 200 },
+      );
+    });
+    maybeRefreshUsage(state, config);
+    await settleMacrotasks();
+    await settleMacrotasks();
+
+    const a = state.keys.find((k) => k.label === 'a')!;
+    const b = state.keys.find((k) => k.label === 'b')!;
+    expect(a.effectivePercent).toBe(10);
+    expect(b.effectivePercent).toBe(80);
+
+    // Partial payload: 'a' weekly 99 implies 49.5% of the month; 'b' weekly 0
+    // implies 0. No monthly window, so the previous values are the floor.
+    vi.spyOn(globalThis, 'fetch').mockImplementation(async (_url, init) => {
+      const auth = (init as RequestInit).headers as Record<string, string>;
+      const isA = auth.Authorization.includes('sk-a');
+      return new Response(
+        JSON.stringify({
+          usage: { rolling: {}, weekly: { percent: isA ? 99 : 0 }, monthly: {} },
+        }),
+        { status: 200 },
+      );
+    });
+    resetUsageRefreshState();
+    maybeRefreshUsage(state, config);
+    await settleMacrotasks();
+    await settleMacrotasks();
+
+    // 'a' tightened: 10 → 49.5 (weight 90 → 50.5). 'b' would drop to 0, but
+    // a partial payload may not increase slack, so it stays 80 (weight 20).
+    expect(a.usagePercent).toBe(10);
+    expect(a.effectivePercent).toBeCloseTo(49.5, 10);
+    expect(rotationWeight(a)).toBeCloseTo(50.5, 10);
+    expect(b.usagePercent).toBe(80);
+    expect(b.effectivePercent).toBe(80);
+    expect(rotationWeight(b)).toBe(20);
+  });
+
+  it('anchors a key that never had usage from a partial payload', async () => {
+    const state = createProxyState([{ label: 'a', key: 'sk-a' }]);
+    const config = makeConfig();
+
+    vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response(
+      JSON.stringify({ usage: { rolling: {}, weekly: { percent: 99 }, monthly: {} } }),
+      { status: 200 },
+    ));
+    maybeRefreshUsage(state, config);
+    await settleMacrotasks();
+    await settleMacrotasks();
+
+    const a = state.keys[0];
+    // No previous effective: the `?? 0` floor must still take the weekly
+    // window into account instead of leaving the key unanchored.
+    expect(a.effectivePercent).toBeCloseTo(49.5, 10);
+    expect(rotationWeight(a)).toBeCloseTo(50.5, 10);
   });
 
   it('propagates a spent window into state even when the month has room', async () => {

@@ -206,13 +206,16 @@ export function maybeRefreshUsage(state: ProxyState, config: ProxyConfig): void 
           const usage = result.usage;
           metrics.set(label, {
             usedPercent: usage.usedPercent,
-            // The contract treats a missing monthly metric as "no comparable
-            // data": the previous value stays, so a key never anchored keeps
-            // the median/round-robin fallback instead of being priced on a
-            // partial payload.
-            effectivePercent: usage.usedPercent === null
-              ? null
-              : effectiveMonthlyPercent(usage.rollingPercent, usage.weeklyPercent, usage.monthlyPercent),
+            // A partial payload still carries rolling/weekly data, so derive
+            // the effective percent from the windows that came (monthly is 0
+            // when absent). `updateKeyUsage` keeps the larger of this and the
+            // previous value for a partial payload, so a missing monthly can
+            // never increase the key's slack.
+            effectivePercent: effectiveMonthlyPercent(
+              usage.rollingPercent,
+              usage.weeklyPercent,
+              usage.monthlyPercent,
+            ),
             exhausted: usage.exhausted,
           });
           // A key that answers the usage API is entitled again.
