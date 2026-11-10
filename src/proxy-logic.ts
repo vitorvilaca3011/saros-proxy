@@ -309,16 +309,18 @@ function findNextKey(
 
 /**
  * Rotation weight of one key: 0 when any quota window is spent (the upstream
- * would reject it), otherwise the room left on the tightest window, on the
- * monthly scale. Null when no usage snapshot anchored the key — `pickWeighted`
- * then gives it the median of the known weights.
+ * would reject it) even if no usage snapshot anchored the key, otherwise the
+ * room left on the tightest window, on the monthly scale. Null only for a key
+ * with no usage data and no spent window — `pickWeighted` then gives it the
+ * median of the known weights.
  */
 export function rotationWeight(key: {
   effectivePercent: number | null;
   exhausted: boolean;
 }): number | null {
+  if (key.exhausted) return 0;
   if (key.effectivePercent === null) return null;
-  return key.exhausted ? 0 : Math.max(0, 100 - key.effectivePercent);
+  return Math.max(0, 100 - key.effectivePercent);
 }
 
 /**

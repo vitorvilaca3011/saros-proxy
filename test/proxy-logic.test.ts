@@ -1029,6 +1029,32 @@ describe('rotation weight from the tightest quota window', () => {
     expect(countSelections(state, 10)).toEqual({ spent: 0, roomy: 10 });
   });
 
+  it('weighs an exhausted key 0 even when it has no monthly anchor', () => {
+    const state = pool(['exhausted', 'healthy']);
+    updateKeyUsage(state, new Map([
+      ['exhausted', { usedPercent: null, effectivePercent: null, exhausted: true }],
+      ['healthy', { usedPercent: 50, effectivePercent: 50, exhausted: false }],
+    ]));
+
+    const exhausted = state.keys.find((k) => k.label === 'exhausted')!;
+    expect(exhausted.effectivePercent).toBeNull();
+    // Null effective must not hide the spent window: the exhausted key weighs
+    // 0 and the healthy key takes every pick.
+    expect(rotationWeight(exhausted)).toBe(0);
+    expect(countSelections(state, 10)).toEqual({ exhausted: 0, healthy: 10 });
+  });
+
+  it('does not select an exhausted unanchored key when no candidate has usage data', () => {
+    const state = pool(['exhausted', 'unknown']);
+    updateKeyUsage(state, new Map([
+      ['exhausted', { usedPercent: null, effectivePercent: null, exhausted: true }],
+    ]));
+
+    // Both weights would be null without the exhausted check; Tier 1 must
+    // still skip the key whose window is spent.
+    expect(countSelections(state, 10)).toEqual({ exhausted: 0, unknown: 10 });
+  });
+
   it('keeps the median fallback for a key without usage data', () => {
     const state = pool(['known', 'unknown']);
     updateKeyUsage(state, new Map([['known', windowMetrics(0, 0, 50)]]));
