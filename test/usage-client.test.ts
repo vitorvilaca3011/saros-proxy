@@ -4,12 +4,18 @@
  */
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import {
+  effectiveMonthlyPercent,
   fetchKeyUsage,
   maybeRefreshUsage,
   resetUsageRefreshState,
 } from '../src/usage-client.js';
 import { commandcodeProvider, opencodeGoProvider } from '../src/providers/index.js';
-import { createProxyState, type ProxyState } from '../src/proxy-logic.js';
+import {
+  completeRequest,
+  createProxyState,
+  selectKeyForRequest,
+  type ProxyState,
+} from '../src/proxy-logic.js';
 import type { ProxyConfig } from '../src/config.js';
 
 const VALID_BODY = JSON.stringify({
@@ -49,6 +55,18 @@ function makeConfig(): ProxyConfig {
     allowedOrigins: [],
   };
 }
+
+describe('effectiveMonthlyPercent', () => {
+  it('takes the tightest window after scaling it to the monthly allowance', () => {
+    // The bug: monthly says 10%, but the weekly window (50% of the month) is
+    // at 99% of its own allowance → 49.5% of the month is effectively gone.
+    expect(effectiveMonthlyPercent(0, 99, 10)).toBe(49.5);
+    // Monthly dominates when the shorter windows are quiet.
+    expect(effectiveMonthlyPercent(0, 2, 28)).toBe(28);
+    // The 5-hour window (20% of the month) at 100% is 20% of the month.
+    expect(effectiveMonthlyPercent(100, 0, 10)).toBe(20);
+  });
+});
 
 describe('fetchKeyUsage', () => {
   afterEach(() => vi.restoreAllMocks());
@@ -205,6 +223,45 @@ describe('maybeRefreshUsage', () => {
     expect(state.keys.find((k) => k.label === 'a')?.usagePercent).toBe(30);
     expect(state.keys.find((k) => k.label === 'b')?.usagePercent).toBe(70);
     expect(state.keys.every((k) => k.exhausted === false)).toBe(true);
+  });
+
+  it('weighs the tightest window from real payloads and rotates away from the tight key', async () => {
+    // 'a': monthly 10% but weekly 99% (1% of the weekly allowance left).
+    // 'b': monthly 20%, weekly 10% (the healthy one).
+    vi.spyOn(globalThis, 'fetch').mockImplementation(async (_url, init) => {
+      const auth = (init as RequestInit).headers as Record<string, string>;
+      const isA = auth.Authorization.includes('sk-a');
+      return new Response(
+        JSON.stringify({
+          usage: {
+            rolling: { percent: 0 },
+            weekly: { percent: isA ? 99 : 10 },
+            monthly: { percent: isA ? 10 : 20 },
+          },
+        }),
+        { status: 200 },
+      );
+    });
+    const state = makeState();
+
+    maybeRefreshUsage(state, makeConfig());
+    await settleMacrotasks();
+    await settleMacrotasks();
+
+    const a = state.keys.find((k) => k.label === 'a')!;
+    const b = state.keys.find((k) => k.label === 'b')!;
+    // Display keeps the monthly number; only the rotation weight changes.
+    expect(a.usagePercent).toBe(10);
+    expect(a.effectivePercent).toBeCloseTo(49.5, 10);
+    expect(b.effectivePercent).toBe(20);
+
+    const counts: Record<string, number> = { a: 0, b: 0 };
+    for (let i = 0; i < 40; i++) {
+      const key = selectKeyForRequest(state, `req-${i}`)!;
+      completeRequest(state, `req-${i}`, true);
+      counts[key.label]++;
+    }
+    expect(counts.a).toBeLessThan(counts.b);
   });
 
   it('keeps the previous usage when a 200 carries no numeric window', async () => {
