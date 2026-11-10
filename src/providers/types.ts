@@ -92,6 +92,17 @@ export interface KeyProvider {
   readonly sessionHeader?: string;
 
   /**
+   * Reasoning-effort values this upstream accepts, lowercase. When present,
+   * saros normalizes the client's `reasoning_effort` (and
+   * `reasoning.effort`) to this vocabulary before forwarding, because some
+   * gateways answer 400 for anything else (CommandCode rejects `minimal`,
+   * which harnesses send). Providers that accept bespoke tiers (`fast`,
+   * `thinking` on relays) or have no fixed vocabulary leave this unset and
+   * receive the client's value untouched.
+   */
+  readonly reasoningEfforts?: readonly string[];
+
+  /**
    * Extra headers this provider requires on upstream requests
    * (e.g. CommandCode CLI-identity headers). Called per request;
    * must not include Authorization (added by the proxy).

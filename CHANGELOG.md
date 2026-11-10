@@ -7,6 +7,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **`Expect` is dropped on the way upstream.** Node's fetch refuses any
+  `Expect` header (`UND_ERR_NOT_SUPPORTED`), so a client that sends
+  `Expect: 100-continue` — `curl` above ~1 KB, .NET `HttpClient` — burned a
+  retry and ended as a 502 without the upstream ever seeing the request. The
+  body now travels with the `content-length` undici computes, so nothing waits
+  on a 100-continue; every other forwarded header is unchanged.
+- **`reasoning_effort` is normalized to the serving provider's vocabulary.** A
+  provider can declare `reasoningEfforts`, and when it does saros rewrites
+  `reasoning_effort` (and `reasoning.effort`) before forwarding: known aliases
+  map onto a whitelisted tier (`minimal`/`minimum` → `low`, `ultra` → `max`,
+  `none`/`false`/`disabled` → `off`), a value with no equivalent is dropped,
+  and the decision is logged as `reasoning_effort not accepted upstream,
+  adjusted`. CommandCode declares `off|low|medium|high|xhigh|max` and answers
+  `400 Invalid option … param reasoning_effort` — without a retry — for
+  anything else, which is what harnesses sending `minimal` (pi/omp's `smol`
+  role) hit: 25 hard 400s in eight days on this host, plus 492 whenever that
+  request streamed. The alias is only applied when its target tier is
+  whitelisted, and providers without the field (opencode-go's own vocabulary,
+  relays with bespoke tiers such as `fast` or `thinking`) receive the client's
+  value untouched.
+
 ## [1.1.2] - 2026-11-10
 
 ### Changed

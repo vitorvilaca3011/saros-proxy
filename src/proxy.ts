@@ -169,6 +169,63 @@ export interface OutboundRequest {
   bodyText: string;
   /** Value for `provider.sessionHeader`; absent when the client supplied one. */
   sessionId?: string;
+  /**
+   * Set when `reasoning_effort` (or `reasoning.effort`) had to be rewritten
+   * for the provider's whitelist; `to: null` means the field was removed.
+   * Returned instead of logged so this function stays pure — the caller logs.
+   */
+  effortAdjusted?: { from: string; to: string | null };
+}
+
+/** Client effort vocabulary mapped onto the closest whitelisted tier. */
+const EFFORT_ALIASES: Readonly<Record<string, string>> = {
+  none: 'off',
+  false: 'off',
+  disabled: 'off',
+  minimal: 'low',
+  minimum: 'low',
+  ultra: 'max',
+};
+
+/**
+ * Canonical form of one effort value, or null when the upstream has no
+ * equivalent. Whitelisted values are lowercased/trimmed onto themselves;
+ * known aliases map onto a supported tier only when that tier is whitelisted
+ * (mapping `minimal` onto an absent `low` would recreate the 400); anything
+ * else is dropped.
+ */
+function normalizeEffort(value: string, allowed: readonly string[]): string | null {
+  const normalized = value.trim().toLowerCase();
+  if (allowed.includes(normalized)) return normalized;
+  const alias = EFFORT_ALIASES[normalized];
+  return alias && allowed.includes(alias) ? alias : null;
+}
+
+/**
+ * Rewrite the effort fields in place for a provider that declared its
+ * accepted vocabulary. Handles both wire shapes (`reasoning_effort` and
+ * `reasoning.effort`). Returns the first real adjustment, if any.
+ */
+function sanitizeReasoningEffort(
+  parsed: Record<string, unknown>,
+  allowed: readonly string[],
+): { from: string; to: string | null } | undefined {
+  const targets: Array<[Record<string, unknown>, string]> = [[parsed, 'reasoning_effort']];
+  const reasoning = parsed.reasoning;
+  if (typeof reasoning === 'object' && reasoning !== null && !Array.isArray(reasoning)) {
+    targets.push([reasoning as Record<string, unknown>, 'effort']);
+  }
+  let adjusted: { from: string; to: string | null } | undefined;
+  for (const [container, field] of targets) {
+    const raw = container[field];
+    if (typeof raw !== 'string') continue;
+    const next = normalizeEffort(raw, allowed);
+    if (next === raw) continue;
+    if (next === null) delete container[field];
+    else container[field] = next;
+    adjusted ??= { from: raw, to: next };
+  }
+  return adjusted;
 }
 
 /**
@@ -200,6 +257,9 @@ function conversationSessionId(parsed: Record<string, unknown>, modelId: string 
  *    completions, unless the client set the option itself — an explicit
  *    `false` is respected, otherwise the upstream may withhold the final
  *    usage chunk and per-key token accounting goes blind;
+ *  - normalize `reasoning_effort` to the serving provider's vocabulary when
+ *    it declares one (see sanitizeReasoningEffort) — gateways answer 400 for
+ *    a value they don't know, with no retry;
  *  - derive a conversation session id when the provider needs one and the
  *    client didn't send it (see conversationSessionId).
  *
@@ -233,11 +293,20 @@ export function prepareOutboundRequest(
     }
   }
 
+  const effortAdjusted = provider.reasoningEfforts
+    ? sanitizeReasoningEffort(parsed, provider.reasoningEfforts)
+    : undefined;
+  if (effortAdjusted) changed = true;
+
   const sessionId = provider.sessionHeader && !options.clientSessionId
     ? conversationSessionId(parsed, modelId)
     : undefined;
 
-  return { bodyText: changed ? JSON.stringify(parsed) : bodyText, sessionId };
+  return {
+    bodyText: changed ? JSON.stringify(parsed) : bodyText,
+    sessionId,
+    effortAdjusted,
+  };
 }
 
 /**
@@ -320,10 +389,12 @@ export function buildUpstreamUrl(base: string, path: string): string {
 
 /**
  * Clean headers for upstream forwarding: remove hop-by-hop headers,
- * pre-existing Authorization, and content-length (the forwarded body may be
+ * pre-existing Authorization, content-length (the forwarded body may be
  * rewritten — model-id aliasing / suffix strip — so a stale content-length
  * makes the upstream wait for bytes that never arrive; undici recomputes it
- * from the real body).
+ * from the real body), and Expect (undici refuses any `Expect` header with
+ * UND_ERR_NOT_SUPPORTED; the body travels with the content-length it
+ * computes, so no upstream ever waits on a 100-continue).
  */
 export function buildUpstreamHeaders(
   incoming: Headers,
@@ -342,7 +413,11 @@ export function buildUpstreamHeaders(
       lower === 'transfer-encoding' ||
       lower === 'upgrade' ||
       lower === 'authorization' ||
-      lower === 'content-length'
+      lower === 'content-length' ||
+      // undici rejects any Expect header (UND_ERR_NOT_SUPPORTED), which turns
+      // every 100-continue client into a 502. Drop it; content-length is set
+      // from the real body below.
+      lower === 'expect'
     ) {
       continue;
     }
@@ -542,6 +617,18 @@ async function executeSingleAttempt(attempt: number, ctx: RetryContext): Promise
           : undefined,
       })
     : { bodyText: ctx.bodyText };
+  if (prepared.effortAdjusted) {
+    logger.warn(
+      {
+        requestId: ctx.requestId,
+        provider: provider.id,
+        model: ctx.modelId,
+        from: prepared.effortAdjusted.from,
+        to: prepared.effortAdjusted.to,
+      },
+      'reasoning_effort not accepted upstream, adjusted',
+    );
+  }
   const fetchOptions = buildFetchOptions({
     method: ctx.method,
     bodyText: prepared.bodyText,

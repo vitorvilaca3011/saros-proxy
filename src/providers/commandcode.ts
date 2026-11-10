@@ -300,6 +300,11 @@ export const commandcodeProvider: KeyProvider = {
   // accounting — CommandCode exposes no quota API to poll.
   supportsStreamUsage: true,
 
+  // Verified live (daemon.log, 2026-11-03..10): anything outside this ladder
+  // is a 400 `Invalid option ... param reasoning_effort`; CommandCode does
+  // not accept `minimal`, which pi/omp send for the smol role.
+  reasoningEfforts: ['off', 'low', 'medium', 'high', 'xhigh', 'max'],
+
   extraUpstreamHeaders() {
     return commandcodeClientHeaders(cachedClientVersion ?? '0.18.10');
   },

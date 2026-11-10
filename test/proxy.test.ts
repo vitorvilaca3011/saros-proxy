@@ -106,6 +106,22 @@ describe('buildUpstreamHeaders', () => {
     expect(result.get('connection')).toBeNull();
     expect(result.get('authorization')).toBe('Bearer new-token');
   });
+
+  it('drops Expect: undici refuses the header and the request never reaches upstream', () => {
+    const incoming = new Headers({
+      'Expect': '100-continue',
+      'content-type': 'application/json',
+      'x-custom': 'value',
+    });
+
+    const result = buildUpstreamHeaders(incoming, 'new-token');
+
+    expect(result.get('expect')).toBeNull();
+    // Everything else still goes through.
+    expect(result.get('content-type')).toBe('application/json');
+    expect(result.get('x-custom')).toBe('value');
+    expect(result.get('authorization')).toBe('Bearer new-token');
+  });
 });
 
 describe('buildUpstreamHeaders — ZDR opt-in', () => {
@@ -267,6 +283,86 @@ describe('prepareOutboundRequest', () => {
 
   it('never overrides a session id the client supplied', () => {
     expect(prepare('{"model":"m","messages":[]}', 'm', false, 'client-session').sessionId).toBeUndefined();
+  });
+});
+
+describe('prepareOutboundRequest — reasoning_effort sanitization', () => {
+  function prepareWith(provider: KeyProvider, body: string) {
+    return prepareOutboundRequest(body, undefined, provider, { wantsStreamUsage: false });
+  }
+
+  it('leaves a whitelisted value byte-identical', () => {
+    const input = '{"reasoning_effort":"low"}';
+    const prepared = prepareWith(commandcodeProvider, input);
+    expect(prepared.bodyText).toBe(input);
+    expect(prepared.effortAdjusted).toBeUndefined();
+  });
+
+  it.each([
+    ['minimal', 'low'],
+    ['minimum', 'low'],
+    ['ultra', 'max'],
+    ['none', 'off'],
+    ['false', 'off'],
+    ['disabled', 'off'],
+    ['  HIGH  ', 'high'],
+  ])('maps %s to %s', (from, to) => {
+    const prepared = prepareWith(commandcodeProvider, JSON.stringify({ reasoning_effort: from }));
+    expect(JSON.parse(prepared.bodyText)).toEqual({ reasoning_effort: to });
+    expect(prepared.effortAdjusted).toEqual({ from, to });
+  });
+
+  it('removes a value the upstream has no tier for', () => {
+    const prepared = prepareWith(commandcodeProvider, '{"model":"m","reasoning_effort":"invented"}');
+    expect(JSON.parse(prepared.bodyText)).toEqual({ model: 'm' });
+    expect(prepared.effortAdjusted).toEqual({ from: 'invented', to: null });
+  });
+
+  it('sanitizes the nested reasoning.effort shape', () => {
+    const prepared = prepareWith(
+      commandcodeProvider,
+      '{"reasoning":{"effort":"minimal","summary":"auto"}}',
+    );
+    expect(JSON.parse(prepared.bodyText)).toEqual({
+      reasoning: { effort: 'low', summary: 'auto' },
+    });
+    expect(prepared.effortAdjusted).toEqual({ from: 'minimal', to: 'low' });
+  });
+
+  it('ignores non-string and non-object effort shapes', () => {
+    for (const input of [
+      '{"reasoning_effort":5}',
+      '{"reasoning":null}',
+      '{"reasoning":["minimal"]}',
+      '{"reasoning":{"summary":"auto"}}',
+    ]) {
+      const prepared = prepareWith(commandcodeProvider, input);
+      expect(prepared.bodyText).toBe(input);
+      expect(prepared.effortAdjusted).toBeUndefined();
+    }
+  });
+
+  it('drops an alias whose target tier is not whitelisted', () => {
+    // A provider that accepts off/high/max has no `low`; mapping minimal onto
+    // it would send a value the upstream rejects — remove the field instead.
+    const strictProvider: KeyProvider = {
+      ...commandcodeProvider,
+      reasoningEfforts: ['off', 'high', 'max'],
+    };
+    const prepared = prepareWith(strictProvider, '{"reasoning_effort":"minimal"}');
+    expect(prepared.bodyText).toBe('{}');
+    expect(prepared.effortAdjusted).toEqual({ from: 'minimal', to: null });
+  });
+
+  it('leaves providers that declare no whitelist untouched', () => {
+    // opencode-go accepts its own vocabulary and relays have bespoke tiers
+    // (`fast`, `thinking`): sanitizing globally would break them.
+    for (const effort of ['fast', 'minimal', 'thinking']) {
+      const input = JSON.stringify({ reasoning_effort: effort });
+      const prepared = prepareWith(opencodeGoProvider, input);
+      expect(prepared.bodyText).toBe(input);
+      expect(prepared.effortAdjusted).toBeUndefined();
+    }
   });
 });
 
