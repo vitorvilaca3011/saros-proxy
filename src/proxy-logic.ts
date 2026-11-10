@@ -29,6 +29,14 @@ interface ApiKey {
   /** Monthly used percent (0-100) reported by the upstream usage API. */
   usagePercent: number | null;
   /**
+   * Consumption as a percentage of the monthly budget, derived from the
+   * tightest quota window (5h = 20%, weekly = 50%, monthly = 100% of the
+   * month). Drives the rotation weight; null until a usage snapshot supplies
+   * a monthly anchor. A partial snapshot can only raise an already anchored
+   * value, never lower it, and never anchors a key by itself.
+   */
+  effectivePercent: number | null;
+  /**
    * True when any quota window (5h, weekly or monthly) is at 100%. Weight 0
    * in rotation: a month with room does not help when the upstream already
    * rejects the key for a spent shorter window.
@@ -176,6 +184,7 @@ export function createProxyState(
       lastUsed: null,
       disabledAt: null,
       usagePercent: null,
+      effectivePercent: null,
       exhausted: false,
       entitled: true,
       currentWeight: 0,
@@ -261,8 +270,10 @@ function buildBookedLabels(state: ProxyState): Set<string> {
  *
  * Selection strategy (smooth weighted round-robin, nginx-style):
  *  - When usage data is known for the candidates, keys with more remaining
- *    **monthly** budget are proportionally preferred. E.g. key X at 30% of its
- *    monthly allowance and key Y at 70% receive ~70%/30% of requests — exact
+ *    **monthly** budget are proportionally preferred, measured by the
+ *    tightest quota window (`effectivePercent`): monthly 30% used and weekly
+ *    10% used still weighs as 30% used. E.g. key X at 30% of its monthly
+ *    allowance and key Y at 70% receive ~70%/30% of requests — exact
  *    proportions over a cycle, not random sampling.
  *  - A key with any exhausted window weighs 0, so it is not selected while
  *    another candidate still has room.
@@ -298,11 +309,30 @@ function findNextKey(
 }
 
 /**
+ * Rotation weight of one key: 0 when any quota window is spent (the upstream
+ * would reject it) even if no usage snapshot anchored the key, otherwise the
+ * room left on the tightest window, on the monthly scale. Null only for a key
+ * with no usage data and no spent window — `pickWeighted` then gives it the
+ * median of the known weights.
+ */
+export function rotationWeight(key: {
+  effectivePercent: number | null;
+  exhausted: boolean;
+}): number | null {
+  if (key.exhausted) return 0;
+  if (key.effectivePercent === null) return null;
+  return Math.max(0, 100 - key.effectivePercent);
+}
+
+/**
  * Internal: smooth weighted round-robin over the candidates.
  *
- * Weight is the remaining **monthly** budget (`100 - usedPercent`), except
- * that a key with any exhausted window weighs 0 — the upstream would reject it
- * even while the month still has room.
+ * Weight is the remaining **monthly** budget after scaling the tightest quota
+ * window to the monthly scale (`100 - effectivePercent`), except that a key
+ * with any exhausted window weighs 0 — the upstream would reject it even
+ * while the month still has room. A key at monthly 10% but weekly 99% weighs
+ * 50.5, not 90: the weekly window is nearly spent, so the month's apparent
+ * room is not real.
  *
  * Keys without usage data get the median of the *non-exhausted* known weights.
  * Including the zeros of exhausted keys here would silently drag the neutral
@@ -322,10 +352,7 @@ function pickWeighted(
   candidates: ApiKey[],
   allowExhausted: boolean,
 ): ApiKey | null {
-  const known = candidates.map((k) => {
-    if (k.usagePercent === null) return null;
-    return k.exhausted ? 0 : Math.max(0, 100 - k.usagePercent);
-  });
+  const known = candidates.map(rotationWeight);
   if (known.every((w) => w === null)) return candidates[0];
 
   const roomWeights = candidates
@@ -371,6 +398,16 @@ export interface KeyUsageMetrics {
    * the payload had no derivable monthly value and the previous one must stay.
    */
   usedPercent: number | null;
+  /**
+   * Consumption as a percentage of the monthly budget from the tightest quota
+   * window (`effectiveMonthlyPercent` in `usage-client.ts`). Derived from the
+   * windows present in the payload (monthly counts as 0 when absent). A null
+   * means no window was usable and the previous value must stay. For a partial
+   * payload (`usedPercent === null`) `updateKeyUsage` only applies it to an
+   * already anchored key (max with the previous value); an unanchored key
+   * stays null and keeps the median/round-robin fallback.
+   */
+  effectivePercent: number | null;
   /** True when any quota window is at 100%. */
   exhausted: boolean;
 }
@@ -380,18 +417,36 @@ export interface KeyUsageMetrics {
  * the key's **own provider budget**, not absolute capacity: a mixed pool
  * feeds every provider's number into `pickWeighted`, where only this
  * normalized percent is comparable (opencode-go publishes percentages alone —
- * no counts or caps). `exhausted` means a shorter window already hit its cap,
- * so the key weighs 0 even when the month has room. A null `usedPercent` means
- * the payload had no derivable monthly value and the previous percentage is
- * kept. Keys absent from the map keep their previous values.
+ * no counts or caps). `effectivePercent` is the value rotation actually
+ * weighs: the same monthly scale after converting the tightest window
+ * (5h/wk/monthly), so a key near its weekly cap loses weight before the
+ * upstream starts answering 429. `exhausted` means a shorter window already
+ * hit its cap, so the key weighs 0 even when the month has room. A null
+ * metric means the payload had no derivable value and the previous one is
+ * kept. A partial payload (null `usedPercent`) can only raise
+ * `effectivePercent` on a key that already has a monthly anchor; it never
+ * anchors a key by itself. Keys absent from the map keep their previous
+ * values.
  */
 export function updateKeyUsage(state: ProxyState, usage: Map<string, KeyUsageMetrics>): void {
   for (const key of state.keys) {
     const metrics = usage.get(key.label);
     if (!metrics) continue;
-    // A null monthly metric is "no data", not 0%: keep the last known value
-    // so an underivable payload can never turn into maximum weight.
+    // A null metric is "no data", not 0%: keep the last known value so an
+    // underivable payload can never turn into maximum weight.
     if (metrics.usedPercent !== null) key.usagePercent = metrics.usedPercent;
+    if (metrics.effectivePercent !== null) {
+      if (metrics.usedPercent !== null) {
+        key.effectivePercent = metrics.effectivePercent;
+      } else if (key.effectivePercent !== null) {
+        // A partial payload only knows a lower bound for an already anchored
+        // key: never let it lower the previous value, or the key would gain
+        // slack exactly when a shorter window tightened. It must not anchor a
+        // key by itself: with no monthly metric, a present window at 0% would
+        // otherwise become maximum weight.
+        key.effectivePercent = Math.max(key.effectivePercent, metrics.effectivePercent);
+      }
+    }
     key.exhausted = metrics.exhausted;
   }
 }

@@ -34,6 +34,20 @@ export const USAGE_REFRESH_TTL_MS = 60_000; // min interval between upstream ref
 export const USAGE_FETCH_TIMEOUT_MS = 10_000;
 export const USAGE_PATH = '/zen/go/v1/usage';
 
+/**
+ * Quota windows as fractions of the monthly allowance. OpenCode Go's plan
+ * docs define the 5-hour window as 20% of the monthly limit, weekly as 50%
+ * and monthly as 100%; CommandCode's measured 14/35 credit caps mirror that
+ * ladder. Percent per window is relative to its own allowance, so multiplying
+ * by these fractions converts every window to the same "percent of month"
+ * scale (`effectiveMonthlyPercent` in `usage-client.ts`).
+ */
+export const QUOTA_WINDOW_MONTHLY_SHARE = {
+  rolling: 0.2,
+  weekly: 0.5,
+  monthly: 1,
+} as const;
+
 // Model request counters (persisted for `saros-proxy usage`)
 export const MODEL_STATS_SAVE_DEBOUNCE_MS = 5_000;
 

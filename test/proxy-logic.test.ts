@@ -16,11 +16,14 @@ import {
   keyRetryAfterMs,
   setKeyEntitlement,
   updateKeyUsage,
+  rotationWeight,
   type ProxyState,
   type ErrorType,
+  type KeyUsageMetrics,
 } from '../src/proxy-logic.js';
 import { parseOpencodeUsage } from '../src/providers/opencode-go.js';
 import { parseCommandcodeUsage } from '../src/providers/commandcode.js';
+import { effectiveMonthlyPercent } from '../src/usage-client.js';
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -828,8 +831,8 @@ describe('updateKeyUsage + weighted selection', () => {
     const state = makeState();
     // alpha: 30% of the month used, beta: 70%; gamma: no usage data
     updateKeyUsage(state, new Map([
-      ['alpha', { usedPercent: 30, exhausted: false }],
-      ['beta', { usedPercent: 70, exhausted: false }],
+      ['alpha', { usedPercent: 30, effectivePercent: 30, exhausted: false }],
+      ['beta', { usedPercent: 70, effectivePercent: 70, exhausted: false }],
     ]));
 
     const counts: Record<string, number> = { alpha: 0, beta: 0, gamma: 0 };
@@ -847,8 +850,8 @@ describe('updateKeyUsage + weighted selection', () => {
       [{ label: 'x', key: 'sk-x' }, { label: 'y', key: 'sk-y' }],
     );
     updateKeyUsage(state, new Map([
-      ['x', { usedPercent: 30, exhausted: false }],
-      ['y', { usedPercent: 70, exhausted: false }],
+      ['x', { usedPercent: 30, effectivePercent: 30, exhausted: false }],
+      ['y', { usedPercent: 70, effectivePercent: 70, exhausted: false }],
     ]));
 
     const counts: Record<string, number> = { x: 0, y: 0 };
@@ -878,8 +881,8 @@ describe('updateKeyUsage + weighted selection', () => {
       [{ label: 'x', key: 'sk-x' }, { label: 'y', key: 'sk-y' }],
     );
     updateKeyUsage(state, new Map([
-      ['x', { usedPercent: 100, exhausted: true }],
-      ['y', { usedPercent: 100, exhausted: true }],
+      ['x', { usedPercent: 100, effectivePercent: 100, exhausted: true }],
+      ['y', { usedPercent: 100, effectivePercent: 100, exhausted: true }],
     ]));
     const counts: Record<string, number> = { x: 0, y: 0 };
     for (let i = 0; i < 10; i++) {
@@ -895,8 +898,8 @@ describe('updateKeyUsage + weighted selection', () => {
       [{ label: 'x', key: 'sk-x' }, { label: 'y', key: 'sk-y' }],
     );
     updateKeyUsage(state, new Map([
-      ['x', { usedPercent: 10, exhausted: false }],
-      ['y', { usedPercent: 90, exhausted: false }],
+      ['x', { usedPercent: 10, effectivePercent: 10, exhausted: false }],
+      ['y', { usedPercent: 90, effectivePercent: 90, exhausted: false }],
     ]));
     const first = selectKeyForRequest(state, 'a')!;
     completeRequest(state, 'a', true);
@@ -904,8 +907,8 @@ describe('updateKeyUsage + weighted selection', () => {
 
     // y frees up, x fills up — next pick flips
     updateKeyUsage(state, new Map([
-      ['x', { usedPercent: 95, exhausted: false }],
-      ['y', { usedPercent: 10, exhausted: false }],
+      ['x', { usedPercent: 95, effectivePercent: 95, exhausted: false }],
+      ['y', { usedPercent: 10, effectivePercent: 10, exhausted: false }],
     ]));
     const second = selectKeyForRequest(state, 'b')!;
     completeRequest(state, 'b', true);
@@ -917,8 +920,8 @@ describe('updateKeyUsage + weighted selection', () => {
       [{ label: 'x', key: 'sk-x' }, { label: 'y', key: 'sk-y' }],
     );
     updateKeyUsage(state, new Map([
-      ['x', { usedPercent: 100, exhausted: true }],
-      ['y', { usedPercent: 20, exhausted: false }],
+      ['x', { usedPercent: 100, effectivePercent: 100, exhausted: true }],
+      ['y', { usedPercent: 20, effectivePercent: 20, exhausted: false }],
     ]));
     for (let i = 0; i < 6; i++) {
       const key = selectKeyForRequest(state, `req-${i}`)!;
@@ -955,6 +958,114 @@ function countSelections(state: ProxyState, rounds: number): Record<string, numb
   return counts;
 }
 
+/** Metrics exactly as `maybeRefreshUsage` derives them from a usage payload. */
+function windowMetrics(
+  rolling: number,
+  weekly: number,
+  monthly: number,
+  exhausted = false,
+): KeyUsageMetrics {
+  return {
+    usedPercent: monthly,
+    effectivePercent: effectiveMonthlyPercent(rolling, weekly, monthly),
+    exhausted,
+  };
+}
+
+describe('rotation weight from the tightest quota window', () => {
+  function pool(labels: string[]): ProxyState {
+    return createProxyState(labels.map((label) => ({ label, key: `sk-${label}` })));
+  }
+
+  it('weighs monthly 10% / weekly 99% as 49.5% of the month, not 10%', () => {
+    const state = pool(['tight', 'roomy']);
+    updateKeyUsage(state, new Map([
+      ['tight', windowMetrics(0, 99, 10)],
+      ['roomy', windowMetrics(0, 10, 20)],
+    ]));
+
+    const tight = state.keys.find((k) => k.label === 'tight')!;
+    const roomy = state.keys.find((k) => k.label === 'roomy')!;
+    expect(tight.effectivePercent).toBeCloseTo(49.5, 10);
+    // Old rule (`100 - monthly`) gave tight 90 vs roomy 80.
+    expect(rotationWeight(tight)).toBeCloseTo(50.5, 10);
+    expect(rotationWeight(roomy)).toBe(80);
+
+    // Weights: tight 50.5, roomy 80. The old `100 - monthly` rule gave tight
+    // 90 against roomy 80, so the nearly-spent key won the majority; over 40
+    // picks the inversion is unambiguous.
+    const counts = countSelections(state, 40);
+    expect(counts.tight).toBeLessThan(counts.roomy);
+  });
+
+  it('keeps the monthly-only weight when no shorter window is tighter (28/2/0)', () => {
+    const windowed = pool(['x', 'y']);
+    updateKeyUsage(windowed, new Map([
+      ['x', windowMetrics(0, 2, 28)],
+      ['y', windowMetrics(0, 1, 20)],
+    ]));
+    const monthlyOnly = pool(['x', 'y']);
+    updateKeyUsage(monthlyOnly, new Map([
+      ['x', windowMetrics(0, 0, 28)],
+      ['y', windowMetrics(0, 0, 20)],
+    ]));
+
+    // max(28, 0.5 × 2, 0.2 × 0) = 28 → weight 72, exactly the old number.
+    const x = windowed.keys.find((k) => k.label === 'x')!;
+    expect(x.effectivePercent).toBe(28);
+    expect(rotationWeight(x)).toBe(72);
+    expect(countSelections(windowed, 20)).toEqual(countSelections(monthlyOnly, 20));
+  });
+
+  it('weighs 0 when a shorter window is at 100%, regardless of monthly room', () => {
+    const state = pool(['spent', 'roomy']);
+    updateKeyUsage(state, new Map([
+      ['spent', windowMetrics(0, 100, 10, true)],
+      ['roomy', windowMetrics(0, 0, 80)],
+    ]));
+
+    expect(state.keys.find((k) => k.label === 'spent')!.effectivePercent).toBe(50);
+    expect(rotationWeight(state.keys.find((k) => k.label === 'spent')!)).toBe(0);
+    expect(countSelections(state, 10)).toEqual({ spent: 0, roomy: 10 });
+  });
+
+  it('weighs an exhausted key 0 even when it has no monthly anchor', () => {
+    const state = pool(['exhausted', 'healthy']);
+    updateKeyUsage(state, new Map([
+      ['exhausted', { usedPercent: null, effectivePercent: null, exhausted: true }],
+      ['healthy', { usedPercent: 50, effectivePercent: 50, exhausted: false }],
+    ]));
+
+    const exhausted = state.keys.find((k) => k.label === 'exhausted')!;
+    expect(exhausted.effectivePercent).toBeNull();
+    // Null effective must not hide the spent window: the exhausted key weighs
+    // 0 and the healthy key takes every pick.
+    expect(rotationWeight(exhausted)).toBe(0);
+    expect(countSelections(state, 10)).toEqual({ exhausted: 0, healthy: 10 });
+  });
+
+  it('does not select an exhausted unanchored key when no candidate has usage data', () => {
+    const state = pool(['exhausted', 'unknown']);
+    updateKeyUsage(state, new Map([
+      ['exhausted', { usedPercent: null, effectivePercent: null, exhausted: true }],
+    ]));
+
+    // Both weights would be null without the exhausted check; Tier 1 must
+    // still skip the key whose window is spent.
+    expect(countSelections(state, 10)).toEqual({ exhausted: 0, unknown: 10 });
+  });
+
+  it('keeps the median fallback for a key without usage data', () => {
+    const state = pool(['known', 'unknown']);
+    updateKeyUsage(state, new Map([['known', windowMetrics(0, 0, 50)]]));
+
+    expect(state.keys.find((k) => k.label === 'unknown')!.effectivePercent).toBeNull();
+    expect(rotationWeight(state.keys.find((k) => k.label === 'unknown')!)).toBeNull();
+    // Known key weighs 50, so the unknown key takes the median known weight.
+    expect(countSelections(state, 10)).toEqual({ known: 5, unknown: 5 });
+  });
+});
+
 describe('weighted selection fed by the provider usage parsers', () => {
   it('rotates by the monthly parser outputs, not by other windows', () => {
     const opencode = parseOpencodeUsage(OPENCODE_NORMAL_BODY);
@@ -972,8 +1083,20 @@ describe('weighted selection fed by the provider usage parsers', () => {
       { label: 'cc', key: 'user_' + 'a'.repeat(40) },
     ]);
     updateKeyUsage(state, new Map([
-      ['oc', { usedPercent: opencode!.usedPercent, exhausted: opencode!.exhausted }],
-      ['cc', { usedPercent: commandcode!.usedPercent, exhausted: commandcode!.exhausted }],
+      ['oc', {
+        usedPercent: opencode!.usedPercent,
+        effectivePercent: effectiveMonthlyPercent(
+          opencode!.rollingPercent, opencode!.weeklyPercent, opencode!.monthlyPercent,
+        ),
+        exhausted: opencode!.exhausted,
+      }],
+      ['cc', {
+        usedPercent: commandcode!.usedPercent,
+        effectivePercent: effectiveMonthlyPercent(
+          commandcode!.rollingPercent, commandcode!.weeklyPercent, commandcode!.monthlyPercent,
+        ),
+        exhausted: commandcode!.exhausted,
+      }],
     ]));
 
     // Remaining monthly weights are 80 and 30 → 7.27/2.73 over 10 picks.
@@ -989,8 +1112,20 @@ describe('weighted selection fed by the provider usage parsers', () => {
       { label: 'spare', key: 'sk-spare' },
     ]);
     updateKeyUsage(state, new Map([
-      ['oc', { usedPercent: opencode.usedPercent, exhausted: opencode.exhausted }],
-      ['cc', { usedPercent: commandcode.usedPercent, exhausted: commandcode.exhausted }],
+      ['oc', {
+        usedPercent: opencode.usedPercent,
+        effectivePercent: effectiveMonthlyPercent(
+          opencode.rollingPercent, opencode.weeklyPercent, opencode.monthlyPercent,
+        ),
+        exhausted: opencode.exhausted,
+      }],
+      ['cc', {
+        usedPercent: commandcode.usedPercent,
+        effectivePercent: effectiveMonthlyPercent(
+          commandcode.rollingPercent, commandcode.weeklyPercent, commandcode.monthlyPercent,
+        ),
+        exhausted: commandcode.exhausted,
+      }],
     ]));
 
     // Remaining weights: oc 80, cc 30 → median 80 for the key with no data.
@@ -1008,8 +1143,20 @@ describe('weighted selection fed by the provider usage parsers', () => {
       { label: 'oc', key: 'oc_sk_' + 'b'.repeat(40) },
     ]);
     updateKeyUsage(state, new Map([
-      ['spent', { usedPercent: spent.usedPercent, exhausted: spent.exhausted }],
-      ['oc', { usedPercent: opencode.usedPercent, exhausted: opencode.exhausted }],
+      ['spent', {
+        usedPercent: spent.usedPercent,
+        effectivePercent: effectiveMonthlyPercent(
+          spent.rollingPercent, spent.weeklyPercent, spent.monthlyPercent,
+        ),
+        exhausted: spent.exhausted,
+      }],
+      ['oc', {
+        usedPercent: opencode.usedPercent,
+        effectivePercent: effectiveMonthlyPercent(
+          opencode.rollingPercent, opencode.weeklyPercent, opencode.monthlyPercent,
+        ),
+        exhausted: opencode.exhausted,
+      }],
     ]));
 
     const counts = countSelections(state, 10);
@@ -1042,7 +1189,7 @@ describe('weighted selection with exhausted keys and missing usage data', () => 
   it('never routes to an exhausted key beside a key without usage data (2-key pool)', () => {
     const state = pool(['exh', 'new']);
     updateKeyUsage(state, new Map([
-      ['exh', { usedPercent: 50, exhausted: true }],
+      ['exh', { usedPercent: 50, effectivePercent: 50, exhausted: true }],
     ]));
 
     expect(countSelections(state, 10)).toEqual({ exh: 0, new: 10 });
@@ -1051,8 +1198,8 @@ describe('weighted selection with exhausted keys and missing usage data', () => 
   it('never routes to two exhausted keys beside a key without usage data (3-key pool)', () => {
     const state = pool(['exh1', 'exh2', 'new']);
     updateKeyUsage(state, new Map([
-      ['exh1', { usedPercent: 90, exhausted: true }],
-      ['exh2', { usedPercent: 10, exhausted: true }],
+      ['exh1', { usedPercent: 90, effectivePercent: 90, exhausted: true }],
+      ['exh2', { usedPercent: 10, effectivePercent: 10, exhausted: true }],
     ]));
 
     expect(countSelections(state, 10)).toEqual({ exh1: 0, exh2: 0, new: 10 });
@@ -1061,9 +1208,9 @@ describe('weighted selection with exhausted keys and missing usage data', () => 
   it('does not let exhausted zeros drag the neutral weight to zero', () => {
     const state = pool(['exh1', 'exh2', 'near', 'new']);
     updateKeyUsage(state, new Map([
-      ['exh1', { usedPercent: 100, exhausted: true }],
-      ['exh2', { usedPercent: 100, exhausted: true }],
-      ['near', { usedPercent: 95, exhausted: false }],
+      ['exh1', { usedPercent: 100, effectivePercent: 100, exhausted: true }],
+      ['exh2', { usedPercent: 100, effectivePercent: 100, exhausted: true }],
+      ['near', { usedPercent: 95, effectivePercent: 95, exhausted: false }],
     ]));
 
     // Without the fix the median of [0, 0, 5] was 0 and 'new' starved.
@@ -1073,8 +1220,8 @@ describe('weighted selection with exhausted keys and missing usage data', () => 
   it('clears residual weight when a key becomes exhausted', () => {
     const state = pool(['x', 'y']);
     updateKeyUsage(state, new Map([
-      ['x', { usedPercent: 50, exhausted: false }],
-      ['y', { usedPercent: 50, exhausted: false }],
+      ['x', { usedPercent: 50, effectivePercent: 50, exhausted: false }],
+      ['y', { usedPercent: 50, effectivePercent: 50, exhausted: false }],
     ]));
 
     // Equal weights: x wins the first pick, leaving y with +50 momentum.
@@ -1085,7 +1232,7 @@ describe('weighted selection with exhausted keys and missing usage data', () => 
     expect(y.currentWeight).toBeGreaterThan(0);
 
     updateKeyUsage(state, new Map([
-      ['y', { usedPercent: 50, exhausted: true }],
+      ['y', { usedPercent: 50, effectivePercent: 50, exhausted: true }],
     ]));
     expect(countSelections(state, 10)).toEqual({ x: 10, y: 0 });
     expect(y.currentWeight).toBe(0);
@@ -1094,8 +1241,8 @@ describe('weighted selection with exhausted keys and missing usage data', () => 
   it('defers an exhausted key to Tier 2 when the healthy key is booked', () => {
     const state = pool(['H', 'E']);
     updateKeyUsage(state, new Map([
-      ['H', { usedPercent: 10, exhausted: false }],
-      ['E', { usedPercent: 50, exhausted: true }],
+      ['H', { usedPercent: 10, effectivePercent: 10, exhausted: false }],
+      ['E', { usedPercent: 50, effectivePercent: 50, exhausted: true }],
     ]));
 
     expect(selectKeyForRequest(state, 'r1')?.label).toBe('H');
@@ -1107,9 +1254,9 @@ describe('weighted selection with exhausted keys and missing usage data', () => 
   it('failover does not hand out an exhausted key when a booked key is healthy', () => {
     const state = pool(['H', 'G', 'E']);
     updateKeyUsage(state, new Map([
-      ['H', { usedPercent: 10, exhausted: false }],
-      ['G', { usedPercent: 10, exhausted: false }],
-      ['E', { usedPercent: 50, exhausted: true }],
+      ['H', { usedPercent: 10, effectivePercent: 10, exhausted: false }],
+      ['G', { usedPercent: 10, effectivePercent: 10, exhausted: false }],
+      ['E', { usedPercent: 50, effectivePercent: 50, exhausted: true }],
     ]));
 
     expect(selectKeyForRequest(state, 'r1')?.label).toBe('H');
@@ -1120,9 +1267,9 @@ describe('weighted selection with exhausted keys and missing usage data', () => 
 
   it('keeps the previous monthly percent when a snapshot has no monthly metric', () => {
     const state = pool(['x']);
-    updateKeyUsage(state, new Map([['x', { usedPercent: 80, exhausted: false }]]));
+    updateKeyUsage(state, new Map([['x', { usedPercent: 80, effectivePercent: 80, exhausted: false }]]));
 
-    updateKeyUsage(state, new Map([['x', { usedPercent: null, exhausted: true }]]));
+    updateKeyUsage(state, new Map([['x', { usedPercent: null, effectivePercent: null, exhausted: true }]]));
 
     const x = state.keys[0];
     expect(x.usagePercent).toBe(80);

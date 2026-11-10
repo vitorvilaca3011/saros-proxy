@@ -14,7 +14,7 @@
  */
 
 import { logger } from './logger.js';
-import { USAGE_FETCH_TIMEOUT_MS, USAGE_REFRESH_TTL_MS } from './constants.js';
+import { QUOTA_WINDOW_MONTHLY_SHARE, USAGE_FETCH_TIMEOUT_MS, USAGE_REFRESH_TTL_MS } from './constants.js';
 import {
   updateKeyUsage,
   setKeyEntitlement,
@@ -37,6 +37,9 @@ import type { KeyProvider, ProviderId } from './providers/index.js';
  * This normalization is the contract mixed-provider pools rely on:
  * `pickWeighted` (`proxy-logic.ts`) compares the numbers from every provider
  * directly, so "30%" must always mean "30% of that provider's monthly budget".
+ * Rotation actually weighs `effectiveMonthlyPercent` — the same scale after
+ * converting the tightest window (5h = 20%, weekly = 50% of the month) — so a
+ * key near a shorter cap loses weight before the upstream answers 429.
  * Percent is the most saros can honestly compare — opencode-go's
  * `/zen/go/v1/usage` publishes only percentages
  * (`{"usage":{"rolling":{"percent":1},"weekly":{"percent":15},
@@ -84,6 +87,31 @@ export interface UsageFetchResult {
  */
 export function isEntitlementError(status: number, body: string): boolean {
   return status === 403 && /subscription|entitlement|upgrade_required/i.test(body);
+}
+
+/**
+ * Consumption of the monthly budget implied by the *tightest* quota window.
+ *
+ * Each window's percent is relative to that window's own allowance, and the
+ * windows are sized at 20% (5h), 50% (weekly) and 100% (monthly) of the
+ * monthly limit (`QUOTA_WINDOW_MONTHLY_SHARE`). Scaling every percent to the
+ * monthly scale and taking the maximum makes the windows comparable: monthly
+ * 10% with weekly 99% is 49.5% of the month gone, not 10%, because the
+ * weekly window has only 1% of its own allowance left.
+ *
+ * Inputs are already clamped to 0-100 by the provider parsers, so the result
+ * is a 0-100 percent on the monthly scale.
+ */
+export function effectiveMonthlyPercent(
+  rollingPercent: number,
+  weeklyPercent: number,
+  monthlyPercent: number,
+): number {
+  return Math.max(
+    rollingPercent * QUOTA_WINDOW_MONTHLY_SHARE.rolling,
+    weeklyPercent * QUOTA_WINDOW_MONTHLY_SHARE.weekly,
+    monthlyPercent * QUOTA_WINDOW_MONTHLY_SHARE.monthly,
+  );
 }
 
 /**
@@ -175,9 +203,20 @@ export function maybeRefreshUsage(state: ProxyState, config: ProxyConfig): void 
       for (const [label, result] of entries) {
         if (!result) continue;
         if (result.usage) {
+          const usage = result.usage;
           metrics.set(label, {
-            usedPercent: result.usage.usedPercent,
-            exhausted: result.usage.exhausted,
+            usedPercent: usage.usedPercent,
+            // A partial payload still carries rolling/weekly data, so derive
+            // the effective percent from the windows that came (monthly is 0
+            // when absent). `updateKeyUsage` applies it only to a key that
+            // already has a monthly anchor (max with the previous value), so a
+            // missing monthly can never anchor a new key or increase slack.
+            effectivePercent: effectiveMonthlyPercent(
+              usage.rollingPercent,
+              usage.weeklyPercent,
+              usage.monthlyPercent,
+            ),
+            exhausted: usage.exhausted,
           });
           // A key that answers the usage API is entitled again.
           setKeyEntitlement(state, label, true);

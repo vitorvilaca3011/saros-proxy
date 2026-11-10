@@ -4,12 +4,19 @@
  */
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import {
+  effectiveMonthlyPercent,
   fetchKeyUsage,
   maybeRefreshUsage,
   resetUsageRefreshState,
 } from '../src/usage-client.js';
 import { commandcodeProvider, opencodeGoProvider } from '../src/providers/index.js';
-import { createProxyState, type ProxyState } from '../src/proxy-logic.js';
+import {
+  completeRequest,
+  createProxyState,
+  rotationWeight,
+  selectKeyForRequest,
+  type ProxyState,
+} from '../src/proxy-logic.js';
 import type { ProxyConfig } from '../src/config.js';
 
 const VALID_BODY = JSON.stringify({
@@ -37,6 +44,19 @@ function settleMacrotasks(): Promise<void> {
   return promise;
 }
 
+/** Deterministic weighted-selection counts over `rounds` requests. */
+function countSelections(state: ProxyState, rounds: number): Record<string, number> {
+  const counts: Record<string, number> = {};
+  for (const key of state.keys) counts[key.label] = 0;
+  for (let i = 0; i < rounds; i++) {
+    const picked = selectKeyForRequest(state, `req-${i}`);
+    expect(picked).not.toBeNull();
+    completeRequest(state, `req-${i}`, true);
+    counts[picked!.label]++;
+  }
+  return counts;
+}
+
 function makeConfig(): ProxyConfig {
   return {
     port: 3000,
@@ -49,6 +69,18 @@ function makeConfig(): ProxyConfig {
     allowedOrigins: [],
   };
 }
+
+describe('effectiveMonthlyPercent', () => {
+  it('takes the tightest window after scaling it to the monthly allowance', () => {
+    // The bug: monthly says 10%, but the weekly window (50% of the month) is
+    // at 99% of its own allowance → 49.5% of the month is effectively gone.
+    expect(effectiveMonthlyPercent(0, 99, 10)).toBe(49.5);
+    // Monthly dominates when the shorter windows are quiet.
+    expect(effectiveMonthlyPercent(0, 2, 28)).toBe(28);
+    // The 5-hour window (20% of the month) at 100% is 20% of the month.
+    expect(effectiveMonthlyPercent(100, 0, 10)).toBe(20);
+  });
+});
 
 describe('fetchKeyUsage', () => {
   afterEach(() => vi.restoreAllMocks());
@@ -207,6 +239,45 @@ describe('maybeRefreshUsage', () => {
     expect(state.keys.every((k) => k.exhausted === false)).toBe(true);
   });
 
+  it('weighs the tightest window from real payloads and rotates away from the tight key', async () => {
+    // 'a': monthly 10% but weekly 99% (1% of the weekly allowance left).
+    // 'b': monthly 20%, weekly 10% (the healthy one).
+    vi.spyOn(globalThis, 'fetch').mockImplementation(async (_url, init) => {
+      const auth = (init as RequestInit).headers as Record<string, string>;
+      const isA = auth.Authorization.includes('sk-a');
+      return new Response(
+        JSON.stringify({
+          usage: {
+            rolling: { percent: 0 },
+            weekly: { percent: isA ? 99 : 10 },
+            monthly: { percent: isA ? 10 : 20 },
+          },
+        }),
+        { status: 200 },
+      );
+    });
+    const state = makeState();
+
+    maybeRefreshUsage(state, makeConfig());
+    await settleMacrotasks();
+    await settleMacrotasks();
+
+    const a = state.keys.find((k) => k.label === 'a')!;
+    const b = state.keys.find((k) => k.label === 'b')!;
+    // Display keeps the monthly number; only the rotation weight changes.
+    expect(a.usagePercent).toBe(10);
+    expect(a.effectivePercent).toBeCloseTo(49.5, 10);
+    expect(b.effectivePercent).toBe(20);
+
+    const counts: Record<string, number> = { a: 0, b: 0 };
+    for (let i = 0; i < 40; i++) {
+      const key = selectKeyForRequest(state, `req-${i}`)!;
+      completeRequest(state, `req-${i}`, true);
+      counts[key.label]++;
+    }
+    expect(counts.a).toBeLessThan(counts.b);
+  });
+
   it('keeps the previous usage when a 200 carries no numeric window', async () => {
     const state = makeState();
     const config = makeConfig();
@@ -272,6 +343,146 @@ describe('maybeRefreshUsage', () => {
     const a = state.keys.find((k) => k.label === 'a')!;
     expect(a.usagePercent).toBe(70);
     expect(a.exhausted).toBe(false);
+  });
+
+  it('never increases slack from a partial payload on an anchored key', async () => {
+    const state = makeState();
+    const config = makeConfig();
+
+    // Seed: 'a' anchored at 10, 'b' anchored at 80.
+    vi.spyOn(globalThis, 'fetch').mockImplementation(async (_url, init) => {
+      const auth = (init as RequestInit).headers as Record<string, string>;
+      const isA = auth.Authorization.includes('sk-a');
+      return new Response(
+        JSON.stringify({
+          usage: { rolling: {}, weekly: {}, monthly: { percent: isA ? 10 : 80 } },
+        }),
+        { status: 200 },
+      );
+    });
+    maybeRefreshUsage(state, config);
+    await settleMacrotasks();
+    await settleMacrotasks();
+
+    const a = state.keys.find((k) => k.label === 'a')!;
+    const b = state.keys.find((k) => k.label === 'b')!;
+    expect(a.effectivePercent).toBe(10);
+    expect(b.effectivePercent).toBe(80);
+
+    // Partial payload: 'a' weekly 99 implies 49.5% of the month; 'b' weekly 0
+    // implies 0. No monthly window, so the previous values are the floor.
+    vi.spyOn(globalThis, 'fetch').mockImplementation(async (_url, init) => {
+      const auth = (init as RequestInit).headers as Record<string, string>;
+      const isA = auth.Authorization.includes('sk-a');
+      return new Response(
+        JSON.stringify({
+          usage: { rolling: {}, weekly: { percent: isA ? 99 : 0 }, monthly: {} },
+        }),
+        { status: 200 },
+      );
+    });
+    resetUsageRefreshState();
+    maybeRefreshUsage(state, config);
+    await settleMacrotasks();
+    await settleMacrotasks();
+
+    // (c) anchored at 10 + weekly 99 → 49.5 / weight 50.5.
+    expect(a.usagePercent).toBe(10);
+    expect(a.effectivePercent).toBeCloseTo(49.5, 10);
+    expect(rotationWeight(a)).toBeCloseTo(50.5, 10);
+    // (d) anchored at 80 + weekly 0 → stays 80 / weight 20.
+    expect(b.usagePercent).toBe(80);
+    expect(b.effectivePercent).toBe(80);
+    expect(rotationWeight(b)).toBe(20);
+  });
+
+  it('keeps a new key unanchored when a partial payload has no monthly window', async () => {
+    const state = createProxyState([
+      { label: 'known', key: 'sk-known' },
+      { label: 'new', key: 'sk-new' },
+    ]);
+    const config = makeConfig();
+
+    vi.spyOn(globalThis, 'fetch').mockImplementation(async (_url, init) => {
+      const auth = (init as RequestInit).headers as Record<string, string>;
+      const isKnown = auth.Authorization.includes('sk-known');
+      return new Response(
+        JSON.stringify(
+          isKnown
+            ? { usage: { rolling: {}, weekly: {}, monthly: { percent: 50 } } }
+            : { usage: { rolling: { percent: 0 }, weekly: { percent: 0 }, monthly: {} } },
+        ),
+        { status: 200 },
+      );
+    });
+    maybeRefreshUsage(state, config);
+    await settleMacrotasks();
+    await settleMacrotasks();
+
+    const known = state.keys.find((k) => k.label === 'known')!;
+    const fresh = state.keys.find((k) => k.label === 'new')!;
+    expect(known.effectivePercent).toBe(50);
+    // (a) A partial payload alone must not anchor the key: 0% of the short
+    // windows is not enough to claim the monthly budget is untouched.
+    expect(fresh.effectivePercent).toBeNull();
+    expect(rotationWeight(fresh)).toBeNull();
+    // Median of the known weight (50) — not the 100 maximum-weight fallback.
+    expect(countSelections(state, 10)).toEqual({ known: 5, new: 5 });
+  });
+
+  it('keeps a new key unanchored from a tight partial window, but exhausted still weighs 0', async () => {
+    const state = createProxyState([
+      { label: 'known', key: 'sk-known' },
+      { label: 'new', key: 'sk-new' },
+    ]);
+    const config = makeConfig();
+
+    // (b) First refresh: weekly 99, no monthly → partial, still unanchored.
+    vi.spyOn(globalThis, 'fetch').mockImplementation(async (_url, init) => {
+      const auth = (init as RequestInit).headers as Record<string, string>;
+      const isKnown = auth.Authorization.includes('sk-known');
+      return new Response(
+        JSON.stringify(
+          isKnown
+            ? { usage: { rolling: {}, weekly: {}, monthly: { percent: 50 } } }
+            : { usage: { rolling: {}, weekly: { percent: 99 }, monthly: {} } },
+        ),
+        { status: 200 },
+      );
+    });
+    maybeRefreshUsage(state, config);
+    await settleMacrotasks();
+    await settleMacrotasks();
+
+    const known = state.keys.find((k) => k.label === 'known')!;
+    const fresh = state.keys.find((k) => k.label === 'new')!;
+    expect(fresh.effectivePercent).toBeNull();
+    expect(rotationWeight(fresh)).toBeNull();
+    // The tight partial window does not anchor the key; it keeps the median.
+    expect(countSelections(state, 10)).toEqual({ known: 5, new: 5 });
+
+    // Second refresh: weekly 100 → exhausted, even without a monthly anchor.
+    vi.spyOn(globalThis, 'fetch').mockImplementation(async (_url, init) => {
+      const auth = (init as RequestInit).headers as Record<string, string>;
+      const isKnown = auth.Authorization.includes('sk-known');
+      return new Response(
+        JSON.stringify(
+          isKnown
+            ? { usage: { rolling: {}, weekly: {}, monthly: { percent: 50 } } }
+            : { usage: { rolling: {}, weekly: { percent: 100 }, monthly: {} } },
+        ),
+        { status: 200 },
+      );
+    });
+    resetUsageRefreshState();
+    maybeRefreshUsage(state, config);
+    await settleMacrotasks();
+    await settleMacrotasks();
+
+    expect(fresh.effectivePercent).toBeNull();
+    expect(fresh.exhausted).toBe(true);
+    expect(rotationWeight(fresh)).toBe(0);
+    expect(countSelections(state, 10)).toEqual({ known: 10, new: 0 });
   });
 
   it('propagates a spent window into state even when the month has room', async () => {
