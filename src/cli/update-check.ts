@@ -7,23 +7,82 @@ import { getVersion } from '../version.js';
 const REGISTRY_URL = 'https://registry.npmjs.org/saros-proxy/latest';
 const REGISTRY_TIMEOUT_MS = 5000;
 
+/**
+ * A registry version must be plain semver before it is interpolated into an
+ * `npm install` argument (on Windows that runs through a shell).
+ */
+const VERSION_PATTERN = /^\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?$/;
+
 /** Backwards-compatible alias for the shared cached version read. */
 export { getVersion as getCurrentVersion };
+
+export function isValidVersion(version: string): boolean {
+  return VERSION_PATTERN.test(version);
+}
+
+interface ParsedVersion {
+  core: number[];
+  /** Dot-separated prerelease identifiers; null for a stable release. */
+  prerelease: string[] | null;
+}
+
+/**
+ * Split semver into numeric core and prerelease. Build metadata (`+…`) is
+ * ignored: it does not participate in precedence.
+ */
+function parseVersion(version: string): ParsedVersion {
+  const withoutBuild = version.trim().replace(/^v/, '').split('+')[0];
+  const dash = withoutBuild.indexOf('-');
+  const core = (dash === -1 ? withoutBuild : withoutBuild.slice(0, dash))
+    .split('.')
+    .map(Number);
+  return {
+    core,
+    prerelease: dash === -1 ? null : withoutBuild.slice(dash + 1).split('.'),
+  };
+}
 
 /**
  * Compare two semver-like version strings. Returns:
  *   -1 if a < b
  *    0 if a == b
  *    1 if a > b
+ *
+ * A prerelease sorts below its stable release (`1.1.3-rc.1 < 1.1.3`), as
+ * `saros-proxy update` uses this to decide whether to install.
  */
 export function compareVersions(a: string, b: string): number {
-  const aParts = a.split('.').map(Number);
-  const bParts = b.split('.').map(Number);
-  for (let i = 0; i < Math.max(aParts.length, bParts.length); i++) {
-    const aVal = aParts[i] ?? 0;
-    const bVal = bParts[i] ?? 0;
+  const left = parseVersion(a);
+  const right = parseVersion(b);
+  const coreLength = Math.max(left.core.length, right.core.length);
+  for (let i = 0; i < coreLength; i++) {
+    const aVal = left.core[i] ?? 0;
+    const bVal = right.core[i] ?? 0;
     if (aVal < bVal) return -1;
     if (aVal > bVal) return 1;
+  }
+
+  if (left.prerelease === null && right.prerelease === null) return 0;
+  if (left.prerelease === null) return 1;
+  if (right.prerelease === null) return -1;
+
+  const prereleaseLength = Math.max(left.prerelease.length, right.prerelease.length);
+  for (let i = 0; i < prereleaseLength; i++) {
+    const aId = left.prerelease[i];
+    const bId = right.prerelease[i];
+    if (aId === undefined) return -1;
+    if (bId === undefined) return 1;
+    const aNumeric = /^\d+$/.test(aId);
+    const bNumeric = /^\d+$/.test(bId);
+    if (aNumeric && bNumeric) {
+      const diff = Number(aId) - Number(bId);
+      if (diff !== 0) return diff < 0 ? -1 : 1;
+    } else if (aNumeric !== bNumeric) {
+      // Numeric identifiers have lower precedence than alphanumeric ones.
+      return aNumeric ? -1 : 1;
+    } else if (aId !== bId) {
+      return aId < bId ? -1 : 1;
+    }
   }
   return 0;
 }
@@ -47,6 +106,9 @@ export async function fetchLatestVersion(
   const data = (await res.json()) as { version?: unknown };
   if (typeof data.version !== 'string' || data.version.length === 0) {
     throw new Error('registry response has no version field');
+  }
+  if (!isValidVersion(data.version)) {
+    throw new Error(`registry returned an invalid version: ${data.version}`);
   }
   return data.version;
 }

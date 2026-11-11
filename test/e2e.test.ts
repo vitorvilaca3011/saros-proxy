@@ -14,6 +14,7 @@ import type { AddressInfo } from 'node:net';
 
 import { createProxyApp } from '../src/proxy.js';
 import { logger } from '../src/logger.js';
+import { getVersion } from '../src/version.js';
 import { getKeyTokenUsage, resetTokenUsage } from '../src/token-usage.js';
 import { validateConfig } from '../src/config.js';
 import type { ProxyConfig } from '../src/config.js';
@@ -348,6 +349,7 @@ describe('1. Health & Status', () => {
     const body = await res.json() as Record<string, unknown>;
 
     expect(body.status).toBe('ok');
+    expect(body.version).toBe(getVersion());
     expect(body.keyCount).toBe(2);
     expect(body.enabledCount).toBe(2);
     expect(body.disabledCount).toBe(0);

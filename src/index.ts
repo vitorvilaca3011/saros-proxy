@@ -12,8 +12,7 @@
 
 import { serve } from '@hono/node-server';
 import type { ServerType } from '@hono/node-server';
-import { dirname, resolve } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { dirname } from 'node:path';
 import { loadConfig, resolveConfigPath, type ProxyConfig } from './config.js';
 import { createProxyApp } from './proxy.js';
 import { flushModelStats } from './model-stats.js';
@@ -44,7 +43,6 @@ import { runKeysCommand } from './cli/keys.js';
 import { buildBootLog, prepareBootPassphrase } from './secrets/boot.js';
 import chalk from 'chalk';
 import { printHelp } from './cli/help.js';
-import { readFileSync } from 'node:fs';
 
 // ---------------------------------------------------------------------------
 // Help text (re-exported for testing)
@@ -159,9 +157,7 @@ if (subcommand === 'start') {
     process.exit(0);
   }
 } else if (subcommand === '--version' || subcommand === '-v') {
-  const packageRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..');
-  const pkg = JSON.parse(readFileSync(resolve(packageRoot, 'package.json'), 'utf-8')) as { version: string };
-  console.log(pkg.version);
+  console.log(getVersion());
   process.exit(0);
 } else if (subcommand === 'help' || subcommand === '--help' || subcommand === '-h') {
   printHelp();

@@ -12,17 +12,18 @@
  */
 
 import { execFileSync } from 'node:child_process';
-import { readFileSync, realpathSync } from 'node:fs';
+import { lstatSync, readFileSync, realpathSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { fileURLToPath } from 'node:url';
 import chalk from 'chalk';
 import { confirm, isCancel } from './ui.js';
 import { getSarosDir } from '../config.js';
-import { getVersion } from './overview.js';
+import { getVersion } from '../version.js';
 import {
   compareVersions,
   fetchLatestVersion as fetchRegistryLatestVersion,
+  isValidVersion,
 } from './update-check.js';
 import {
   daemonStart,
@@ -44,7 +45,26 @@ export interface UpdateArgs {
   check: boolean;
   yes: boolean;
   force: boolean;
+  /** Port override for stop/start/health (`--port`). */
+  port?: number;
+  /** Config path override for stop/start/health (`--config`). */
+  config?: string;
   error?: string;
+}
+
+/** Where and how to stop/start the proxy for this update. */
+export interface ServiceOptions {
+  port?: number;
+  configPath?: string;
+  /** Entry point of the package that must serve after the update. */
+  entryPoint?: string;
+}
+
+export interface DaemonStateSnapshot {
+  running: boolean;
+  port: number;
+  pid?: string | null;
+  health?: Record<string, unknown>;
 }
 
 export interface UpdateDependencies {
@@ -57,9 +77,9 @@ export interface UpdateDependencies {
   readInstalledVersion: (packageRoot: string) => string | null;
   isTTY: boolean;
   confirm: (message: string) => Promise<boolean>;
-  getDaemonState: () => Promise<{ running: boolean; port: number }>;
-  daemonStop: () => Promise<boolean>;
-  daemonStart: () => Promise<void>;
+  getDaemonState: () => Promise<DaemonStateSnapshot>;
+  daemonStop: (options: ServiceOptions) => Promise<boolean>;
+  daemonStart: (options: ServiceOptions) => Promise<void>;
   systemdActive: () => boolean;
   systemdStop: () => void;
   systemdStart: () => void;
@@ -85,16 +105,32 @@ export type RestartMode = 'systemd' | 'daemon' | 'none';
 // Pure decisions
 // ---------------------------------------------------------------------------
 
-/** Parse `update` arguments. The first unknown option is reported. */
+/** Parse `update` arguments. The first invalid option is reported. */
 export function parseUpdateArgs(argv: readonly string[]): UpdateArgs {
   const args: UpdateArgs = { check: false, yes: false, force: false };
-  for (const arg of argv) {
+  for (let i = 0; i < argv.length; i++) {
+    const arg = argv[i];
     if (arg === '--check') {
       args.check = true;
     } else if (arg === '--yes') {
       args.yes = true;
     } else if (arg === '--force') {
       args.force = true;
+    } else if (arg === '--port') {
+      const value = argv[++i];
+      const port = Number(value);
+      if (value === undefined || !Number.isInteger(port) || port < 1 || port > 65535) {
+        args.error = `--port requires a port between 1 and 65535 (got: ${value ?? 'nothing'})`;
+        return args;
+      }
+      args.port = port;
+    } else if (arg === '--config') {
+      const value = argv[++i];
+      if (value === undefined || value === '') {
+        args.error = '--config requires a path';
+        return args;
+      }
+      args.config = value;
     } else {
       args.error = `Unknown option: ${arg}`;
       return args;
@@ -123,8 +159,18 @@ export function isGlobalInstall(
   platform: NodeJS.Platform = process.platform,
 ): boolean {
   if (packageRoot === '' || npmGlobalRoot === '') return false;
+  const expectedPath = join(npmGlobalRoot, 'saros-proxy');
+  // `npm link` leaves a symlink in the global prefix. Canonicalizing both
+  // sides would make the checkout look like the global install, and the
+  // update would replace the link (and the checkout) behind the user's back.
+  try {
+    if (lstatSync(expectedPath).isSymbolicLink()) return false;
+  } catch {
+    // Missing path: fall through to the canonical comparison (tests and a
+    // first install both reach this).
+  }
   const actual = canonicalPath(packageRoot);
-  const expected = canonicalPath(join(npmGlobalRoot, 'saros-proxy'));
+  const expected = canonicalPath(expectedPath);
   return platform === 'win32'
     ? actual.toLowerCase() === expected.toLowerCase()
     : actual === expected;
@@ -150,7 +196,7 @@ export function readPackageVersion(packageRoot: string): string | null {
  */
 export async function waitForUpdatedProxy(
   probe: () => Promise<{ ok: boolean; body?: Record<string, unknown> }>,
-  expectedVersion: string,
+  expectedVersion: string | null,
   attempts: number,
   delayMs: number,
   sleep: (ms: number) => Promise<void>,
@@ -158,7 +204,9 @@ export async function waitForUpdatedProxy(
   let result: { ok: boolean; body?: Record<string, unknown> } = { ok: false };
   for (let attempt = 0; attempt < attempts; attempt++) {
     result = await probe();
-    if (result.ok && result.body?.version === expectedVersion) return result;
+    const versionMatches =
+      expectedVersion === null || result.body?.version === expectedVersion;
+    if (result.ok && versionMatches) return result;
     if (attempt < attempts - 1) await sleep(delayMs);
   }
   return result;
@@ -210,10 +258,20 @@ function defaultDaemonLogPath(): string {
   }
 }
 
+/** Only the options the user actually supplied, so defaults stay defaults. */
+function definedServiceOptions(args: UpdateArgs): ServiceOptions {
+  const options: ServiceOptions = {};
+  if (args.port !== undefined) options.port = args.port;
+  if (args.config !== undefined) options.configPath = args.config;
+  return options;
+}
+
 function resolveDependencies(
   overrides: Partial<UpdateDependencies>,
+  args: UpdateArgs,
 ): UpdateDependencies {
   const platform = overrides.platform ?? process.platform;
+  const serviceOptions = definedServiceOptions(args);
   return {
     currentVersion: overrides.currentVersion ?? getVersion(),
     fetchLatestVersion:
@@ -226,14 +284,29 @@ function resolveDependencies(
     getDaemonState:
       overrides.getDaemonState ??
       (async () => {
-        const state = await readDaemonState();
-        return { running: state.running, port: state.port };
+        const state = await readDaemonState(serviceOptions);
+        return {
+          running: state.running,
+          port: state.port,
+          pid: state.pid,
+          health: state.health,
+        };
       }),
     daemonStop:
-      overrides.daemonStop ?? (() => daemonStop({ exitOnComplete: false })),
+      overrides.daemonStop ??
+      ((options) =>
+        daemonStop({
+          exitOnComplete: false,
+          ...(options.port === undefined ? {} : { port: options.port }),
+          ...(options.configPath === undefined ? {} : { configPath: options.configPath }),
+        })),
     daemonStart:
       overrides.daemonStart ??
-      (() => daemonStart(undefined, undefined, { exitOnComplete: false })),
+      ((options) =>
+        daemonStart(options.port, options.configPath, {
+          exitOnComplete: false,
+          entryPoint: options.entryPoint,
+        })),
     systemdActive: overrides.systemdActive ?? isSystemdUnitActive,
     systemdStop: overrides.systemdStop ?? stopSystemdUnit,
     systemdStart: overrides.systemdStart ?? startSystemdUnit,
@@ -257,20 +330,22 @@ function errorMessage(err: unknown): string {
 async function startService(
   mode: RestartMode,
   deps: UpdateDependencies,
+  options: ServiceOptions,
 ): Promise<void> {
   if (mode === 'systemd') deps.systemdStart();
-  else if (mode === 'daemon') await deps.daemonStart();
+  else if (mode === 'daemon') await deps.daemonStart(options);
 }
 
 async function stopService(
   mode: RestartMode,
   deps: UpdateDependencies,
+  options: ServiceOptions,
 ): Promise<boolean> {
   if (mode === 'systemd') {
     deps.systemdStop();
     return true;
   }
-  if (mode === 'daemon') return deps.daemonStop();
+  if (mode === 'daemon') return deps.daemonStop(options);
   return true;
 }
 
@@ -303,8 +378,9 @@ export async function runUpdateCommand(
     return 1;
   }
 
-  const deps = resolveDependencies(overrides);
+  const deps = resolveDependencies(overrides, args);
   const current = deps.currentVersion;
+  const serviceOptions = definedServiceOptions(args);
 
   let latest: string;
   try {
@@ -312,6 +388,13 @@ export async function runUpdateCommand(
   } catch (err) {
     console.error(
       chalk.red(`✗ Could not reach the npm registry: ${errorMessage(err)}`),
+    );
+    return 1;
+  }
+
+  if (!isValidVersion(latest)) {
+    console.error(
+      chalk.red(`✗ The npm registry returned an invalid version: ${latest}`),
     );
     return 1;
   }
@@ -324,8 +407,7 @@ export async function runUpdateCommand(
   }
 
   if (comparison === 0) {
-    console.log(chalk.green(`✓ Already on ${current}.`));
-    return 0;
+    return restartIfDaemonIsStale(deps, args, current, serviceOptions);
   }
 
   if (comparison > 0 && !args.force) {
@@ -386,11 +468,22 @@ export async function runUpdateCommand(
   }
 
   const before = await deps.getDaemonState();
+  if (pidWithoutHealth(before, args)) {
+    return refuseUnknownDaemonPort(before);
+  }
   const systemdActive = deps.platform === 'linux' && deps.systemdActive();
   const mode = chooseRestartMode(before.running, systemdActive);
+  const entryPoint =
+    globalRoot === ''
+      ? undefined
+      : join(globalRoot, 'saros-proxy', 'dist', 'index.js');
+  const restartOptions: ServiceOptions = {
+    ...serviceOptions,
+    ...(entryPoint === undefined ? {} : { entryPoint }),
+  };
 
   try {
-    if (!(await stopService(mode, deps))) {
+    if (!(await stopService(mode, deps, serviceOptions))) {
       console.error(
         chalk.red('✗ Could not stop the running proxy; aborting before install.'),
       );
@@ -411,20 +504,20 @@ export async function runUpdateCommand(
     console.error(
       chalk.red(`✗ npm install -g saros-proxy@${latest} failed: ${errorMessage(err)}`),
     );
-    await rollback(mode, deps, before.port, current);
+    await rollback(mode, deps, before.port, current, restartOptions, false);
     return 1;
   }
 
-  const installedVersion = deps.readInstalledVersion(
-    globalRoot === '' ? deps.packageRoot : join(globalRoot, 'saros-proxy'),
-  );
+  const installedRoot =
+    globalRoot === '' ? deps.packageRoot : join(globalRoot, 'saros-proxy');
+  const installedVersion = deps.readInstalledVersion(installedRoot);
   if (installedVersion !== latest) {
     console.error(
       chalk.red(
         `✗ The global package reports ${installedVersion ?? 'no version'}, expected ${latest}.`,
       ),
     );
-    await rollback(mode, deps, before.port, current);
+    await rollback(mode, deps, before.port, current, restartOptions, false);
     return 1;
   }
 
@@ -438,14 +531,12 @@ export async function runUpdateCommand(
   }
 
   try {
-    await startService(mode, deps);
+    await startService(mode, deps, restartOptions);
   } catch (err) {
     console.error(
       chalk.red(`✗ Updated to ${latest}, but the proxy failed to start: ${errorMessage(err)}`),
     );
-    console.error(
-      chalk.dim(`Check ${deps.daemonLogPath} and run \`saros-proxy status\`.`),
-    );
+    await rollback(mode, deps, before.port, current, restartOptions, false);
     return 1;
   }
 
@@ -463,9 +554,7 @@ export async function runUpdateCommand(
         `✗ saros-proxy ${latest} is installed, but the proxy on port ${before.port} ${healthFailureDetail(health)}.`,
       ),
     );
-    console.error(
-      chalk.dim(`Check ${deps.daemonLogPath} and run \`saros-proxy status\`.`),
-    );
+    await rollback(mode, deps, before.port, current, restartOptions, true);
     return 1;
   }
 
@@ -478,14 +567,121 @@ export async function runUpdateCommand(
 }
 
 /**
- * After a failed install the previous package is still on disk; start it again
- * so the host is not left without a proxy. Exit code stays 1 in the caller.
+ * The package is already `current`, but the process serving may not be: a
+ * manual install or an interrupted update leaves an old daemon behind. Restart
+ * it when its `/health` reports another version; do nothing when it matches.
+ */
+async function restartIfDaemonIsStale(
+  deps: UpdateDependencies,
+  args: UpdateArgs,
+  current: string,
+  serviceOptions: ServiceOptions,
+): Promise<number> {
+  const state = await deps.getDaemonState();
+  if (pidWithoutHealth(state, args)) {
+    return refuseUnknownDaemonPort(state);
+  }
+  if (!state.running) {
+    console.log(chalk.green(`✓ Already on ${current}.`));
+    return 0;
+  }
+  const reported =
+    typeof state.health?.version === 'string' ? state.health.version : null;
+  if (reported === current) {
+    console.log(chalk.green(`✓ Already on ${current}.`));
+    return 0;
+  }
+
+  const systemdActive = deps.platform === 'linux' && deps.systemdActive();
+  const mode = chooseRestartMode(state.running, systemdActive);
+
+  console.log(
+    chalk.cyan(
+      `Package is already ${current}; the running proxy ${reported === null ? 'does not report its version' : `reports ${reported}`}. Restarting it.`,
+    ),
+  );
+  try {
+    if (!(await stopService(mode, deps, serviceOptions))) {
+      console.error(
+        chalk.red(
+          '✗ Could not stop the running proxy; stop it manually, then run `saros-proxy start`.',
+        ),
+      );
+      return 1;
+    }
+  } catch (err) {
+    console.error(
+      chalk.red(`✗ Could not stop the running proxy: ${errorMessage(err)}`),
+    );
+    return 1;
+  }
+
+  try {
+    await startService(mode, deps, serviceOptions);
+  } catch (err) {
+    console.error(
+      chalk.red(`✗ saros-proxy ${current} is installed, but the restart failed: ${errorMessage(err)}`),
+    );
+    console.error(
+      chalk.dim(`Check ${deps.daemonLogPath} and run \`saros-proxy status\`.`),
+    );
+    return 1;
+  }
+
+  const health = await waitForUpdatedProxy(
+    () => deps.probeHealth(state.port),
+    current,
+    deps.healthAttempts,
+    deps.healthDelayMs,
+    deps.sleep,
+  );
+  if (!health.ok || health.body?.version !== current) {
+    console.error(
+      chalk.red(
+        `✗ saros-proxy ${current} is installed, but the proxy on port ${state.port} ${healthFailureDetail(health)}.`,
+      ),
+    );
+    console.error(
+      chalk.dim(`Check ${deps.daemonLogPath} and run \`saros-proxy status\`.`),
+    );
+    return 1;
+  }
+
+  console.log(
+    chalk.green(
+      `✓ Restarted saros-proxy ${current}; it was serving ${reported ?? 'an unknown version'}.`,
+    ),
+  );
+  return 0;
+}
+
+/** A PID-file daemon exists but its port cannot be inferred from the config. */
+function pidWithoutHealth(state: DaemonStateSnapshot, args: UpdateArgs): boolean {
+  return Boolean(state.pid) && !state.health && args.port === undefined;
+}
+
+function refuseUnknownDaemonPort(state: DaemonStateSnapshot): number {
+  console.error(
+    chalk.red(
+      `✗ A proxy daemon (PID ${state.pid}) is running, but /health did not answer on port ${state.port}. Re-run with --port <the port it serves> (and --config <path> if it uses one) so the update stops and restarts the right instance.`,
+    ),
+  );
+  return 1;
+}
+
+/**
+ * Put the previous version back after a failed attempt: reinstall it (npm may
+ * already have removed the old tree), then start it and verify. When the
+ * reinstall itself fails, start whatever is on disk and say so; never pretend
+ * the old version is back.
  */
 async function rollback(
   mode: RestartMode,
   deps: UpdateDependencies,
   port: number,
   version: string,
+  options: ServiceOptions,
+  stopFirst: boolean,
 ): Promise<void> {
   if (mode === 'none') {
     console.log(
@@ -494,8 +690,40 @@ async function rollback(
     return;
   }
 
+  if (stopFirst) {
+    try {
+      if (!(await stopService(mode, deps, options))) {
+        console.error(
+          chalk.yellow(
+            '! Could not stop the failed instance; continuing with the rollback.',
+          ),
+        );
+      }
+    } catch (err) {
+      console.error(
+        chalk.yellow(
+          `! Could not stop the failed instance: ${errorMessage(err)}; continuing with the rollback.`,
+        ),
+      );
+    }
+  }
+
+  let reinstalled = false;
   try {
-    await startService(mode, deps);
+    deps.exec('npm', ['install', '-g', `saros-proxy@${version}`], {
+      inherit: true,
+    });
+    reinstalled = true;
+  } catch (err) {
+    console.error(
+      chalk.yellow(
+        `! Could not reinstall saros-proxy ${version}: ${errorMessage(err)}. Starting the package currently on disk instead.`,
+      ),
+    );
+  }
+
+  try {
+    await startService(mode, deps, options);
   } catch (err) {
     console.error(
       chalk.red(`✗ Could not restart saros-proxy ${version}: ${errorMessage(err)}`),
@@ -508,15 +736,18 @@ async function rollback(
 
   const health = await waitForUpdatedProxy(
     () => deps.probeHealth(port),
-    version,
+    reinstalled ? version : null,
     deps.healthAttempts,
     deps.healthDelayMs,
     deps.sleep,
   );
-  if (!health.ok || health.body?.version !== version) {
+  const expectedMet = reinstalled ? health.body?.version === version : true;
+  if (!health.ok || !expectedMet) {
     console.error(
       chalk.red(
-        `✗ saros-proxy ${version} was not running after the failed update: the proxy on port ${port} ${healthFailureDetail(health)}.`,
+        reinstalled
+          ? `✗ saros-proxy ${version} was not running after the failed update: the proxy on port ${port} ${healthFailureDetail(health)}.`
+          : `✗ The package currently on disk did not become healthy on port ${port}: ${healthFailureDetail(health)}.`,
       ),
     );
     console.error(
@@ -524,5 +755,15 @@ async function rollback(
     );
     return;
   }
-  console.log(chalk.green(`✓ Restarted saros-proxy ${version} (the previous install).`));
+
+  if (reinstalled) {
+    console.log(chalk.green(`✓ Restarted saros-proxy ${version} (the previous install).`));
+    return;
+  }
+  const reported = health.body?.version;
+  console.log(
+    chalk.yellow(
+      `✓ Started the package currently on disk${typeof reported === 'string' ? ` (version ${reported})` : ''}; saros-proxy ${version} could not be reinstalled.`,
+    ),
+  );
 }

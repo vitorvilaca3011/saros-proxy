@@ -12,15 +12,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **`saros-proxy update`** installs the newest npm release and puts the proxy
   back on it. It compares the installed version against the registry `latest`
   (`--check` only reports, exiting 1 when a newer one exists), refuses to touch
-  a package that does not live in the npm global prefix unless `--force`, and
-  never reads piped stdin as consent (`--yes` skips the prompt). With the
-  answer it stops what was serving — `systemctl --user stop/start` when the
-  autostart unit is active, the PID-file daemon otherwise — runs
-  `npm install -g saros-proxy@<latest>`, starts only what was running before,
-  and verifies by reading the installed `package.json` and the version the
-  restarted proxy reports, instead of trusting npm's exit code. A failed
-  install restarts the previous version, so the host is never left without a
-  proxy. `GET /health` now reports `version` for exactly that check.
+  a package that does not live in the npm global prefix unless `--force` (an
+  `npm link` counts as that checkout, not as a global install), and never reads
+  piped stdin as consent (`--yes` skips the prompt). It restarts the instance it
+  found, on its own port and config (`--port`/`--config` when the running daemon
+  serves neither the default; if a live daemon answers no `/health` at all it
+  refuses to guess instead of moving the proxy to another port) — `systemctl
+  --user stop/start` when the autostart unit is active, the PID-file daemon
+  otherwise, started from the newly installed package. Success is the installed
+  `package.json` **and** the version the restarted proxy reports on `/health`,
+  never npm's exit code; any failure after the install (the new proxy does not
+  come up, or answers a different version) reinstalls the previous release and
+  brings it back, and if even that reinstall fails it starts what is on disk and
+  says so. `GET /health` now reports `version`.
 
 ### Fixed
 

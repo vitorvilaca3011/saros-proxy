@@ -8,7 +8,7 @@
  */
 
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import type * as ClackPrompts from '@clack/prompts';
@@ -70,6 +70,7 @@ interface ExecCall {
 
 interface DepOptions extends Partial<UpdateDependencies> {
   failInstall?: boolean;
+  failReinstall?: boolean;
   /** null makes `npm root -g` fail. */
   globalRoot?: string | null;
   /** Defaults to the latest version; null makes package.json unreadable. */
@@ -78,6 +79,11 @@ interface DepOptions extends Partial<UpdateDependencies> {
   healthOk?: boolean;
   /** null omits the version field; defaults to the latest version. */
   healthVersion?: string | null;
+  daemonRunning?: boolean;
+  /** null omits the health body; defaults to the current package version. */
+  daemonHealthVersion?: string | null;
+  daemonPid?: string | null;
+  daemonPort?: number;
 }
 
 interface Harness {
@@ -86,6 +92,8 @@ interface Harness {
   execs: ExecCall[];
   confirms: string[];
   probes: number[];
+  stopOptions: Array<Record<string, unknown>>;
+  startOptions: Array<Record<string, unknown>>;
 }
 
 function makeDeps(options: DepOptions = {}): Harness {
@@ -93,17 +101,26 @@ function makeDeps(options: DepOptions = {}): Harness {
   const execs: ExecCall[] = [];
   const confirms: string[] = [];
   const probes: number[] = [];
+  const stopOptions: Array<Record<string, unknown>> = [];
+  const startOptions: Array<Record<string, unknown>> = [];
   const {
     failInstall,
+    failReinstall,
     globalRoot,
     installedVersion,
     healthOk,
     healthVersion,
+    daemonRunning,
+    daemonHealthVersion,
+    daemonPid,
+    daemonPort,
     ...overrides
   } = options;
+  const currentVersion = overrides.currentVersion ?? '1.1.2';
+  const running = daemonRunning ?? true;
 
   const deps: UpdateDependencies = {
-    currentVersion: '1.1.2',
+    currentVersion,
     fetchLatestVersion: async () => '1.1.3',
     exec: (command, args, execOptions) => {
       execs.push({ command, args: [...args], inherit: execOptions?.inherit === true });
@@ -112,8 +129,14 @@ function makeDeps(options: DepOptions = {}): Harness {
         if (globalRoot === null) throw new Error('npm was not found on PATH');
         return globalRoot ?? '/usr/lib/node_modules';
       }
-      if (command === 'npm' && args[0] === 'install' && failInstall) {
-        throw new Error('EACCES: permission denied');
+      if (command === 'npm' && args[0] === 'install') {
+        const reinstalling = (args[2] ?? '').endsWith(`@${currentVersion}`);
+        if (failInstall && !reinstalling) {
+          throw new Error('EACCES: permission denied');
+        }
+        if (failReinstall && reinstalling) {
+          throw new Error('E404: the previous version is unavailable');
+        }
       }
       return '';
     },
@@ -128,13 +151,23 @@ function makeDeps(options: DepOptions = {}): Harness {
     },
     getDaemonState: async () => {
       events.push('daemon-state');
-      return { running: true, port: 3000 };
+      return {
+        running,
+        port: daemonPort ?? 3000,
+        pid: daemonPid ?? (running ? '4242' : null),
+        health:
+          running && daemonHealthVersion !== null
+            ? { status: 'ok', version: daemonHealthVersion ?? currentVersion }
+            : undefined,
+      };
     },
-    daemonStop: async () => {
+    daemonStop: async (callOptions) => {
+      stopOptions.push({ ...callOptions });
       events.push('daemon-stop');
       return true;
     },
-    daemonStart: async () => {
+    daemonStart: async (callOptions) => {
+      startOptions.push({ ...callOptions });
       events.push('daemon-start');
     },
     systemdActive: () => false,
@@ -163,7 +196,7 @@ function makeDeps(options: DepOptions = {}): Harness {
     ...overrides,
   };
 
-  return { deps, events, execs, confirms, probes };
+  return { deps, events, execs, confirms, probes, stopOptions, startOptions };
 }
 
 function captureOutput(): { stdout: string[]; stderr: string[]; all: () => string } {
@@ -203,12 +236,24 @@ afterEach(() => {
 
 describe('parseUpdateArgs', () => {
   it('parses the documented flags', () => {
-    expect(parseUpdateArgs(['--check', '--yes', '--force'])).toEqual({
+    expect(
+      parseUpdateArgs(['--check', '--yes', '--force', '--port', '3100', '--config', '/x.yaml']),
+    ).toEqual({
       check: true,
       yes: true,
       force: true,
+      port: 3100,
+      config: '/x.yaml',
     });
     expect(parseUpdateArgs([])).toEqual({ check: false, yes: false, force: false });
+  });
+
+  it('rejects a missing or invalid port and a missing config path', () => {
+    expect(parseUpdateArgs(['--port']).error).toContain('--port requires');
+    expect(parseUpdateArgs(['--port', 'nope']).error).toContain('--port requires');
+    expect(parseUpdateArgs(['--port', '0']).error).toContain('--port requires');
+    expect(parseUpdateArgs(['--port', '70000']).error).toContain('--port requires');
+    expect(parseUpdateArgs(['--config']).error).toContain('--config requires');
   });
 
   it('reports an unknown option instead of ignoring it', () => {
@@ -260,6 +305,16 @@ describe('isGlobalInstall', () => {
       isGlobalInstall(join(globalRoot, 'saros-proxy'), globalRoot, 'linux'),
     ).toBe(true);
   });
+
+  it('rejects a global entry that is a symlink (npm link) even when it resolves to the package', () => {
+    const globalRoot = join(tempDir, 'node_modules');
+    const checkout = join(tempDir, 'checkout');
+    mkdirSync(globalRoot, { recursive: true });
+    mkdirSync(checkout, { recursive: true });
+    symlinkSync(checkout, join(globalRoot, 'saros-proxy'), process.platform === 'win32' ? 'junction' : 'dir');
+
+    expect(isGlobalInstall(checkout, globalRoot, 'linux')).toBe(false);
+  });
 });
 
 describe('readPackageVersion', () => {
@@ -301,6 +356,13 @@ describe('waitForUpdatedProxy', () => {
     const result = await waitForUpdatedProxy(probe, '1.1.3', 2, 0, async () => {});
     expect(result.body?.version).toBe('1.1.2');
   });
+
+  it('accepts any healthy proxy when the expected version is unknown', async () => {
+    const probe = vi.fn(async () => ({ ok: true, body: { version: '9.9.9' } }));
+    const result = await waitForUpdatedProxy(probe, null, 1, 0, async () => {});
+    expect(result.ok).toBe(true);
+    expect(result.body?.version).toBe('9.9.9');
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -309,13 +371,16 @@ describe('waitForUpdatedProxy', () => {
 
 describe('runUpdateCommand', () => {
   it('exits 0 without touching anything when already up to date', async () => {
-    const harness = makeDeps({ fetchLatestVersion: async () => '1.1.2' });
+    const harness = makeDeps({
+      fetchLatestVersion: async () => '1.1.2',
+      daemonRunning: false,
+    });
     const out = captureOutput();
 
     expect(await runUpdateCommand([], harness.deps)).toBe(0);
 
     expect(harness.execs).toEqual([]);
-    expect(harness.events).toEqual([]);
+    expect(harness.events).toEqual(['daemon-state']);
     expect(out.all()).toContain('Already on 1.1.2');
   });
 
@@ -364,16 +429,20 @@ describe('runUpdateCommand', () => {
     expect(out.all()).toContain('✓ Updated to 1.1.3 and restarted the proxy on port 3000.');
   });
 
-  it('restarts the previous version when npm install fails', async () => {
+  it('reinstalls and restarts the previous version when npm install fails', async () => {
     const harness = makeDeps({
       failInstall: true,
-      readInstalledVersion: () => '1.1.3',
       probeHealth: async () => ({ ok: true, body: { status: 'ok', version: '1.1.2' } }),
     });
     const out = captureOutput();
 
     expect(await runUpdateCommand(['--yes'], harness.deps)).toBe(1);
 
+    expect(harness.execs.map((call) => `${call.command} ${call.args.join(' ')}`)).toEqual([
+      'npm root -g',
+      'npm install -g saros-proxy@1.1.3',
+      'npm install -g saros-proxy@1.1.2',
+    ]);
     expect(harness.events).toContain('daemon-start');
     expect(harness.events).toContain('daemon-stop');
     expect(out.all()).toContain('npm install -g saros-proxy@1.1.3 failed');
@@ -563,7 +632,8 @@ describe('runUpdateCommand', () => {
 
     expect(await runUpdateCommand(['--yes'], harness.deps)).toBe(1);
 
-    expect(harness.probes).toHaveLength(3);
+    // Three probes for the new version, then three for the rollback.
+    expect(harness.probes).toHaveLength(6);
     expect(out.all()).toContain('did not answer /health');
     expect(out.all()).toContain('/tmp/saros/daemon.log');
     expect(out.all()).toContain('saros-proxy status');
@@ -585,17 +655,192 @@ describe('runUpdateCommand', () => {
     expect(out.all()).toContain('The global package reports 1.1.2, expected 1.1.3.');
   });
 
-  it('reports a start failure instead of claiming success', async () => {
+  it('reinstalls the previous version when the new proxy fails to start', async () => {
     const harness = makeDeps({
-      daemonStart: async () => {
-        throw new Error('EADDRINUSE');
-      },
+      probeHealth: async () => ({ ok: true, body: { status: 'ok', version: '1.1.2' } }),
+    });
+    const originalStart = harness.deps.daemonStart;
+    let starts = 0;
+    harness.deps.daemonStart = async (options) => {
+      starts++;
+      if (starts === 1) throw new Error('EADDRINUSE');
+      await originalStart(options);
+    };
+    const out = captureOutput();
+
+    expect(await runUpdateCommand(['--yes'], harness.deps)).toBe(1);
+
+    expect(starts).toBe(2);
+    expect(harness.execs.map((call) => call.args.join(' '))).toEqual([
+      'root -g',
+      'install -g saros-proxy@1.1.3',
+      'install -g saros-proxy@1.1.2',
+    ]);
+    expect(out.all()).toContain('failed to start: EADDRINUSE');
+    expect(out.all()).toContain('Restarted saros-proxy 1.1.2 (the previous install).');
+  });
+
+  it('reinstalls the previous version when the new proxy never reports the new version', async () => {
+    const harness = makeDeps({ healthVersion: '1.1.2' });
+    const out = captureOutput();
+
+    expect(await runUpdateCommand(['--yes'], harness.deps)).toBe(1);
+
+    expect(harness.execs.map((call) => call.args.join(' '))).toEqual([
+      'root -g',
+      'install -g saros-proxy@1.1.3',
+      'install -g saros-proxy@1.1.2',
+    ]);
+    expect(harness.events.filter((event) => event === 'daemon-stop')).toHaveLength(2);
+    expect(harness.events.filter((event) => event === 'daemon-start')).toHaveLength(2);
+    expect(harness.probes).toEqual([3000, 3000, 3000]);
+    expect(out.all()).toContain('reports version 1.1.2');
+    expect(out.all()).toContain('Restarted saros-proxy 1.1.2 (the previous install).');
+  });
+
+  it('starts the package on disk and says so when the previous version cannot be reinstalled', async () => {
+    const harness = makeDeps({
+      failInstall: true,
+      failReinstall: true,
+      probeHealth: async () => ({ ok: true, body: { status: 'ok', version: '1.1.3' } }),
     });
     const out = captureOutput();
 
     expect(await runUpdateCommand(['--yes'], harness.deps)).toBe(1);
-    expect(out.all()).toContain('failed to start: EADDRINUSE');
-    expect(out.all()).toContain('/tmp/saros/daemon.log');
+
+    expect(out.all()).toContain('Could not reinstall saros-proxy 1.1.2');
+    expect(out.all()).toContain('Starting the package currently on disk instead.');
+    expect(out.all()).toContain('Started the package currently on disk (version 1.1.3)');
+    expect(out.all()).toContain('saros-proxy 1.1.2 could not be reinstalled');
+  });
+
+  it('restarts a running daemon that reports an older version when the package is already latest', async () => {
+    const harness = makeDeps({
+      currentVersion: '1.1.3',
+      fetchLatestVersion: async () => '1.1.3',
+      daemonHealthVersion: '1.1.2',
+    });
+    const out = captureOutput();
+
+    expect(await runUpdateCommand(['--yes'], harness.deps)).toBe(0);
+
+    expect(harness.execs).toEqual([]);
+    expect(harness.events).toContain('daemon-stop');
+    expect(harness.events).toContain('daemon-start');
+    expect(harness.probes).toEqual([3000]);
+    expect(out.all()).toContain('reports 1.1.2');
+    expect(out.all()).toContain('Restarted saros-proxy 1.1.3');
+  });
+
+  it('reports when the stale daemon cannot be stopped', async () => {
+    const harness = makeDeps({
+      currentVersion: '1.1.3',
+      fetchLatestVersion: async () => '1.1.3',
+      daemonHealthVersion: '1.1.2',
+      daemonStop: async () => false,
+    });
+    const out = captureOutput();
+
+    expect(await runUpdateCommand(['--yes'], harness.deps)).toBe(1);
+
+    expect(harness.events).not.toContain('daemon-start');
+    expect(out.all()).toContain('Could not stop the running proxy');
+  });
+
+  it('reports a stale-daemon restart that never reports the package version', async () => {
+    const harness = makeDeps({
+      currentVersion: '1.1.3',
+      fetchLatestVersion: async () => '1.1.3',
+      daemonHealthVersion: '1.1.2',
+      healthVersion: '1.1.2',
+    });
+    const out = captureOutput();
+
+    expect(await runUpdateCommand(['--yes'], harness.deps)).toBe(1);
+
+    expect(harness.events).toContain('daemon-start');
+    expect(out.all()).toContain('reports version 1.1.2');
+  });
+
+  it('leaves a daemon serving the already-installed version alone', async () => {
+    const harness = makeDeps({
+      currentVersion: '1.1.3',
+      fetchLatestVersion: async () => '1.1.3',
+      daemonHealthVersion: '1.1.3',
+    });
+    const out = captureOutput();
+
+    expect(await runUpdateCommand(['--yes'], harness.deps)).toBe(0);
+
+    expect(harness.events).toEqual(['daemon-state']);
+    expect(out.all()).toContain('Already on 1.1.3');
+  });
+
+  it('refuses to guess the daemon port when a PID is alive and /health is silent', async () => {
+    const harness = makeDeps({ daemonPid: '4242', daemonHealthVersion: null });
+    const out = captureOutput();
+
+    expect(await runUpdateCommand(['--yes'], harness.deps)).toBe(1);
+
+    expect(harness.execs.map((call) => call.args.join(' '))).toEqual(['root -g']);
+    expect(harness.events).not.toContain('daemon-stop');
+    expect(harness.events).not.toContain('exec:npm install -g saros-proxy@1.1.3');
+    expect(out.all()).toContain('--port');
+  });
+
+  it('passes --port and --config to stop, start and the health probe', async () => {
+    const harness = makeDeps({
+      daemonPid: '4242',
+      daemonHealthVersion: null,
+      daemonPort: 3100,
+    });
+    captureOutput();
+
+    expect(
+      await runUpdateCommand(
+        ['--yes', '--port', '3100', '--config', '/tmp/saros.yaml'],
+        harness.deps,
+      ),
+    ).toBe(0);
+
+    expect(harness.stopOptions).toEqual([
+      { port: 3100, configPath: '/tmp/saros.yaml' },
+    ]);
+    expect(harness.startOptions).toEqual([
+      {
+        port: 3100,
+        configPath: '/tmp/saros.yaml',
+        entryPoint: '/usr/lib/node_modules/saros-proxy/dist/index.js',
+      },
+    ]);
+    expect(harness.probes).toEqual([3100]);
+  });
+
+  it('rejects a registry version that is not plain semver before any exec', async () => {
+    const harness = makeDeps({
+      fetchLatestVersion: async () => '1.1.3; touch /tmp/pwned',
+    });
+    const out = captureOutput();
+
+    expect(await runUpdateCommand([], harness.deps)).toBe(1);
+
+    expect(harness.execs).toEqual([]);
+    expect(harness.events).toEqual([]);
+    expect(out.all()).toContain('invalid version');
+  });
+
+  it('treats an installed prerelease as older than the stable release', async () => {
+    const check = makeDeps({ currentVersion: '1.1.3-rc.1' });
+    const out = captureOutput();
+
+    expect(await runUpdateCommand(['--check'], check.deps)).toBe(1);
+    expect(out.all()).toContain('installed 1.1.3-rc.1 / latest 1.1.3');
+
+    const update = makeDeps({ currentVersion: '1.1.3-rc.1' });
+    expect(await runUpdateCommand(['--yes'], update.deps)).toBe(0);
+    expect(update.execs.map((call) => call.args.join(' '))).toContain(
+      'install -g saros-proxy@1.1.3',
+    );
   });
 
   it('reports a rollback that could not start the previous version', async () => {
@@ -695,6 +940,58 @@ describe('default dependency wiring', () => {
     expect(mockDaemonStop).toHaveBeenCalledWith({ exitOnComplete: false });
     expect(mockDaemonStart).toHaveBeenCalledWith(undefined, undefined, {
       exitOnComplete: false,
+      entryPoint: '/usr/lib/node_modules/saros-proxy/dist/index.js',
+    });
+    expect(mockProbeProxyHealth).toHaveBeenCalledWith(3100);
+  });
+
+  it('starts the global package entry point from a forced checkout and threads port/config', async () => {
+    mockExecFileSync.mockImplementation((command: string, args: string[]) => {
+      if (command === 'npm' && args[0] === 'root') return '/usr/lib/node_modules\n';
+      if (command === 'systemctl' && args[1] === 'is-active') return 'inactive\n';
+      return '';
+    });
+    mockGetDaemonState.mockResolvedValue({
+      running: true,
+      port: 3100,
+      pid: '1234',
+      health: { status: 'ok', version: '1.1.3' },
+    });
+    mockDaemonStop.mockResolvedValue(true);
+    mockDaemonStart.mockResolvedValue(undefined);
+    mockProbeProxyHealth.mockResolvedValue({
+      ok: true,
+      body: { status: 'ok', version: '1.1.3' },
+    });
+    captureOutput();
+
+    const code = await runUpdateCommand(
+      ['--yes', '--force', '--port', '3100', '--config', '/tmp/saros.yaml'],
+      {
+        currentVersion: '1.1.2',
+        fetchLatestVersion: async () => '1.1.3',
+        readInstalledVersion: () => '1.1.3',
+        packageRoot: '/home/user/Projetos/saros-proxy',
+        sleep: async () => {},
+        healthAttempts: 2,
+        healthDelayMs: 1,
+        platform: 'linux',
+      },
+    );
+
+    expect(code).toBe(0);
+    expect(mockGetDaemonState).toHaveBeenCalledWith({
+      port: 3100,
+      configPath: '/tmp/saros.yaml',
+    });
+    expect(mockDaemonStop).toHaveBeenCalledWith({
+      exitOnComplete: false,
+      port: 3100,
+      configPath: '/tmp/saros.yaml',
+    });
+    expect(mockDaemonStart).toHaveBeenCalledWith(3100, '/tmp/saros.yaml', {
+      exitOnComplete: false,
+      entryPoint: '/usr/lib/node_modules/saros-proxy/dist/index.js',
     });
     expect(mockProbeProxyHealth).toHaveBeenCalledWith(3100);
   });

@@ -629,6 +629,7 @@ saros-proxy autostart status [--method systemd|vbs|registry|auto]
 saros-proxy update
 saros-proxy update --check          # only compare installed vs npm latest (exit 1 when outdated)
 saros-proxy update --yes --force    # no prompt; --force allows a non-global checkout
+saros-proxy update --port 3100      # restart the daemon that serves 3100, not the default port
 ```
 
 On Linux the default is a `systemd --user` unit at

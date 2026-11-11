@@ -17,6 +17,7 @@ import { resetModelsFetcherState } from '../src/models-fetcher.js';
 import { getKeyTokenUsage, resetTokenUsage } from '../src/token-usage.js';
 import { loadModelsCatalog } from '../src/models-catalog.js';
 import { getSarosDir, type ProxyConfig } from '../src/config.js';
+import { getVersion } from '../src/version.js';
 import { MAX_BODY_SIZE } from '../src/constants.js';
 
 describe('buildUpstreamUrl', () => {
@@ -1475,6 +1476,7 @@ describe('createProxyApp — request limits, health, CORS, rate limit keys', () 
     const res = await app.request('/health');
     const body = await res.json();
     expect(body.status).toBe('ok');
+    expect(body.version).toBe(getVersion());
     expect(body.keyCount).toBe(1);
     // Network errors (fetch failed) are shared-upstream faults, not key
     // faults — the key must stay available so the proxy recovers instantly.

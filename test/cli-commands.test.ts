@@ -64,6 +64,7 @@ vi.mock('../src/cli/update-check.js', () => ({
   checkForUpdate: mockCheckForUpdate,
   compareVersions: vi.fn(),
   fetchLatestVersion: vi.fn(),
+  isValidVersion: vi.fn(() => true),
 }));
 vi.mock('../src/cli/update.js', () => ({
   runUpdateCommand: mockRunUpdateCommand,
@@ -234,6 +235,23 @@ describe('CLI: restart subcommand', () => {
 
     await expect(import('../src/index.js')).rejects.toThrow('process.exit(0)');
     expect(mockDaemonRestart).toHaveBeenCalledWith(4000, 'my.yaml');
+  });
+});
+
+describe('CLI: update subcommand', () => {
+  beforeEach(() => {
+    vi.restoreAllMocks();
+    mockRunUpdateCommand.mockReset();
+  });
+
+  it('dispatches to runUpdateCommand with the flags and exits with its code', async () => {
+    process.argv = ['node', 'saros-proxy', 'update', '--check', '--yes'];
+    vi.resetModules();
+    mockRunUpdateCommand.mockResolvedValue(7);
+    mockProcessExit();
+
+    await expect(import('../src/index.js')).rejects.toThrow('process.exit(7)');
+    expect(mockRunUpdateCommand).toHaveBeenCalledWith(['--check', '--yes']);
   });
 });
 
