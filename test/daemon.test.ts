@@ -543,6 +543,22 @@ describe('daemonStop', () => {
     expect(exitSpy).toHaveBeenCalledWith(0);
   });
 
+  it('probes the explicit port passed by update when there is no PID file', async () => {
+    const fetchMock = vi.fn(async () => {
+      throw new Error('ECONNREFUSED');
+    });
+    vi.stubGlobal('fetch', fetchMock);
+    vi.spyOn(console, 'log').mockImplementation(() => {});
+
+    const result = await daemon.daemonStop({ port: 3100, exitOnComplete: false });
+
+    expect(result).toBe(true);
+    expect(fetchMock).toHaveBeenCalledWith(
+      'http://127.0.0.1:3100/health',
+      expect.anything(),
+    );
+  });
+
   it('exits non-zero when no handle exists but something serves the port', async () => {
     // Instance started outside `saros-proxy start`, or one whose pid file was
     // never written: "no daemon" was a lie while /health answered.
@@ -1148,6 +1164,21 @@ describe('test-run guard', () => {
     expect(errorSpy.mock.calls.map((c) => String(c[0])).join('\n')).toContain('Refusing to write');
     expect(exitSpy).toHaveBeenCalledWith(1);
   });
+
+  it('throws from the state guard instead of exiting when exitOnComplete is false', async () => {
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const exitSpy = mockProcessExitThrow();
+    mockSpawn.mockClear();
+
+    const daemon = await importDaemon();
+    await expect(
+      daemon.daemonStart(undefined, undefined, { exitOnComplete: false }),
+    ).rejects.toThrow('Refusing to write');
+
+    expect(exitSpy).not.toHaveBeenCalled();
+    expect(mockSpawn).not.toHaveBeenCalled();
+    expect(errorSpy.mock.calls.map((c) => String(c[0])).join('\n')).toContain('Refusing to write');
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -1356,6 +1387,19 @@ describe('daemonStatus', () => {
     expect(state.port).toBe(3000);
     expect(state.health?.status).toBe('ok');
   });
+
+  it('getDaemonState probes the explicit port passed by update', async () => {
+    const fetchMock = vi.fn(async () => ({ ok: true, json: async () => ({ status: 'ok' }) }));
+    vi.stubGlobal('fetch', fetchMock);
+
+    const state = await daemon.getDaemonState({ port: 3100 });
+
+    expect(state.port).toBe(3100);
+    expect(fetchMock).toHaveBeenCalledWith(
+      'http://127.0.0.1:3100/health',
+      expect.anything(),
+    );
+  });
 });
 
 // ---------------------------------------------------------------------------
@@ -1396,6 +1440,37 @@ describe('daemonStart', () => {
     await expect(daemon.daemonStart()).rejects.toThrow('process.exit(1)');
     expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining('already in use'));
     expect(mockSpawn).not.toHaveBeenCalled();
+  });
+
+  it('throws instead of exiting when the port is taken and exitOnComplete is false', async () => {
+    stubHealthOk();
+    mockSpawn.mockClear();
+    const exitSpy = mockProcessExitThrow();
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+
+    await expect(
+      daemon.daemonStart(undefined, undefined, { exitOnComplete: false }),
+    ).rejects.toThrow('already in use');
+
+    expect(exitSpy).not.toHaveBeenCalled();
+    expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining('already in use'));
+    expect(mockSpawn).not.toHaveBeenCalled();
+  });
+
+  it('spawns the entry point passed by the caller', async () => {
+    stubHealthDown();
+    mockSpawn.mockClear();
+    vi.spyOn(process, 'kill').mockImplementation(() => true);
+    vi.useFakeTimers();
+
+    await daemon.daemonStart(undefined, undefined, {
+      exitOnComplete: false,
+      entryPoint: '/opt/global/node_modules/saros-proxy/dist/index.js',
+    });
+
+    const [, args] = mockSpawn.mock.calls.at(-1) as unknown as [string, string[]];
+    expect(args[0]).toBe('/opt/global/node_modules/saros-proxy/dist/index.js');
+    await vi.advanceTimersByTimeAsync(2000);
   });
 
   it('loads config once and reuses that object for the harness sync', async () => {

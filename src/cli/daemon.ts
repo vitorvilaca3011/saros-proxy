@@ -664,11 +664,40 @@ function killRunningDaemon(): KillResult {
 // Public API
 // ---------------------------------------------------------------------------
 
-export async function daemonStart(port?: number, configPath?: string): Promise<void> {
+/**
+ * Options for callers that own the process exit code (`update`).
+ *
+ * The lifecycle commands traditionally call `process.exit` from their
+ * verification timers. `update` must stop, install and verify in one process,
+ * so it opts out and interprets the returned state itself.
+ */
+export interface DaemonCommandOptions {
+  /** Default true. False keeps the timer from terminating the caller. */
+  exitOnComplete?: boolean;
+  /** Health-probe port override (`stop`); default: config port. */
+  port?: number;
+  /** Config used to resolve the probe port when `port` is absent. */
+  configPath?: string;
+  /** Child entry point; default: this package's dist/index.js. */
+  entryPoint?: string;
+}
+
+export async function daemonStart(
+  port?: number,
+  configPath?: string,
+  options: DaemonCommandOptions = {},
+): Promise<void> {
+  const exitOnComplete = options.exitOnComplete ?? true;
   // Before the first directory is created: under test a state dir in the real
   // installation is not ours to populate — not the pid, not daemon.log, not
   // models.json.
-  if (!assertStateDir(PID_FILE, 'write')) process.exit(1);
+  if (!assertStateDir(PID_FILE, 'write')) {
+    if (exitOnComplete) {
+      process.exit(1);
+      return;
+    }
+    throw new Error('Refusing to write the daemon PID file in the real home');
+  }
   ensurePidDir();
 
   const startup = loadStartupConfig(configPath);
@@ -679,17 +708,18 @@ export async function daemonStart(port?: number, configPath?: string): Promise<v
   // "exited shortly after starting. Check your config."
   const probe = await probeProxyHealth(effectivePort);
   if (probe.ok) {
-    console.error(
-      chalk.red(
-        `✗ Port ${effectivePort} is already in use — a proxy instance appears to be running. Run \`saros-proxy status\` to check.`,
-      ),
-    );
-    process.exit(1);
+    const message = `Port ${effectivePort} is already in use — a proxy instance appears to be running. Run \`saros-proxy status\` to check.`;
+    console.error(chalk.red(`✗ ${message}`));
+    if (exitOnComplete) {
+      process.exit(1);
+      return;
+    }
+    throw new Error(message);
   }
 
   // Build args for the child process — `serve` runs the foreground server,
   // which bare `saros-proxy` (overview) must no longer do.
-  const args = [ENTRY_POINT, 'serve'];
+  const args = [options.entryPoint ?? ENTRY_POINT, 'serve'];
   if (port) args.push('--port', String(port));
   if (configPath) args.push('--config', configPath);
 
@@ -765,7 +795,7 @@ export async function daemonStart(port?: number, configPath?: string): Promise<v
       // Check for newer version — fire-and-forget
       checkForUpdate();
 
-      process.exit(0);
+      if (exitOnComplete) process.exit(0);
     } else {
       // The child had no pipe to capture: recover its failure from whatever
       // this boot appended to daemon.log (stdout and stderr are the same file).
@@ -788,7 +818,8 @@ export async function daemonStart(port?: number, configPath?: string): Promise<v
         console.error(chalk.red('✗ Proxy exited shortly after starting. Check your config.'));
       }
       removePidFile(PID_FILE);
-      process.exit(1);
+      if (exitOnComplete) process.exit(1);
+      else process.exitCode = 1;
     }
   }, 2000);
 }
@@ -807,23 +838,33 @@ function legacyPidFileToAdopt(): string | null {
  * answer: `killed` says the signal was accepted, not that the process died.
  * A refused kill is checked at once, since waiting cannot change it.
  */
-function awaitDaemonGone(result: KillResult, onGone: () => void): void {
+function awaitDaemonGone(
+  result: KillResult,
+  onGone: () => void,
+  exitOnComplete = true,
+): Promise<boolean> {
   const pidNum = Number(result.pid);
-  const check = (): void => {
-    if (isProcessAlive(pidNum)) {
-      const hint =
-        process.platform === 'win32'
-          ? `taskkill /T /F /PID ${result.pid}`
-          : `kill -9 ${result.pid}`;
-      console.error(chalk.red(`✗ Failed to stop daemon (PID ${result.pid}). Try: ${hint}`));
-      process.exit(1);
-      return;
-    }
-    removePidFile(result.pidFile);
-    onGone();
-  };
-  if (result.killed) setTimeout(check, STOP_VERIFY_MS);
-  else check();
+  // TS target ES2022 has no Promise.withResolvers lib; Node 22 provides it at
+  // runtime, but the executor form keeps `npm run lint` honest.
+  return new Promise((resolve) => {
+    const check = (): void => {
+      if (isProcessAlive(pidNum)) {
+        const hint =
+          process.platform === 'win32'
+            ? `taskkill /T /F /PID ${result.pid}`
+            : `kill -9 ${result.pid}`;
+        console.error(chalk.red(`✗ Failed to stop daemon (PID ${result.pid}). Try: ${hint}`));
+        if (exitOnComplete) process.exit(1);
+        resolve(false);
+        return;
+      }
+      removePidFile(result.pidFile);
+      onGone();
+      resolve(true);
+    };
+    if (result.killed) setTimeout(check, STOP_VERIFY_MS);
+    else check();
+  });
 }
 
 /**
@@ -837,7 +878,11 @@ function awaitDaemonGone(result: KillResult, onGone: () => void): void {
  * `alreadyReported` is for a caller that just announced a stale handle: the
  * header is redundant, but the port verdict is not.
  */
-async function reportNothingToStop(alreadyReported = false): Promise<void> {
+async function reportNothingToStop(
+  alreadyReported = false,
+  exitOnComplete = true,
+  options: { port?: number; configPath?: string } = {},
+): Promise<boolean> {
   const legacy = legacyPidFileToAdopt();
   if (legacy === null) {
     if (!alreadyReported) console.log(chalk.yellow('No running proxy daemon found.'));
@@ -850,22 +895,34 @@ async function reportNothingToStop(alreadyReported = false): Promise<void> {
       chalk.cyan('Re-run with SAROS_ALLOW_LEGACY_PID=1 to let this command read and stop it.'),
     );
   }
-  const port = getConfigPort();
-  const probe = await probeProxyHealth(port);
-  if (!probe.ok) process.exit(0);
+  const effectivePort = options.port ?? getConfigPort(options.configPath);
+  const probe = await probeProxyHealth(effectivePort);
+  if (!probe.ok) {
+    if (exitOnComplete) process.exit(0);
+    return true;
+  }
   const detail =
     legacy === null
       ? 'it was started outside `saros-proxy start`'
       : 'the pre-0.11 instance was not stopped';
-  console.error(chalk.red(`✗ Something is still serving on port ${port} — ${detail}.`));
-  process.exit(1);
+  console.error(chalk.red(`✗ Something is still serving on port ${effectivePort} — ${detail}.`));
+  if (exitOnComplete) process.exit(1);
+  return false;
 }
 
-export async function daemonStop(): Promise<void> {
+/**
+ * Stop the daemon. Returns whether nothing is serving afterwards; the default
+ * (`exitOnComplete`) keeps the CLI behavior of exiting from the verification
+ * timer, while `update` opts out and reads the boolean. `port`/`configPath`
+ * make the no-PID health verdict follow the instance being updated.
+ */
+export async function daemonStop(
+  options: DaemonCommandOptions = {},
+): Promise<boolean> {
+  const exitOnComplete = options.exitOnComplete ?? true;
   const result = killRunningDaemon();
   if (result.pid === null) {
-    await reportNothingToStop();
-    return;
+    return reportNothingToStop(false, exitOnComplete, options);
   }
   if (result.wasStale) {
     console.log(
@@ -873,13 +930,20 @@ export async function daemonStop(): Promise<void> {
     );
     // The stale handle was removed; something can still serve — a live legacy
     // instance, or one started outside the daemon. Exiting 0 here hid that.
-    await reportNothingToStop(true);
-    return;
+    return reportNothingToStop(true, exitOnComplete, options);
   }
-  awaitDaemonGone(result, () => {
-    console.log(chalk.green(`✓ Proxy (PID ${result.pid}) stopped.`));
-    process.exit(0);
-  });
+  const gone = awaitDaemonGone(
+    result,
+    () => {
+      console.log(chalk.green(`✓ Proxy (PID ${result.pid}) stopped.`));
+      if (exitOnComplete) process.exit(0);
+    },
+    exitOnComplete,
+  );
+  // The default CLI path owns the exit code: `stop` returns immediately (as
+  // before) and its verification timer calls process.exit. `update` waits for
+  // the boolean instead.
+  return exitOnComplete ? true : gone;
 }
 
 /**
@@ -921,10 +985,13 @@ export interface DaemonState {
  * Resolve the daemon state os-agnostically: PID file first (cleaning up a
  * stale one), then a /health port probe for instances started outside the
  * daemon (no PID file). Shared by `status` and the bare `saros-proxy`
- * overview.
+ * overview. `port`/`configPath` let `update` follow an instance whose port is
+ * not the default config's.
  */
-export async function getDaemonState(): Promise<DaemonState> {
-  const port = getConfigPort();
+export async function getDaemonState(
+  options: { port?: number; configPath?: string } = {},
+): Promise<DaemonState> {
+  const port = options.port ?? getConfigPort(options.configPath);
   const record = readPid();
   const pidNum = parsePid(record?.pid ?? null);
   const pidAlive = pidNum !== null && isProcessAlive(pidNum);

@@ -8,22 +8,14 @@
  */
 
 import chalk from 'chalk';
-import { readFileSync } from 'node:fs';
-import { dirname, resolve } from 'node:path';
-import { fileURLToPath } from 'node:url';
 import { getDaemonState } from './daemon.js';
 import { readHarnessSettings } from './harness-sync.js';
 import { formatKeyState } from './key-state.js';
 import { loadConfig, getDefaultConfigPath } from '../config.js';
 import { maskKey, logger } from '../logger.js';
+import { getVersion } from '../version.js';
 
-export function getVersion(): string {
-  const packageRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..');
-  const pkg = JSON.parse(readFileSync(resolve(packageRoot, 'package.json'), 'utf-8')) as {
-    version: string;
-  };
-  return pkg.version;
-}
+export { getVersion };
 
 export async function printOverview(): Promise<void> {
   // Reporting command — silence pino (config load logs) so the output is a

@@ -22,7 +22,7 @@ import type { SetupConfig } from './setup.js';
 // ---------------------------------------------------------------------------
 
 export { outro };
-export { intro, spinner, text, confirm, password, select } from '@clack/prompts';
+export { intro, spinner, text, confirm, password, select, isCancel } from '@clack/prompts';
 
 // ---------------------------------------------------------------------------
 // Status messages (thin wrappers around @clack/log)

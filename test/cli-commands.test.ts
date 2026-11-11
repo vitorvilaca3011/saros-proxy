@@ -33,6 +33,7 @@ const mockAutostartInstall = vi.hoisted(() => vi.fn());
 const mockAutostartUninstall = vi.hoisted(() => vi.fn());
 const mockAutostartStatus = vi.hoisted(() => vi.fn());
 const mockCheckForUpdate = vi.hoisted(() => vi.fn());
+const mockRunUpdateCommand = vi.hoisted(() => vi.fn());
 const mockCreateProxyApp = vi.hoisted(() => vi.fn());
 
 vi.mock('../src/config.js', () => ({
@@ -61,6 +62,12 @@ vi.mock('../src/cli/autostart.js', () => ({
 }));
 vi.mock('../src/cli/update-check.js', () => ({
   checkForUpdate: mockCheckForUpdate,
+  compareVersions: vi.fn(),
+  fetchLatestVersion: vi.fn(),
+  isValidVersion: vi.fn(() => true),
+}));
+vi.mock('../src/cli/update.js', () => ({
+  runUpdateCommand: mockRunUpdateCommand,
 }));
 vi.mock('../src/models-sync.js', () => ({
   getModelsFromOpencodeConfig: mockGetModelsFromConfig,
@@ -228,6 +235,23 @@ describe('CLI: restart subcommand', () => {
 
     await expect(import('../src/index.js')).rejects.toThrow('process.exit(0)');
     expect(mockDaemonRestart).toHaveBeenCalledWith(4000, 'my.yaml');
+  });
+});
+
+describe('CLI: update subcommand', () => {
+  beforeEach(() => {
+    vi.restoreAllMocks();
+    mockRunUpdateCommand.mockReset();
+  });
+
+  it('dispatches to runUpdateCommand with the flags and exits with its code', async () => {
+    process.argv = ['node', 'saros-proxy', 'update', '--check', '--yes'];
+    vi.resetModules();
+    mockRunUpdateCommand.mockResolvedValue(7);
+    mockProcessExit();
+
+    await expect(import('../src/index.js')).rejects.toThrow('process.exit(7)');
+    expect(mockRunUpdateCommand).toHaveBeenCalledWith(['--check', '--yes']);
   });
 });
 

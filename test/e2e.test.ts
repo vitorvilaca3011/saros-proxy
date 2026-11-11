@@ -7,12 +7,14 @@
  * Run: npx vitest run test/e2e.test.ts
  */
 
-import { describe, it, expect, beforeAll, afterAll, beforeEach } from 'vitest';
+import { describe, it, expect, beforeAll, afterAll, beforeEach, vi } from 'vitest';
 import { createServer, type Server, type IncomingMessage, type IncomingHttpHeaders } from 'node:http';
 import { serve } from '@hono/node-server';
 import type { AddressInfo } from 'node:net';
 
 import { createProxyApp } from '../src/proxy.js';
+import { logger } from '../src/logger.js';
+import { getVersion } from '../src/version.js';
 import { getKeyTokenUsage, resetTokenUsage } from '../src/token-usage.js';
 import { validateConfig } from '../src/config.js';
 import type { ProxyConfig } from '../src/config.js';
@@ -347,6 +349,7 @@ describe('1. Health & Status', () => {
     const body = await res.json() as Record<string, unknown>;
 
     expect(body.status).toBe('ok');
+    expect(body.version).toBe(getVersion());
     expect(body.keyCount).toBe(2);
     expect(body.enabledCount).toBe(2);
     expect(body.disabledCount).toBe(0);
@@ -1436,4 +1439,54 @@ describe('12. Request Body Limits', () => {
     expect(matchingLogs.length).toBe(1);
   }, 30000);
 
+});
+
+// -----------------------------------------------------------------------
+// 13. reasoning_effort sanitization (commandcode declares a whitelist)
+// -----------------------------------------------------------------------
+
+describe('13. reasoning_effort sanitization', () => {
+  let proxy: ProxyContext;
+
+  beforeAll(async () => {
+    const cfg = baseConfig(upstreamPort);
+    cfg.keys = [{ label: 'cc', key: `user_e2e-${'a'.repeat(24)}`, provider: 'commandcode' }];
+    cfg.upstreams = { commandcode: `http://127.0.0.1:${upstreamPort}` };
+    proxy = await startProxy(cfg);
+  });
+  afterAll(async () => { await proxy.close(); });
+
+  it('rewrites the value upstream and warns with the decision', async () => {
+    mockControl.setDefaultResponse(200, JSON.stringify({ choices: [] }));
+    const warn = vi.spyOn(logger, 'warn');
+
+    const res = await pf(proxy.port, '/zen/go/v1/chat/completions', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        model: 'ds-v4-flash@commandcode',
+        reasoning_effort: 'minimal',
+        messages: [{ role: 'user', content: 'hi' }],
+        stream: false,
+      }),
+    });
+
+    expect(res.status).toBe(200);
+    const forwarded = mockControl.getRequestLog().filter((entry) => entry.method === 'POST');
+    expect(forwarded.length).toBe(1);
+    expect(JSON.parse(forwarded[0].body)).toMatchObject({
+      model: 'ds-v4-flash',
+      reasoning_effort: 'low',
+    });
+    expect(warn).toHaveBeenCalledWith(
+      expect.objectContaining({
+        provider: 'commandcode',
+        model: 'ds-v4-flash@commandcode',
+        from: 'minimal',
+        to: 'low',
+      }),
+      'reasoning_effort not accepted upstream, adjusted',
+    );
+    warn.mockRestore();
+  });
 });

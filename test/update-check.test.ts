@@ -8,6 +8,11 @@
 import { describe, it, expect, afterEach, vi } from 'vitest';
 import { readFileSync } from 'node:fs';
 import { resolve } from 'node:path';
+import {
+  compareVersions,
+  fetchLatestVersion,
+  isValidVersion,
+} from '../src/cli/update-check.js';
 
 describe('checkForUpdate', () => {
   const originalWarn = console.warn;
@@ -41,6 +46,8 @@ describe('checkForUpdate', () => {
     expect(warnings).toHaveLength(1);
     expect(warnings[0]).toContain('Update available');
     expect(warnings[0]).toContain('99.0.0');
+    expect(warnings[0]).toContain('saros-proxy update');
+    expect(warnings[0]).not.toContain('npm install -g');
   });
 
   it('is silent when the registry version equals the current version', async () => {
@@ -68,19 +75,74 @@ describe('checkForUpdate', () => {
     expect(warnings).toHaveLength(0);
   });
 
-  it('compares version parts of different lengths (e.g. 1.0 vs 1.0.1)', async () => {
-    // Version-agnostic: derive fixtures from the real package.json version
+  it('ignores registry versions that are not plain semver', async () => {
     const pkg = JSON.parse(readFileSync(resolve(process.cwd(), 'package.json'), 'utf-8')) as {
       version: string;
     };
-    // '0.7' — current minus the patch segment (shorter → older)
+    // The registry only serves proper semver; shortened/lengthened cores are
+    // rejected before any comparison can use them.
     const shorter = pkg.version.split('.').slice(0, 2).join('.');
-    // '0.7.3.1' — current plus an extra segment (longer → newer)
-    const longerNewer = `${pkg.version}.1`;
+    const longer = `${pkg.version}.1`;
 
-    const older = await runWithRegistryVersion(shorter);
-    expect(older).toHaveLength(0);
-    const newer = await runWithRegistryVersion(longerNewer);
-    expect(newer).toHaveLength(1);
+    expect(await runWithRegistryVersion(shorter)).toHaveLength(0);
+    expect(await runWithRegistryVersion(longer)).toHaveLength(0);
+  });
+});
+
+describe('compareVersions', () => {
+  it('orders prereleases below their stable release', () => {
+    expect(compareVersions('1.1.3-rc.1', '1.1.3')).toBe(-1);
+    expect(compareVersions('1.1.3', '1.1.3-rc.1')).toBe(1);
+    expect(compareVersions('1.1.3-rc.1', '1.1.3-rc.2')).toBe(-1);
+    expect(compareVersions('1.1.3-alpha', '1.1.3-beta')).toBe(-1);
+    expect(compareVersions('1.1.3-1', '1.1.3-alpha')).toBe(-1);
+  });
+
+  it('ignores build metadata and keeps the historical numeric comparison', () => {
+    expect(compareVersions('1.1.3+build.1', '1.1.3')).toBe(0);
+    expect(compareVersions('1.1', '1.1.2')).toBe(-1);
+    expect(compareVersions('1.1.2.1', '1.1.2')).toBe(1);
+  });
+});
+
+describe('fetchLatestVersion validation', () => {
+  afterEach(() => {
+    vi.unstubAllGlobals();
+  });
+
+  it('accepts plain semver, including prereleases', () => {
+    expect(isValidVersion('1.1.3')).toBe(true);
+    expect(isValidVersion('1.1.3-rc.1')).toBe(true);
+    expect(isValidVersion('1.1.3+build.5')).toBe(true);
+    expect(isValidVersion('1.1.3-rc.1+build.2')).toBe(true);
+    expect(isValidVersion('latest')).toBe(false);
+    expect(isValidVersion('1.1.3; rm -rf /')).toBe(false);
+    expect(isValidVersion('1.1.3-rc.1+')).toBe(false);
+  });
+
+  it('rejects a registry version with shell metacharacters', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue({
+        ok: true,
+        status: 200,
+        json: async () => ({ version: '1.1.3; rm -rf /' }),
+      }),
+    );
+
+    await expect(fetchLatestVersion()).rejects.toThrow('invalid version');
+  });
+
+  it('accepts a prerelease from the registry', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue({
+        ok: true,
+        status: 200,
+        json: async () => ({ version: '1.1.3-rc.1' }),
+      }),
+    );
+
+    await expect(fetchLatestVersion()).resolves.toBe('1.1.3-rc.1');
   });
 });

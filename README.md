@@ -44,7 +44,7 @@ Manage multiple API keys behind a single endpoint — OpenCode-Go **and** Comman
 - **Graceful shutdown** — Drains active requests before exiting (no dropped connections).
 - **Security hardening** — API key masking in logs, SSRF prevention (HTTPS-only upstream), configurable CORS, host binding validation.
 - **Config validation** — CLI args, YAML file, or environment variables with sensible defaults.
-- **Health endpoint** — `GET /health` shows key status per key (enabled, why it is out of rotation, when it retries), active requests, and circuit-breaker state.
+- **Health endpoint** — `GET /health` shows key status per key (enabled, why it is out of rotation, when it retries), active requests, circuit-breaker state, and the running package version.
 - **Request forensics** — `X-Proxy-Provider` / `X-Proxy-Key-Label` / `X-Proxy-Request-Id` headers on served responses, plus `GET /debug/recent` (last 200 requests in memory, no credentials).
 - **No database** — Stateless proxy, zero external dependencies beyond Node.js.
 
@@ -624,6 +624,12 @@ saros-proxy autostart uninstall [--method systemd|vbs|registry|auto]
 
 # Check autostart status
 saros-proxy autostart status [--method systemd|vbs|registry|auto]
+
+# Update a global npm install: stop, npm install -g, start again, verify
+saros-proxy update
+saros-proxy update --check          # only compare installed vs npm latest (exit 1 when outdated)
+saros-proxy update --yes --force    # no prompt; --force allows a non-global checkout
+saros-proxy update --port 3100      # restart the daemon that serves 3100, not the default port
 ```
 
 On Linux the default is a `systemd --user` unit at
@@ -634,7 +640,9 @@ detected, otherwise the Startup-folder VBS.
 
 Manage the unit with systemd, not with the CLI: `saros-proxy stop` exits non-zero
 while the service still answers `/health`, because the CLI does not own the unit's
-process.
+process. `saros-proxy update` is the one exception, and on purpose: when the unit is
+active it stops and starts the proxy through `systemctl --user` instead of the PID
+file, so an update does not fight the unit's restart policy.
 
 ```bash
 systemctl --user start|stop|restart|status saros-proxy.service
