@@ -114,8 +114,10 @@ describe('fetchLatestVersion validation', () => {
     expect(isValidVersion('1.1.3')).toBe(true);
     expect(isValidVersion('1.1.3-rc.1')).toBe(true);
     expect(isValidVersion('1.1.3+build.5')).toBe(true);
+    expect(isValidVersion('1.1.3-rc.1+build.2')).toBe(true);
     expect(isValidVersion('latest')).toBe(false);
     expect(isValidVersion('1.1.3; rm -rf /')).toBe(false);
+    expect(isValidVersion('1.1.3-rc.1+')).toBe(false);
   });
 
   it('rejects a registry version with shell metacharacters', async () => {

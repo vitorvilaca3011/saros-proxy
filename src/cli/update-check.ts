@@ -11,7 +11,7 @@ const REGISTRY_TIMEOUT_MS = 5000;
  * A registry version must be plain semver before it is interpolated into an
  * `npm install` argument (on Windows that runs through a shell).
  */
-const VERSION_PATTERN = /^\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?$/;
+const VERSION_PATTERN = /^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$/;
 
 /** Backwards-compatible alias for the shared cached version read. */
 export { getVersion as getCurrentVersion };

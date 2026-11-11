@@ -12,7 +12,7 @@
  */
 
 import { execFileSync } from 'node:child_process';
-import { lstatSync, readFileSync, realpathSync } from 'node:fs';
+import { existsSync, lstatSync, readFileSync, realpathSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { fileURLToPath } from 'node:url';
@@ -192,7 +192,9 @@ export function readPackageVersion(packageRoot: string): string | null {
 /**
  * Poll /health until it answers `status: ok` with the expected version.
  * The version check is what distinguishes the freshly installed proxy from
- * the old process that is still shutting down on the same port.
+ * the old process that is still shutting down on the same port; `null`
+ * accepts any version, for a rollback that cannot know which release npm
+ * left on disk.
  */
 export async function waitForUpdatedProxy(
   probe: () => Promise<{ ok: boolean; body?: Record<string, unknown> }>,
@@ -359,6 +361,44 @@ function healthFailureDetail(
     : 'does not report its version';
 }
 
+/**
+ * Resolve the npm global prefix the package must live in. Prints the reason
+ * and returns null when the caller must not touch the install. `--force`
+ * only bypasses a failed `npm root -g`; a checkout still needs it to find
+ * the installed package's entry point.
+ */
+function resolveGlobalRoot(
+  deps: UpdateDependencies,
+  args: UpdateArgs,
+): string | null {
+  let globalRoot = '';
+  try {
+    globalRoot = deps.exec('npm', ['root', '-g']);
+  } catch (err) {
+    if (!args.force) {
+      console.error(
+        chalk.red(
+          `✗ Could not determine the npm global prefix: ${errorMessage(err)}`,
+        ),
+      );
+      return null;
+    }
+  }
+
+  if (
+    !isGlobalInstall(deps.packageRoot, globalRoot, deps.platform) &&
+    !args.force
+  ) {
+    console.error(
+      chalk.red(
+        '✗ This install is not a global npm package — update the checkout instead.',
+      ),
+    );
+    return null;
+  }
+  return globalRoot;
+}
+
 // ---------------------------------------------------------------------------
 // Command
 // ---------------------------------------------------------------------------
@@ -430,31 +470,8 @@ export async function runUpdateCommand(
     return 1;
   }
 
-  let globalRoot = '';
-  try {
-    globalRoot = deps.exec('npm', ['root', '-g']);
-  } catch (err) {
-    if (!args.force) {
-      console.error(
-        chalk.red(
-          `✗ Could not determine the npm global prefix: ${errorMessage(err)}`,
-        ),
-      );
-      return 1;
-    }
-  }
-
-  if (
-    !isGlobalInstall(deps.packageRoot, globalRoot, deps.platform) &&
-    !args.force
-  ) {
-    console.error(
-      chalk.red(
-        '✗ This install is not a global npm package — update the checkout instead.',
-      ),
-    );
-    return 1;
-  }
+  const globalRoot = resolveGlobalRoot(deps, args);
+  if (globalRoot === null) return 1;
 
   console.log(chalk.cyan(`Updating saros-proxy: ${current} → ${latest}`));
   if (!args.yes) {
@@ -567,9 +584,62 @@ export async function runUpdateCommand(
 }
 
 /**
+ * Consent for restarting a stale proxy. Returns the exit code to use when the
+ * restart must not happen, or null when it may proceed. No prompt is read
+ * from piped stdin.
+ */
+async function consentToRestart(
+  deps: UpdateDependencies,
+  args: UpdateArgs,
+  current: string,
+  state: DaemonStateSnapshot,
+  serving: string,
+): Promise<number | null> {
+  if (args.yes) return null;
+  if (!deps.isTTY) {
+    console.log(
+      chalk.yellow(
+        `The package is already ${current}, but the proxy on port ${state.port} ${serving}. Re-run with \`saros-proxy update --yes\` to restart it.`,
+      ),
+    );
+    return 0;
+  }
+  const approved = await deps.confirm(
+    `The package is already ${current}, but the proxy on port ${state.port} ${serving}. Restart it?`,
+  );
+  if (approved) return null;
+  console.log(chalk.yellow('Restart cancelled.'));
+  return 0;
+}
+
+/**
+ * Entry point of the installed package for a daemon restart, or null after
+ * printing why it cannot be used. The command must start the global package,
+ * never whichever checkout ran it.
+ */
+function installedEntryPoint(
+  deps: UpdateDependencies,
+  args: UpdateArgs,
+  current: string,
+): string | null {
+  const globalRoot = resolveGlobalRoot(deps, args);
+  if (globalRoot === null) return null;
+  const entryPoint =
+    globalRoot === '' ? '' : join(globalRoot, 'saros-proxy', 'dist', 'index.js');
+  if (entryPoint !== '' && existsSync(entryPoint)) return entryPoint;
+  console.error(
+    chalk.red(
+      `✗ Cannot restart the proxy from the installed package: its entry point${entryPoint === '' ? '' : ` (${entryPoint})`} is not available. Reinstall it with \`npm install -g saros-proxy@${current}\`, then run \`saros-proxy restart\`.`,
+    ),
+  );
+  return null;
+}
+
+/**
  * The package is already `current`, but the process serving may not be: a
  * manual install or an interrupted update leaves an old daemon behind. Restart
- * it when its `/health` reports another version; do nothing when it matches.
+ * it when its `/health` reports another version (or no version at all); do
+ * nothing when it matches.
  */
 async function restartIfDaemonIsStale(
   deps: UpdateDependencies,
@@ -591,13 +661,24 @@ async function restartIfDaemonIsStale(
     console.log(chalk.green(`✓ Already on ${current}.`));
     return 0;
   }
+  const serving =
+    reported === null ? 'does not report its version' : `reports ${reported}`;
+
+  const consent = await consentToRestart(deps, args, current, state, serving);
+  if (consent !== null) return consent;
 
   const systemdActive = deps.platform === 'linux' && deps.systemdActive();
   const mode = chooseRestartMode(state.running, systemdActive);
+  const restartOptions: ServiceOptions = { ...serviceOptions };
+  if (mode === 'daemon') {
+    const entryPoint = installedEntryPoint(deps, args, current);
+    if (entryPoint === null) return 1;
+    restartOptions.entryPoint = entryPoint;
+  }
 
   console.log(
     chalk.cyan(
-      `Package is already ${current}; the running proxy ${reported === null ? 'does not report its version' : `reports ${reported}`}. Restarting it.`,
+      `Package is already ${current}; the running proxy ${serving}. Restarting it.`,
     ),
   );
   try {
@@ -617,7 +698,7 @@ async function restartIfDaemonIsStale(
   }
 
   try {
-    await startService(mode, deps, serviceOptions);
+    await startService(mode, deps, restartOptions);
   } catch (err) {
     console.error(
       chalk.red(`✗ saros-proxy ${current} is installed, but the restart failed: ${errorMessage(err)}`),
