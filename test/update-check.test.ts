@@ -41,6 +41,8 @@ describe('checkForUpdate', () => {
     expect(warnings).toHaveLength(1);
     expect(warnings[0]).toContain('Update available');
     expect(warnings[0]).toContain('99.0.0');
+    expect(warnings[0]).toContain('saros-proxy update');
+    expect(warnings[0]).not.toContain('npm install -g');
   });
 
   it('is silent when the registry version equals the current version', async () => {

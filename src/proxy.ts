@@ -30,6 +30,7 @@ import {
   type KeyHealthReport,
 } from './proxy-logic.js';
 import { getSarosDir, type ProxyConfig } from './config.js';
+import { getVersion } from './version.js';
 import { logger, maskKey } from './logger.js';
 import { redactSecrets } from './log-redact.js';
 import {
@@ -1436,6 +1437,9 @@ export function createProxyApp(config: ProxyConfig): Hono {
 
     return c.json({
       status: 'ok',
+      // The running package, so `update` can prove the restarted daemon is
+      // the version it just installed instead of a lingering old process.
+      version: getVersion(),
       uptime: process.uptime(),
       keyCount: keys.length,
       enabledCount,

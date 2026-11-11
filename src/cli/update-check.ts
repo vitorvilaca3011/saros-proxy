@@ -2,24 +2,13 @@
  * update-check.ts — Check npm registry for newer versions.
  */
 
-import { readFileSync } from 'node:fs';
-import { resolve, dirname } from 'node:path';
-import { fileURLToPath } from 'node:url';
+import { getVersion } from '../version.js';
 
-let currentVersion: string | undefined;
+const REGISTRY_URL = 'https://registry.npmjs.org/saros-proxy/latest';
+const REGISTRY_TIMEOUT_MS = 5000;
 
-function getCurrentVersion(): string {
-  if (!currentVersion) {
-    try {
-      const pkgPath = resolve(dirname(fileURLToPath(import.meta.url)), '..', '..', 'package.json');
-      const pkg = JSON.parse(readFileSync(pkgPath, 'utf-8')) as { version: string };
-      currentVersion = pkg.version;
-    } catch {
-      currentVersion = '0.0.0';
-    }
-  }
-  return currentVersion;
-}
+/** Backwards-compatible alias for the shared cached version read. */
+export { getVersion as getCurrentVersion };
 
 /**
  * Compare two semver-like version strings. Returns:
@@ -27,7 +16,7 @@ function getCurrentVersion(): string {
  *    0 if a == b
  *    1 if a > b
  */
-function compareVersions(a: string, b: string): number {
+export function compareVersions(a: string, b: string): number {
   const aParts = a.split('.').map(Number);
   const bParts = b.split('.').map(Number);
   for (let i = 0; i < Math.max(aParts.length, bParts.length); i++) {
@@ -40,23 +29,40 @@ function compareVersions(a: string, b: string): number {
 }
 
 /**
+ * Read the `latest` version from the npm registry.
+ *
+ * Throws a human-readable error when the registry cannot answer — callers that
+ * only warn (the boot check) swallow it, `update --check` reports it.
+ * `fetchImpl` is injectable so tests never touch the network.
+ */
+export async function fetchLatestVersion(
+  fetchImpl: typeof fetch = fetch,
+): Promise<string> {
+  const res = await fetchImpl(REGISTRY_URL, {
+    signal: AbortSignal.timeout(REGISTRY_TIMEOUT_MS),
+  });
+  if (!res.ok) {
+    throw new Error(`registry responded with HTTP ${res.status}`);
+  }
+  const data = (await res.json()) as { version?: unknown };
+  if (typeof data.version !== 'string' || data.version.length === 0) {
+    throw new Error('registry response has no version field');
+  }
+  return data.version;
+}
+
+/**
  * Check npm registry for the latest version.
  * Prints a warning to stderr if a newer version is available.
  * Never throws — failures are silently ignored.
  */
 export async function checkForUpdate(): Promise<void> {
-  const current = getCurrentVersion();
+  const current = getVersion();
   try {
-    const res = await fetch('https://registry.npmjs.org/saros-proxy/latest', {
-      signal: AbortSignal.timeout(5000),
-    });
-    if (!res.ok) return;
-    const data = (await res.json()) as { version?: string };
-    const latest = data.version;
-    if (!latest) return;
+    const latest = await fetchLatestVersion();
     if (compareVersions(current, latest) < 0) {
       console.warn(
-        `\n⚠️  Update available: ${current} → ${latest}. Run: npm install -g saros-proxy\n`,
+        `\n⚠️  Update available: ${current} → ${latest}. Run: saros-proxy update\n`,
       );
     }
   } catch {

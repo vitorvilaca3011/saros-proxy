@@ -20,6 +20,7 @@ Commands:
   configharness [omp|ohmypi] [pi] [oc|opencode] [dsh]  Add harnesses; --remove <h> / --clear to disable
   probe [model-id]                           Test model capabilities (liveness, reasoning, tools)
   usage                                      Show per-key quota usage and most-used models
+  update [--check] [--yes] [--force]         Update a global npm install and restart the proxy
   secret set                                 Store the encryption passphrase in the OS secret store
   secret status                              Show which passphrase source would be used
   keys encrypt [--config <path>] [--no-backup]  Encrypt plaintext keys (backup is plaintext; --no-backup skips it)

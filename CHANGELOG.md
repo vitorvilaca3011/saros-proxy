@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **`saros-proxy update`** installs the newest npm release and puts the proxy
+  back on it. It compares the installed version against the registry `latest`
+  (`--check` only reports, exiting 1 when a newer one exists), refuses to touch
+  a package that does not live in the npm global prefix unless `--force`, and
+  never reads piped stdin as consent (`--yes` skips the prompt). With the
+  answer it stops what was serving — `systemctl --user stop/start` when the
+  autostart unit is active, the PID-file daemon otherwise — runs
+  `npm install -g saros-proxy@<latest>`, starts only what was running before,
+  and verifies by reading the installed `package.json` and the version the
+  restarted proxy reports, instead of trusting npm's exit code. A failed
+  install restarts the previous version, so the host is never left without a
+  proxy. `GET /health` now reports `version` for exactly that check.
+
 ### Fixed
 
 - **`Expect` is dropped on the way upstream.** Node's fetch refuses any

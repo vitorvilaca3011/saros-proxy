@@ -232,7 +232,8 @@ function vbsStatus(): void {
 // systemd method (Linux user manager)
 // ---------------------------------------------------------------------------
 
-const SYSTEMD_UNIT_NAME = 'saros-proxy.service';
+/** Unit name shared with commands that restart the service (`update`). */
+export const SYSTEMD_UNIT_NAME = 'saros-proxy.service';
 const SYSTEMCTL_TIMEOUT_MS = 10_000;
 
 /**
@@ -439,6 +440,25 @@ function systemdUninstall(): void {
   }
 
   console.log(`Auto-start removed: ${unitPath}`);
+}
+
+/**
+ * True when the user unit is active. Exported for `update`, which must stop
+ * and restart the systemd-managed proxy instead of the PID-file daemon.
+ */
+export function isSystemdUnitActive(): boolean {
+  const active = querySystemctl(['is-active', SYSTEMD_UNIT_NAME]);
+  return active.output === 'active';
+}
+
+/** Stop the user unit (used by `update` before reinstalling). */
+export function stopSystemdUnit(): void {
+  runSystemctl(['stop', SYSTEMD_UNIT_NAME]);
+}
+
+/** Start the user unit (used by `update` after reinstalling). */
+export function startSystemdUnit(): void {
+  runSystemctl(['start', SYSTEMD_UNIT_NAME]);
 }
 
 function systemdStatus(): void {

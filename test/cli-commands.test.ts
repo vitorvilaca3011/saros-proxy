@@ -33,6 +33,7 @@ const mockAutostartInstall = vi.hoisted(() => vi.fn());
 const mockAutostartUninstall = vi.hoisted(() => vi.fn());
 const mockAutostartStatus = vi.hoisted(() => vi.fn());
 const mockCheckForUpdate = vi.hoisted(() => vi.fn());
+const mockRunUpdateCommand = vi.hoisted(() => vi.fn());
 const mockCreateProxyApp = vi.hoisted(() => vi.fn());
 
 vi.mock('../src/config.js', () => ({
@@ -61,6 +62,11 @@ vi.mock('../src/cli/autostart.js', () => ({
 }));
 vi.mock('../src/cli/update-check.js', () => ({
   checkForUpdate: mockCheckForUpdate,
+  compareVersions: vi.fn(),
+  fetchLatestVersion: vi.fn(),
+}));
+vi.mock('../src/cli/update.js', () => ({
+  runUpdateCommand: mockRunUpdateCommand,
 }));
 vi.mock('../src/models-sync.js', () => ({
   getModelsFromOpencodeConfig: mockGetModelsFromConfig,

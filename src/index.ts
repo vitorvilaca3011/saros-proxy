@@ -23,6 +23,7 @@ import { redactSecrets } from './log-redact.js';
 import { FORCE_SHUTDOWN_TIMEOUT_MS } from './constants.js';
 import { daemonStart, daemonStop, daemonStatus, daemonRestart } from './cli/daemon.js';
 import { runUsageCommand } from './cli/usage.js';
+import { runUpdateCommand } from './cli/update.js';
 import { getDefaultOpencodeConfigPath } from './cli/opencode-config.js';
 import { autostartInstall, autostartUninstall, autostartStatus, type AutostartMethod } from './cli/autostart.js';
 import { checkForUpdate } from './cli/update-check.js';
@@ -279,6 +280,8 @@ if (subcommand === 'start') {
 
   console.log(chalk.dim(`\nSummary: ${toProbe.length + cached.length}/${modelsToProbe.length} models probed, ${cached.length} skipped (cached)`));
   process.exit(0);
+} else if (subcommand === 'update') {
+  process.exit(await runUpdateCommand(process.argv.slice(3)));
 } else if (subcommand === 'usage') {
   process.exit(await runUsageCommand());
 } else if (subcommand === 'secret') {
