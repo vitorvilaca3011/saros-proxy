@@ -10,6 +10,7 @@ import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import type { ProxyConfig } from '../src/config.js';
 import * as modelsFetcher from '../src/models-fetcher.js';
+import { logger } from '../src/logger.js';
 import {
   fetchUpstreamModelIds,
   getMissingModels,
@@ -1347,6 +1348,72 @@ describe('syncOpencodeModelsWithUpstream', () => {
       name: 'DeepSeek V4 Pro (fixture)',
       limit: { context: 777000, output: 21000 },
     });
+  });
+
+  // --- missing config fails fast ---
+
+  it('missing config — fails before fetching or announcing missing models', async () => {
+    resetModelsDevCacheState();
+
+    const configPath = join(tmpDir, 'does-not-exist.json');
+    const fetchMock = vi.fn();
+    vi.stubGlobal('fetch', fetchMock);
+    const getModelsListSpy = vi.spyOn(modelsFetcher, 'getModelsList').mockResolvedValue(
+      new Response(JSON.stringify({
+        object: 'list',
+        data: [{ id: 'm1', object: 'model' }],
+      }), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      }),
+    );
+    const infoSpy = vi.spyOn(logger, 'info');
+
+    const result = await syncOpencodeModelsWithUpstream(testConfig, configPath);
+
+    expect(result).toEqual({
+      success: false,
+      error: `opencode config not found at ${configPath}`,
+    });
+    // No network: neither models.dev (fetch) nor the upstream model list.
+    expect(fetchMock).not.toHaveBeenCalled();
+    expect(getModelsListSpy).not.toHaveBeenCalled();
+    // And no misleading "adding N missing models" line.
+    expect(infoSpy).not.toHaveBeenCalled();
+  });
+
+  it('existing config with missing models — still logs once and adds them', async () => {
+    resetModelsDevCacheState();
+
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(
+      new Response(JSON.stringify({}), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      }),
+    ));
+    vi.spyOn(modelsFetcher, 'getModelsList').mockResolvedValue(
+      new Response(JSON.stringify({
+        object: 'list',
+        data: [{ id: 'brand-new', object: 'model' }],
+      }), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      }),
+    );
+    const infoSpy = vi.spyOn(logger, 'info');
+
+    const configPath = writeConfig(tmpDir, sarosProviderBlock({}));
+    const result = await syncOpencodeModelsWithUpstream(testConfig, configPath);
+
+    expect(result.success).toBe(true);
+    expect(infoSpy).toHaveBeenCalledTimes(1);
+    expect(infoSpy).toHaveBeenCalledWith(
+      'syncOpencodeModelsWithUpstream: adding %d missing models to opencode.json',
+      1,
+    );
+    const updated = JSON.parse(readFileSync(configPath, 'utf-8')) as Record<string, unknown>;
+    const provider = (updated.provider as Record<string, unknown>)['saros-proxy'] as Record<string, unknown>;
+    expect((provider.models as Record<string, unknown>)['brand-new']).toBeDefined();
   });
 });
 

@@ -390,6 +390,11 @@ export async function syncOpencodeModelsWithUpstream(
 ): Promise<OpencodeConfigResult> {
   const path = configPath ?? getDefaultOpencodeConfigPath();
 
+  // Fail fast: no upstream/models.dev network calls when there is nowhere to write.
+  if (!existsSync(path)) {
+    return { success: false, error: 'opencode config not found at ' + path };
+  }
+
   // Best-effort fetch of models.dev metadata (never throws, null → undefined)
   const devMetadata = (await fetchModelsDevMetadata()) ?? undefined;
 
