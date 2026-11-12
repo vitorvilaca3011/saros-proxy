@@ -113,6 +113,15 @@ describe('printHelp', () => {
     const output = logSpy.mock.calls[0][0] as string;
     expect(output).toContain('Usage:');
   });
+
+  it('announces sync-models and names sync-upstream as its alias', async () => {
+    const { printHelp } = await import('../src/cli/help.js');
+    const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+    printHelp();
+    const output = logSpy.mock.calls[0][0] as string;
+    expect(output).toMatch(/\n\s+sync-models\s/);
+    expect(output).toMatch(/\n\s+sync-upstream\s+Deprecated alias for sync-models/);
+  });
 });
 
 describe('CLI: help subcommand', () => {
@@ -153,13 +162,13 @@ describe('CLI: help subcommand', () => {
   });
 });
 
-describe('CLI: sync-upstream subcommand', () => {
+describe('CLI: sync-models subcommand', () => {
   beforeEach(() => {
     vi.restoreAllMocks();
   });
 
   it('with config that fails to load — exits 1', async () => {
-    process.argv = ['node', 'saros-proxy', 'sync-upstream'];
+    process.argv = ['node', 'saros-proxy', 'sync-models'];
     vi.resetModules();
     mockLoadConfig.mockImplementation(() => { throw new Error('Config parse error'); });
     mockProcessExit();
@@ -168,17 +177,35 @@ describe('CLI: sync-upstream subcommand', () => {
     await expect(import('../src/index.js')).rejects.toThrow('process.exit(1)');
   });
 
-  it('success path — calls syncModelsInAllHarnesses and exits 0', async () => {
-    process.argv = ['node', 'saros-proxy', 'sync-upstream'];
+  it('dispatches to the harness sync without a deprecation note', async () => {
+    process.argv = ['node', 'saros-proxy', 'sync-models'];
     vi.resetModules();
-    mockLoadConfig.mockReturnValue({} as any);
+    mockLoadConfig.mockReturnValue({});
     mockSyncInAllHarnesses.mockResolvedValue([
       { harness: 'opencode', result: { success: true, path: '/mock/opencode.json' } },
     ]);
     mockProcessExit();
     vi.spyOn(console, 'log').mockImplementation(() => {});
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
 
     await expect(import('../src/index.js')).rejects.toThrow('process.exit(0)');
+    expect(mockSyncInAllHarnesses).toHaveBeenCalled();
+    expect(errorSpy).not.toHaveBeenCalled();
+  });
+
+  it('keeps sync-upstream as an alias that names its replacement and still syncs', async () => {
+    process.argv = ['node', 'saros-proxy', 'sync-upstream'];
+    vi.resetModules();
+    mockLoadConfig.mockReturnValue({});
+    mockSyncInAllHarnesses.mockResolvedValue([
+      { harness: 'opencode', result: { success: true, path: '/mock/opencode.json' } },
+    ]);
+    mockProcessExit();
+    vi.spyOn(console, 'log').mockImplementation(() => {});
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+
+    await expect(import('../src/index.js')).rejects.toThrow('process.exit(0)');
+    expect(errorSpy).toHaveBeenCalledWith('sync-upstream was renamed to sync-models');
     expect(mockSyncInAllHarnesses).toHaveBeenCalled();
   });
 });
@@ -191,7 +218,7 @@ describe('CLI: probe subcommand', () => {
   it('with no models in opencode.json — exits 1 with message', async () => {
     process.argv = ['node', 'saros-proxy', 'probe'];
     vi.resetModules();
-    mockLoadConfig.mockReturnValue({} as any);
+    mockLoadConfig.mockReturnValue({});
     mockGetModelsFromConfig.mockReturnValue([]);
     mockProcessExit();
     const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
@@ -203,7 +230,7 @@ describe('CLI: probe subcommand', () => {
   it('with model ID not in opencode.json — exits 1', async () => {
     process.argv = ['node', 'saros-proxy', 'probe', 'nonexistent-model'];
     vi.resetModules();
-    mockLoadConfig.mockReturnValue({} as any);
+    mockLoadConfig.mockReturnValue({});
     mockGetModelsFromConfig.mockReturnValue(['real-model']);
     mockProcessExit();
     vi.spyOn(console, 'error').mockImplementation(() => {});

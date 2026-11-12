@@ -162,7 +162,11 @@ if (subcommand === 'start') {
 } else if (subcommand === 'help' || subcommand === '--help' || subcommand === '-h') {
   printHelp();
   process.exit(0);
-} else if (subcommand === 'sync-upstream') {
+} else if (subcommand === 'sync-models' || subcommand === 'sync-upstream') {
+  // Keep the old name working for existing scripts, but say it moved.
+  if (subcommand === 'sync-upstream') {
+    console.error('sync-upstream was renamed to sync-models');
+  }
   let syncConfig: ProxyConfig;
   try {
     syncConfig = loadConfig();

@@ -252,7 +252,7 @@ Saros exposes one OpenAI-compatible endpoint — `http://127.0.0.1:{port}/zen/go
 # Enable one flag per harness the user picked (accepted: oc|opencode, omp|ohmypi, pi, dsh)
 saros-proxy configharness oc
 saros-proxy configharness        # show the current selection
-saros-proxy sync-upstream        # pull the live model list into every selected harness
+saros-proxy sync-models          # pull the live model list into every selected harness
 ```
 
 Map the Phase 1 answer to the flags, and pass them in one call when more than one applies
@@ -269,7 +269,7 @@ Map the Phase 1 answer to the flags, and pass them in one call when more than on
 Only touch the harnesses the user named: `configharness` without flags shows the current selection, and running it with no
 flags must not be used to "reset" anything.
 
-`saros-proxy start` runs the same sync as `sync-upstream` on boot (live catalog, bundled models as the offline fallback), so a daemon install only needs `configharness`. **That sync never creates a harness config**: if the file below does not exist, ask the user to launch that harness once so it writes its own config, then sync. The exception is `saros-proxy setup`, which writes the OpenCode config path it is given — `opencode.jsonc` on new installs — and in non-interactive mode only updates a file that already exists.
+`saros-proxy start` runs the same sync as `sync-models` on boot, logging one line per harness (live catalog, bundled models as the offline fallback), so a daemon install only needs `configharness`. **That sync never creates a harness config**: if the file below does not exist, ask the user to launch that harness once so it writes its own config, then sync. The exception is `saros-proxy setup`, which writes the OpenCode config path it is given — `opencode.jsonc` on new installs — and in non-interactive mode only updates a file that already exists.
 
 #### OpenCode — `~/.config/opencode/opencode.json` (or `.jsonc`)
 
@@ -302,7 +302,7 @@ providers:
       supportsDeveloperRole: false
       maxTokensField: max_tokens
       supportsReasoningEffort: true
-    models: []        # filled by `saros-proxy sync-upstream`
+    models: []        # filled by `saros-proxy sync-models`
 ```
 
 If the `saros-proxy` provider is missing, sync creates it with these values; existing fields win, except `compat.supportsReasoningEffort`, which Saros owns (a stale `false` makes the harness drop the wire parameter).

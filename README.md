@@ -684,7 +684,7 @@ saros-proxy configharness --remove pi
 saros-proxy configharness --clear
 
 # Sync the live model list from upstream into all enabled harnesses
-saros-proxy sync-upstream
+saros-proxy sync-models
 
 # Probe model capabilities
 saros-proxy probe [model-id]
@@ -695,8 +695,10 @@ saros-proxy probe
 # Show per-key quota usage, token totals and most-used models
 saros-proxy usage
 ```
-`sync-upstream` fetches the live model list from upstream and writes it to each enabled harness, with metadata from models.dev.
+`sync-models` fetches the live model list from upstream and writes it to each enabled harness, with metadata from models.dev.
 It only touches `providers["saros-proxy"].models` in the target configs and skips harnesses whose config file does not exist.
+`saros-proxy start` runs the same sync on boot and logs one line per harness (`✓ omp synced to …`), so a daemon install only needs `configharness`.
+The old name `sync-upstream` still works as a deprecated alias.
 `probe` tests each model's liveness, reasoning, and tool-calling capabilities via the proxy.
 
 **Daemon config path:** By default the daemon looks for `config.yaml` at:
