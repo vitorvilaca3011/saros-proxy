@@ -18,6 +18,7 @@ import { createServer } from 'node:http';
 import type * as Daemon from '../src/cli/daemon.js';
 import type * as ConfigModule from '../src/config.js';
 import type * as HarnessSyncModule from '../src/cli/harness-sync.js';
+import { DAEMON_SYNC_TIMEOUT_MS } from '../src/constants.js';
 
 // ---------------------------------------------------------------------------
 // Module-level mocks
@@ -46,10 +47,11 @@ vi.mock('node:child_process', () => ({
   execFileSync: mockExecFileSync,
 }));
 
-// Logger is mocked so a warning emitted from inside a timer is observable.
+// Logger is mocked so lines emitted from inside a timer are observable.
+const mockLoggerInfo = vi.hoisted(() => vi.fn());
 const mockLoggerWarn = vi.hoisted(() => vi.fn());
 vi.mock('../src/logger.js', () => ({
-  logger: { debug: vi.fn(), info: vi.fn(), warn: mockLoggerWarn, error: vi.fn() },
+  logger: { debug: vi.fn(), info: mockLoggerInfo, warn: mockLoggerWarn, error: vi.fn() },
 }));
 
 // loadConfig is wrapped (not replaced) so the number of loads per `start` is
@@ -173,6 +175,19 @@ function stubStateDir(home: string): void {
   vi.stubEnv('XDG_CONFIG_HOME', join(home, '.config'));
   vi.stubEnv('LOCALAPPDATA', join(home, 'AppData', 'Local'));
   sarosDir = stateDir(home);
+}
+
+/**
+ * Write a minimal config.yaml under the test home so daemonStart has a
+ * startup.config to hand to the harness sync.
+ */
+function writeBootConfig(port = 3099): void {
+  mkdirSync(sarosDir, { recursive: true });
+  writeFileSync(
+    join(sarosDir, 'config.yaml'),
+    `port: ${port}\nkeys:\n  - label: test\n    key: sk-boot-test-key-that-is-long-enough-0001\n`,
+    'utf-8',
+  );
 }
 
 /** Run `fn` with a faked process.platform, restoring the real one after. */
@@ -1483,12 +1498,7 @@ describe('daemonStart', () => {
     vi.spyOn(process, 'kill').mockImplementation(() => true);
     vi.useFakeTimers();
 
-    mkdirSync(sarosDir, { recursive: true });
-    writeFileSync(
-      join(sarosDir, 'config.yaml'),
-      'port: 3099\nkeys:\n  - label: test\n    key: sk-boot-test-key-that-is-long-enough-0001\n',
-      'utf-8',
-    );
+    writeBootConfig();
 
     await daemon.daemonStart();
     await vi.advanceTimersByTimeAsync(2000);
@@ -1500,6 +1510,101 @@ describe('daemonStart', () => {
     expect(logSpy).toHaveBeenCalledWith(expect.stringContaining('on port 3099'));
     expect(mockSyncModels).toHaveBeenCalledTimes(1);
     expect(mockSyncModels.mock.calls[0][0]).toMatchObject({ port: 3099 });
+  });
+
+  it('logs the startup sync result for every harness', async () => {
+    stubHealthDown();
+    mockSpawn.mockClear();
+    mockProcessExitRecord();
+    vi.spyOn(process, 'kill').mockImplementation(() => true); // child stays alive
+    vi.useFakeTimers();
+    mockLoggerInfo.mockClear();
+    mockLoggerWarn.mockClear();
+    mockSyncModels.mockResolvedValue([
+      { harness: 'pi', result: { success: true, path: '/home/u/.pi/agent/models.json' } },
+      {
+        harness: 'omp',
+        result: { success: false, error: 'invalid YAML in /home/u/.omp/agent/config.yml' },
+      },
+    ]);
+    writeBootConfig();
+    vi.spyOn(console, 'log').mockImplementation(() => {});
+
+    await daemon.daemonStart();
+    await vi.advanceTimersByTimeAsync(2000);
+
+    expect(mockLoggerInfo).toHaveBeenCalledWith(
+      '✓ %s synced to %s',
+      'pi',
+      '/home/u/.pi/agent/models.json',
+    );
+    expect(mockLoggerWarn).toHaveBeenCalledWith(
+      '✗ %s: %s',
+      'omp',
+      'invalid YAML in /home/u/.omp/agent/config.yml',
+    );
+    // The result arriving before the deadline is not also reported as a timeout.
+    expect(mockLoggerWarn).not.toHaveBeenCalledWith(
+      'harness model sync did not finish within %dms',
+      expect.anything(),
+    );
+  });
+
+  it('warns instead of dropping the sync when it outlives the timeout', async () => {
+    stubHealthDown();
+    mockSpawn.mockClear();
+    mockProcessExitRecord();
+    vi.spyOn(process, 'kill').mockImplementation(() => true); // child stays alive
+    vi.useFakeTimers();
+    mockLoggerInfo.mockClear();
+    mockLoggerWarn.mockClear();
+    mockSyncModels.mockReturnValue(new Promise(() => {})); // never settles
+    writeBootConfig();
+    vi.spyOn(console, 'log').mockImplementation(() => {});
+
+    await daemon.daemonStart();
+    await vi.advanceTimersByTimeAsync(2000); // startup verification starts the race
+    await vi.advanceTimersByTimeAsync(DAEMON_SYNC_TIMEOUT_MS);
+
+    expect(mockLoggerWarn).toHaveBeenCalledWith(
+      'harness model sync did not finish within %dms',
+      DAEMON_SYNC_TIMEOUT_MS,
+    );
+    // No harness line: the result never arrived. (loadConfig itself logs info.)
+    expect(mockLoggerInfo).not.toHaveBeenCalledWith(
+      '✓ %s synced to %s',
+      expect.anything(),
+      expect.anything(),
+    );
+  });
+
+  it('warns with the error when the startup sync throws, and still starts', async () => {
+    stubHealthDown();
+    mockSpawn.mockClear();
+    const exitSpy = mockProcessExitRecord();
+    vi.spyOn(process, 'kill').mockImplementation(() => true); // child stays alive
+    vi.useFakeTimers();
+    mockLoggerInfo.mockClear();
+    mockLoggerWarn.mockClear();
+    mockSyncModels.mockRejectedValue(new Error('canonical models unavailable'));
+    writeBootConfig();
+    vi.spyOn(console, 'log').mockImplementation(() => {});
+
+    await daemon.daemonStart();
+    await vi.advanceTimersByTimeAsync(2000);
+
+    expect(mockLoggerWarn).toHaveBeenCalledWith(
+      '✗ %s: %s',
+      'harness model sync',
+      'canonical models unavailable',
+    );
+    // The boot is not turned into a failure: the daemon exits 0.
+    expect(exitSpy).toHaveBeenCalledWith(0);
+    expect(mockLoggerInfo).not.toHaveBeenCalledWith(
+      '✓ %s synced to %s',
+      expect.anything(),
+      expect.anything(),
+    );
   });
 
   it('reports the real failure when the child dies during startup', async () => {

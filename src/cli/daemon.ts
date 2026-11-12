@@ -783,13 +783,38 @@ export async function daemonStart(
       ensureModelsJson();
       try {
         if (startup.config) {
-          await Promise.race([
+          // A timeout resolves null, so "the sync never finished" is
+          // distinguishable from "no harness was enabled" ([]).
+          const syncResults = await Promise.race([
             syncModelsInAllHarnesses(startup.config),
-            new Promise((resolve) => setTimeout(resolve, DAEMON_SYNC_TIMEOUT_MS)),
+            new Promise<null>((resolve) =>
+              setTimeout(() => resolve(null), DAEMON_SYNC_TIMEOUT_MS),
+            ),
           ]);
+          if (syncResults === null) {
+            logger.warn(
+              'harness model sync did not finish within %dms',
+              DAEMON_SYNC_TIMEOUT_MS,
+            );
+          } else {
+            for (const { harness, result } of syncResults) {
+              if (result.success) {
+                logger.info('✓ %s synced to %s', harness, result.path);
+              } else {
+                logger.warn('✗ %s: %s', harness, result.error);
+              }
+            }
+          }
         }
-      } catch {
-        /* silent — daemon exits regardless */
+      } catch (err) {
+        // The batch threw before producing per-harness results (for example
+        // buildCanonicalModels failed). Report it in the same shape as a
+        // harness failure — the daemon still starts.
+        logger.warn(
+          '✗ %s: %s',
+          'harness model sync',
+          err instanceof Error ? err.message : String(err),
+        );
       }
 
       // Check for newer version — fire-and-forget
