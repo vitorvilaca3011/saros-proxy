@@ -117,9 +117,9 @@ export function parseHarnessCommandArgs(args: string[]): HarnessCommandArgs {
  * Apply an add/remove/clear operation to the harness selection.
  *
  * Additive by design: names are merged into the current selection, so
- * `configharness omp` followed by `configharness pi` enables both. A missing
- * settings file starts from an empty selection on the first explicit command
- * (the implicit opencode default only applies while nothing is configured).
+ * `configharness omp` followed by `configharness pi` enables both. The merge
+ * starts from the effective selection — including the implicit opencode
+ * default when no settings file exists — so an add cannot drop it.
  *
  * @returns the resulting selection after the write.
  */
@@ -134,7 +134,9 @@ export function updateHarnessSettings(op: Omit<HarnessCommandArgs, 'errors'>): H
     // opencode default instead of writing an explicit empty list.
     return readHarnessSettings();
   }
-  const base = fileExists ? readHarnessSettings() : [];
+  // On a fresh install readHarnessSettings() returns the implicit opencode
+  // default; an additive command must extend it, not replace it.
+  const base = readHarnessSettings();
   const next = base.filter((id) => !op.remove.includes(id));
   for (const id of op.add) {
     if (!next.includes(id)) next.push(id);

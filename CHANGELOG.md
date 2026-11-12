@@ -7,6 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- **The boot sync reports every harness.** `saros-proxy start` ran
+  `syncModelsInAllHarnesses` and threw the results away, so only the opencode
+  path ever said anything — pi/omp/dsh synced silently, and a failure (invalid
+  YAML, missing config) was invisible. Each harness now logs one line in the
+  same shape as the manual command (`✓ omp synced to <path>`, `✗ omp: <error>`),
+  a batch that exceeds the boot timeout says so, and a batch that throws reports
+  the reason instead of dying quietly.
+- **`sync-upstream` is now `sync-models`.** The command syncs every enabled
+  harness, not only the upstream catalogue, and the old name stopped describing
+  it. `sync-upstream` keeps working as a deprecated alias that says it moved.
+
+### Fixed
+
+- **`configharness <name>` no longer drops the implicit `opencode` default.**
+  With no settings file, adding a harness started from an empty selection, so
+  `saros-proxy configharness omp` wrote `["omp"]` and disabled the opencode sync
+  that had been running by default. An additive command now extends the
+  effective selection.
+
 ## [1.2.0] - 2026-11-11
 
 ### Added

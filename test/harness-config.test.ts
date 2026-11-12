@@ -1024,15 +1024,29 @@ describe('harness selection settings', () => {
     expect(readHarnessSettings()).toEqual([]);
   });
 
-  it('updateHarnessSettings starts from an empty selection when the file is missing', () => {
-    // First explicit command is authoritative: no implicit opencode default.
-    expect(updateHarnessSettings({ add: ['omp'], remove: [], clear: false })).toEqual(['omp']);
-    expect(readHarnessSettings()).toEqual(['omp']);
+  it('updateHarnessSettings keeps the implicit opencode default when adding on a fresh install', () => {
+    // An additive command must extend the effective selection, not replace it
+    // with only the names given: `configharness omp` used to drop opencode.
+    expect(updateHarnessSettings({ add: ['omp'], remove: [], clear: false })).toEqual([
+      'opencode',
+      'omp',
+    ]);
+    expect(readHarnessSettings()).toEqual(['opencode', 'omp']);
+  });
+
+  it('updateHarnessSettings writes nothing when a fresh install has nothing to change', () => {
+    expect(updateHarnessSettings({ add: [], remove: [], clear: false })).toEqual(['opencode']);
+    expect(existsSync(join(tmpDir, '.config', 'saros', 'harnesses.json'))).toBe(false);
   });
 
   it('updateHarnessSettings leaves the implicit default untouched for remove-only on a fresh install', () => {
     expect(updateHarnessSettings({ add: [], remove: ['pi'], clear: false })).toEqual(['opencode']);
     expect(existsSync(join(tmpDir, '.config', 'saros', 'harnesses.json'))).toBe(false);
+  });
+
+  it('updateHarnessSettings keeps --clear authoritative on a fresh install', () => {
+    expect(updateHarnessSettings({ add: [], remove: [], clear: true })).toEqual([]);
+    expect(readHarnessSettings()).toEqual([]);
   });
 });
 
