@@ -696,8 +696,9 @@ saros-proxy probe
 saros-proxy usage
 ```
 `sync-models` fetches the live model list from upstream and writes it to each enabled harness, with metadata from models.dev.
-It only touches `providers["saros-proxy"].models` in the target configs and skips harnesses whose config file does not exist.
-`saros-proxy start` runs the same sync on boot and logs one line per harness (`✓ omp synced to …`), so a daemon install only needs `configharness`.
+It only touches `providers["saros-proxy"].models` in the target configs; a harness whose config file does not exist is reported as a failure, never created.
+`saros-proxy start` runs the same sync on boot and logs one line per harness (`omp synced to …`, `omp: <error>`), so a daemon started that way only needs `configharness`.
+The autostart unit is the exception: it runs `saros-proxy serve` (Linux) or a hidden `start` (Windows), so it does not run the harness sync at boot — after changing the selection there, run `saros-proxy sync-models` (or `saros-proxy restart`) once.
 The old name `sync-upstream` still works as a deprecated alias.
 `probe` tests each model's liveness, reasoning, and tool-calling capabilities via the proxy.
 
@@ -816,7 +817,7 @@ Behavior:
 
 - If `harnesses.json` does not exist, only OpenCode is synced (the default).
 - An explicit empty selection (`{"harnesses":[]}`) disables sync entirely.
-- Sync never creates a harness config: harnesses whose config file is missing are skipped.
+- Sync never creates a harness config: a harness whose config file is missing is reported as a failure, not skipped silently.
 - Only `providers["saros-proxy"].models` is replaced; all other providers, fields, and settings are preserved, and a `<file>.backup` is created before the first write.
 
 The model list written to each harness comes from the live provider catalogs (opencode-go) enriched with models.dev metadata, merged with any CommandCode-only models — falling back to the bundled `assets/models.json` when offline — so every harness stays current alongside OpenCode.

@@ -208,6 +208,34 @@ describe('CLI: sync-models subcommand', () => {
     expect(errorSpy).toHaveBeenCalledWith('sync-upstream was renamed to sync-models');
     expect(mockSyncInAllHarnesses).toHaveBeenCalled();
   });
+
+  it('exits 1 when any harness fails to sync', async () => {
+    process.argv = ['node', 'saros-proxy', 'sync-models'];
+    vi.resetModules();
+    mockLoadConfig.mockReturnValue({});
+    mockSyncInAllHarnesses.mockResolvedValue([
+      { harness: 'opencode', result: { success: true, path: '/mock/opencode.json' } },
+      { harness: 'omp', result: { success: false, error: 'invalid YAML' } },
+    ]);
+    mockProcessExit();
+    vi.spyOn(console, 'log').mockImplementation(() => {});
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+
+    await expect(import('../src/index.js')).rejects.toThrow('process.exit(1)');
+    expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining('omp: invalid YAML'));
+  });
+
+  it('exits 1 when no harness is enabled', async () => {
+    process.argv = ['node', 'saros-proxy', 'sync-models'];
+    vi.resetModules();
+    mockLoadConfig.mockReturnValue({});
+    mockSyncInAllHarnesses.mockResolvedValue([]);
+    mockProcessExit();
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+
+    await expect(import('../src/index.js')).rejects.toThrow('process.exit(1)');
+    expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining('No harnesses enabled'));
+  });
 });
 
 describe('CLI: probe subcommand', () => {

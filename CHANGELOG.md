@@ -12,10 +12,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - **The boot sync reports every harness.** `saros-proxy start` ran
   `syncModelsInAllHarnesses` and threw the results away, so only the opencode
   path ever said anything — pi/omp/dsh synced silently, and a failure (invalid
-  YAML, missing config) was invisible. Each harness now logs one line in the
-  same shape as the manual command (`✓ omp synced to <path>`, `✗ omp: <error>`),
-  a batch that exceeds the boot timeout says so, and a batch that throws reports
-  the reason instead of dying quietly.
+  YAML, missing config) was invisible. Each harness now logs one line
+  (`omp synced to <path>`, `omp: <error>`), a batch that exceeds the boot
+  timeout says so, a batch that throws reports the reason instead of dying
+  quietly, and the timeout is cleared once the sync settles. The autostart unit
+  runs `serve` rather than `start`, so it does not run this sync at boot; run
+  `saros-proxy sync-models` after changing the selection there.
 - **`sync-upstream` is now `sync-models`.** The command syncs every enabled
   harness, not only the upstream catalogue, and the old name stopped describing
   it. `sync-upstream` keeps working as a deprecated alias that says it moved.
@@ -27,6 +29,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `saros-proxy configharness omp` wrote `["omp"]` and disabled the opencode sync
   that had been running by default. An additive command now extends the
   effective selection.
+- **`configharness --remove` applies to that same implicit default.** On a fresh
+  install, `--remove opencode` returned the default selection unchanged and
+  wrote nothing, so the documented way to disable one harness silently did
+  nothing. A command that leaves the selection untouched still writes nothing.
 
 ## [1.2.0] - 2026-11-11
 

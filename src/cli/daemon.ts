@@ -781,15 +781,18 @@ export async function daemonStart(
 
       // Sync models to all enabled harnesses — await with timeout before exit
       ensureModelsJson();
+      // The deadline only exists to bound the race; clear it once the sync
+      // settles so it cannot outlive the boot or fire after a success.
+      let syncTimer: NodeJS.Timeout | undefined;
       try {
         if (startup.config) {
           // A timeout resolves null, so "the sync never finished" is
           // distinguishable from "no harness was enabled" ([]).
           const syncResults = await Promise.race([
             syncModelsInAllHarnesses(startup.config),
-            new Promise<null>((resolve) =>
-              setTimeout(() => resolve(null), DAEMON_SYNC_TIMEOUT_MS),
-            ),
+            new Promise<null>((resolve) => {
+              syncTimer = setTimeout(() => resolve(null), DAEMON_SYNC_TIMEOUT_MS);
+            }),
           ]);
           if (syncResults === null) {
             logger.warn(
@@ -799,22 +802,23 @@ export async function daemonStart(
           } else {
             for (const { harness, result } of syncResults) {
               if (result.success) {
-                logger.info('✓ %s synced to %s', harness, result.path);
+                logger.info('%s synced to %s', harness, result.path ?? '(unknown)');
               } else {
-                logger.warn('✗ %s: %s', harness, result.error);
+                logger.warn('%s: %s', harness, result.error);
               }
             }
           }
         }
       } catch (err) {
         // The batch threw before producing per-harness results (for example
-        // buildCanonicalModels failed). Report it in the same shape as a
-        // harness failure — the daemon still starts.
+        // buildCanonicalModels failed). Report it as a batch failure — the
+        // daemon still starts.
         logger.warn(
-          '✗ %s: %s',
-          'harness model sync',
+          'model sync failed: %s',
           err instanceof Error ? err.message : String(err),
         );
+      } finally {
+        clearTimeout(syncTimer);
       }
 
       // Check for newer version — fire-and-forget

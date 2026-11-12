@@ -1044,6 +1044,14 @@ describe('harness selection settings', () => {
     expect(existsSync(join(tmpDir, '.config', 'saros', 'harnesses.json'))).toBe(false);
   });
 
+  it('updateHarnessSettings can remove the implicit opencode default on a fresh install', () => {
+    // The remove is applied to the effective selection, so disabling the
+    // implicit default is a real change and must be persisted.
+    expect(updateHarnessSettings({ add: [], remove: ['opencode'], clear: false })).toEqual([]);
+    expect(readHarnessSettings()).toEqual([]);
+    expect(existsSync(join(tmpDir, '.config', 'saros', 'harnesses.json'))).toBe(true);
+  });
+
   it('updateHarnessSettings keeps --clear authoritative on a fresh install', () => {
     expect(updateHarnessSettings({ add: [], remove: [], clear: true })).toEqual([]);
     expect(readHarnessSettings()).toEqual([]);

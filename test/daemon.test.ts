@@ -1526,6 +1526,8 @@ describe('daemonStart', () => {
         harness: 'omp',
         result: { success: false, error: 'invalid YAML in /home/u/.omp/agent/config.yml' },
       },
+      // A success without a path must not print "synced to undefined".
+      { harness: 'dsh', result: { success: true } },
     ]);
     writeBootConfig();
     vi.spyOn(console, 'log').mockImplementation(() => {});
@@ -1534,12 +1536,13 @@ describe('daemonStart', () => {
     await vi.advanceTimersByTimeAsync(2000);
 
     expect(mockLoggerInfo).toHaveBeenCalledWith(
-      '✓ %s synced to %s',
+      '%s synced to %s',
       'pi',
       '/home/u/.pi/agent/models.json',
     );
+    expect(mockLoggerInfo).toHaveBeenCalledWith('%s synced to %s', 'dsh', '(unknown)');
     expect(mockLoggerWarn).toHaveBeenCalledWith(
-      '✗ %s: %s',
+      '%s: %s',
       'omp',
       'invalid YAML in /home/u/.omp/agent/config.yml',
     );
@@ -1572,7 +1575,7 @@ describe('daemonStart', () => {
     );
     // No harness line: the result never arrived. (loadConfig itself logs info.)
     expect(mockLoggerInfo).not.toHaveBeenCalledWith(
-      '✓ %s synced to %s',
+      '%s synced to %s',
       expect.anything(),
       expect.anything(),
     );
@@ -1594,14 +1597,13 @@ describe('daemonStart', () => {
     await vi.advanceTimersByTimeAsync(2000);
 
     expect(mockLoggerWarn).toHaveBeenCalledWith(
-      '✗ %s: %s',
-      'harness model sync',
+      'model sync failed: %s',
       'canonical models unavailable',
     );
     // The boot is not turned into a failure: the daemon exits 0.
     expect(exitSpy).toHaveBeenCalledWith(0);
     expect(mockLoggerInfo).not.toHaveBeenCalledWith(
-      '✓ %s synced to %s',
+      '%s synced to %s',
       expect.anything(),
       expect.anything(),
     );
