@@ -8,6 +8,7 @@
 
 import { describe, it, expect, vi } from 'vitest';
 import {
+  catalogDrift,
   defaultRefreshFetchers,
   extractModelsDevProviderModels,
   fetchCommandcodeModels,
@@ -528,6 +529,83 @@ describe('live catalog fetchers', () => {
     } finally {
       vi.unstubAllGlobals();
     }
+  });
+});
+
+describe('catalogDrift', () => {
+  const models = {
+    alpha: { id: 'alpha', name: 'Alpha' },
+    beta: { id: 'beta', name: 'Beta' },
+  };
+
+  it('reports no drift when the file is byte-identical', () => {
+    const content = serializeModelCatalog(models);
+
+    const drift = catalogDrift(content, models);
+
+    expect(drift.changed).toBe(false);
+    expect(drift.formattingOnly).toBe(false);
+    expect(drift.bytesChanged).toBe(false);
+    expect(drift.added).toEqual([]);
+    expect(drift.removed).toEqual([]);
+    expect(drift.changedModels).toEqual([]);
+    expect(drift.nextContent).toBe(content);
+  });
+
+  it('treats a formatting-only difference as up to date', () => {
+    const content = `${JSON.stringify(models, null, 4)}\n`;
+
+    const drift = catalogDrift(content, models);
+
+    expect(drift.changed).toBe(false);
+    expect(drift.formattingOnly).toBe(true);
+    expect(drift.bytesChanged).toBe(true);
+  });
+
+  it('reports an added model as drift', () => {
+    const content = serializeModelCatalog({ alpha: models.alpha });
+
+    const drift = catalogDrift(content, models);
+
+    expect(drift.changed).toBe(true);
+    expect(drift.formattingOnly).toBe(false);
+    expect(drift.added).toEqual(['beta']);
+    expect(drift.removed).toEqual([]);
+    expect(drift.changedModels).toEqual([]);
+  });
+
+  it('reports a changed metadata field as drift', () => {
+    const content = serializeModelCatalog({
+      ...models,
+      alpha: { id: 'alpha', name: 'Old Alpha' },
+    });
+
+    const drift = catalogDrift(content, models);
+
+    expect(drift.changed).toBe(true);
+    expect(drift.formattingOnly).toBe(false);
+    expect(drift.added).toEqual([]);
+    expect(drift.removed).toEqual([]);
+    expect(drift.changedModels).toEqual(['alpha']);
+  });
+
+  it('reports a removed model as drift', () => {
+    const content = serializeModelCatalog({ ...models, ghost: { id: 'ghost' } });
+
+    const drift = catalogDrift(content, models);
+
+    expect(drift.changed).toBe(true);
+    expect(drift.formattingOnly).toBe(false);
+    expect(drift.added).toEqual([]);
+    expect(drift.removed).toEqual(['ghost']);
+    expect(drift.changedModels).toEqual([]);
+  });
+
+  it('treats a missing file with generated models as drift', () => {
+    const drift = catalogDrift(null, models);
+
+    expect(drift.changed).toBe(true);
+    expect(drift.added).toEqual(['alpha', 'beta']);
   });
 });
 

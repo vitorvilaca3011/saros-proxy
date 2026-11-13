@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **A weekly catalog refresh.** The `models-refresh` workflow runs
+  `npm run models:refresh` every Monday and opens a PR only when
+  `assets/models.json` actually changed; the PR body carries the diff, and
+  merging it publishes nothing — the catalog reaches users with the next
+  release. `npm run models:refresh -- --check` runs the same refresh without
+  writing and exits 1 when the bundled catalog is behind, so a release can
+  refuse to ship stale model data.
+
 ## [1.3.1] - 2026-11-12
 
 ### Fixed

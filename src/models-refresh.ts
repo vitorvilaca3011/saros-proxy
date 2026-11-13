@@ -506,6 +506,58 @@ export function parseCatalogContent(raw: string | null): Record<string, unknown>
   return parseCatalogObject(raw);
 }
 
+/** Comparison between the catalog on disk and a freshly generated one. */
+export interface CatalogDrift {
+  /** True when models were added, removed, or their metadata changed. */
+  changed: boolean;
+  /** True when only key order/whitespace differs; not semantic drift. */
+  formattingOnly: boolean;
+  /** True when the serialized bytes differ from the file on disk. */
+  bytesChanged: boolean;
+  /** Keys the generated catalog adds. */
+  added: string[];
+  /** Keys the generated catalog drops. */
+  removed: string[];
+  /** Keys present in both catalogs whose entry changed. */
+  changedModels: string[];
+  /** The generated catalog serialized exactly as the writer stores it. */
+  nextContent: string;
+}
+
+/**
+ * Compare the bytes on disk with a generated catalog without touching either.
+ *
+ * This is the decision `--check` (and the deterministic refresh) uses: a file
+ * that only differs in key order or whitespace is up to date, while any model
+ * added, removed, or changed is drift. Pure by construction so the check gate
+ * is testable without network access.
+ */
+export function catalogDrift(
+  previousContent: string | null,
+  models: Record<string, unknown>,
+): CatalogDrift {
+  const nextContent = serializeModelCatalog(models);
+  const previous = parseCatalogContent(previousContent);
+
+  const added = Object.keys(models).filter((key) => !(key in previous)).sort();
+  const removed = Object.keys(previous).filter((key) => !(key in models)).sort();
+  const changedModels = Object.keys(models)
+    .filter((key) => key in previous && !isDeepStrictEqual(previous[key], models[key]))
+    .sort();
+  const changed = added.length > 0 || removed.length > 0 || changedModels.length > 0;
+  const bytesChanged = nextContent !== previousContent;
+
+  return {
+    changed,
+    formattingOnly: bytesChanged && !changed,
+    bytesChanged,
+    added,
+    removed,
+    changedModels,
+    nextContent,
+  };
+}
+
 export interface RefreshIo {
   /** Read the current catalog file, or null when it does not exist. */
   read: () => string | null;
@@ -527,6 +579,8 @@ export interface ModelCatalogRefreshResult extends ModelCatalogMergeResult {
   written: boolean;
   /** True when only key order/whitespace differs from the file on disk. */
   formattingOnly: boolean;
+  /** Pure comparison between the file on disk and the generated catalog. */
+  drift: CatalogDrift;
 }
 
 /**
@@ -559,16 +613,18 @@ export async function refreshModelCatalog(
   });
   assertShrinkAllowed(merge, current, options.allowShrink);
 
-  const nextContent = serializeModelCatalog(merge.models);
-  const bytesChanged = nextContent !== previousContent;
-  const formattingOnly = bytesChanged
-    && merge.added.length === 0
-    && merge.removed.length === 0
-    && merge.changed.length === 0;
-  const written = options.dryRun !== true && bytesChanged;
-  if (written) io.write(nextContent);
+  const drift = catalogDrift(previousContent, merge.models);
+  const written = options.dryRun !== true && drift.bytesChanged;
+  if (written) io.write(drift.nextContent);
 
-  return { ...merge, previousContent, nextContent, written, formattingOnly };
+  return {
+    ...merge,
+    previousContent,
+    nextContent: drift.nextContent,
+    written,
+    formattingOnly: drift.formattingOnly,
+    drift,
+  };
 }
 
 /**
