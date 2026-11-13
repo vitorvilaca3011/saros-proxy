@@ -13,6 +13,10 @@ on:
       - '*.md'
       - 'docs/**'
       - 'LICENSE'
+      # The weekly models-refresh workflow opens a data-only PR. It is opened
+      # with GITHUB_TOKEN, so its checks cannot report reliably; the catalog is
+      # validated by the suite that runs on master after the merge.
+      - 'assets/models.json'
 
 permissions:
   contents: read
