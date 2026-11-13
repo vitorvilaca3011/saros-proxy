@@ -70,6 +70,11 @@ jobs:
         if: steps.drift.outputs.changed == 'true'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        # A PR opened with GITHUB_TOKEN does not trigger other workflows, so CI
+        # will not run on this branch. That is acceptable here because the
+        # change is data: the refresh writes atomically, refuses a shrink of
+        # more than half the catalog, and the body carries the whole diff for
+        # the human merge.
         run: |
           body="$RUNNER_TEMP/models-refresh-pr.md"
           {
