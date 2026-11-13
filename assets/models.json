@@ -38,34 +38,6 @@
     "structured_output": true,
     "tool_call": true
   },
-  "beam:free": {
-    "id": "beam:free",
-    "limit": {
-      "context": 1048576,
-      "output": 65536
-    },
-    "modalities": {
-      "input": [
-        "text"
-      ],
-      "output": [
-        "text"
-      ]
-    },
-    "name": "Beam 1.0",
-    "reasoning": true,
-    "reasoning_options": [
-      {
-        "type": "effort",
-        "values": [
-          "low",
-          "medium",
-          "high"
-        ]
-      }
-    ],
-    "tool_call": true
-  },
   "claude-haiku-5-5": {
     "cost": {
       "cache_read": 0.01,
@@ -109,74 +81,6 @@
       {
         "type": "effort",
         "values": [
-          "low",
-          "medium",
-          "high",
-          "xhigh",
-          "max"
-        ]
-      }
-    ],
-    "structured_output": true,
-    "tool_call": true
-  },
-  "crouton-alpha": {
-    "id": "crouton-alpha",
-    "limit": {
-      "context": 1048576,
-      "output": 65536
-    },
-    "modalities": {
-      "input": [
-        "text"
-      ],
-      "output": [
-        "text"
-      ]
-    },
-    "name": "Crouton Alpha",
-    "reasoning": true,
-    "reasoning_options": [
-      {
-        "type": "effort",
-        "values": [
-          "low",
-          "medium",
-          "high"
-        ]
-      }
-    ],
-    "tool_call": true
-  },
-  "crouton-alpha-free": {
-    "cost": {
-      "cache_read": 0,
-      "input": 0,
-      "output": 0
-    },
-    "id": "crouton-alpha-free",
-    "limit": {
-      "context": 1048576,
-      "output": 270000
-    },
-    "modalities": {
-      "input": [
-        "text",
-        "image",
-        "video",
-        "pdf"
-      ],
-      "output": [
-        "text"
-      ]
-    },
-    "name": "Crouton Alpha Free",
-    "reasoning": true,
-    "reasoning_options": [
-      {
-        "type": "effort",
-        "values": [
-          "minimal",
           "low",
           "medium",
           "high",
@@ -356,7 +260,7 @@
         "text"
       ]
     },
-    "name": "DeepSeek V4.1 Flash",
+    "name": "DeepSeek V4.1 Flash 1017",
     "reasoning": true,
     "reasoning_options": [
       {
@@ -407,6 +311,34 @@
       }
     ],
     "structured_output": true,
+    "tool_call": true
+  },
+  "deepseek-v4.1-flash-ultrafast": {
+    "id": "deepseek-v4.1-flash-ultrafast",
+    "limit": {
+      "context": 1048576,
+      "output": 65536
+    },
+    "modalities": {
+      "input": [
+        "text"
+      ],
+      "output": [
+        "text"
+      ]
+    },
+    "name": "DeepSeek V4.1 Flash Ultrafast",
+    "reasoning": true,
+    "reasoning_options": [
+      {
+        "type": "effort",
+        "values": [
+          "low",
+          "medium",
+          "high"
+        ]
+      }
+    ],
     "tool_call": true
   },
   "fugu-ultra": {
@@ -709,6 +641,34 @@
       }
     ],
     "structured_output": true,
+    "tool_call": true
+  },
+  "gemini-4-carbon": {
+    "id": "gemini-4-carbon",
+    "limit": {
+      "context": 1000000,
+      "output": 65536
+    },
+    "modalities": {
+      "input": [
+        "text"
+      ],
+      "output": [
+        "text"
+      ]
+    },
+    "name": "Gemini 4 Carbon",
+    "reasoning": true,
+    "reasoning_options": [
+      {
+        "type": "effort",
+        "values": [
+          "low",
+          "medium",
+          "high"
+        ]
+      }
+    ],
     "tool_call": true
   },
   "glm-5": {
@@ -1929,6 +1889,34 @@
     ],
     "tool_call": true
   },
+  "inkling-2-small:free": {
+    "id": "inkling-2-small:free",
+    "limit": {
+      "context": 1048576,
+      "output": 65536
+    },
+    "modalities": {
+      "input": [
+        "text"
+      ],
+      "output": [
+        "text"
+      ]
+    },
+    "name": "Inkling 2 Small",
+    "reasoning": true,
+    "reasoning_options": [
+      {
+        "type": "effort",
+        "values": [
+          "low",
+          "medium",
+          "high"
+        ]
+      }
+    ],
+    "tool_call": true
+  },
   "inkling-small": {
     "cost": {
       "cache_read": 0.1,
@@ -2243,6 +2231,38 @@
     ],
     "tool_call": true
   },
+  "longcat-2.5-free": {
+    "cost": {
+      "cache_read": 0,
+      "input": 0,
+      "output": 0
+    },
+    "id": "longcat-2.5-free",
+    "interleaved": {
+      "field": "reasoning_content"
+    },
+    "limit": {
+      "context": 1000000,
+      "output": 262144
+    },
+    "modalities": {
+      "input": [
+        "text",
+        "image"
+      ],
+      "output": [
+        "text"
+      ]
+    },
+    "name": "LongCat 2.5 Free",
+    "reasoning": true,
+    "reasoning_options": [
+      {
+        "type": "toggle"
+      }
+    ],
+    "tool_call": true
+  },
   "mimo-v2.6-flash": {
     "cost": {
       "cache_read": 0.0028,
@@ -2497,6 +2517,34 @@
       }
     ],
     "structured_output": true,
+    "tool_call": true
+  },
+  "muse-ember": {
+    "id": "muse-ember",
+    "limit": {
+      "context": 1048576,
+      "output": 65536
+    },
+    "modalities": {
+      "input": [
+        "text"
+      ],
+      "output": [
+        "text"
+      ]
+    },
+    "name": "Muse Ember",
+    "reasoning": true,
+    "reasoning_options": [
+      {
+        "type": "effort",
+        "values": [
+          "low",
+          "medium",
+          "high"
+        ]
+      }
+    ],
     "tool_call": true
   },
   "muse-spark-1.1": {
