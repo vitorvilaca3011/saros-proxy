@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.3.2] - 2026-11-13
+
+### Fixed
+
+- **A pinned short model name reaches the provider's native id.**
+  `deepseek-v4.1-flash@commandcode` was forwarded as the bare name, which
+  CommandCode does not serve — `400 Model … is not supported on this endpoint`,
+  a request fault with no retry — while the same name without the pin worked.
+  The native-id rewrite now applies on the pinned path too; a pinned id that is
+  already native, and every provider without a rewrite, stay untouched.
+
 ### Added
 
 - **A weekly catalog refresh.** The `models-refresh` workflow runs
@@ -698,7 +709,8 @@ First stable release. The public surface — the `/v1/*` and `/zen/go/v1/*` rout
 - Hop-by-hop header sanitization
 - Non-root Docker user
 
-[Unreleased]: https://github.com/vitorvilaca3011/saros-proxy/compare/v1.3.1...HEAD
+[Unreleased]: https://github.com/vitorvilaca3011/saros-proxy/compare/v1.3.2...HEAD
+[1.3.2]: https://github.com/vitorvilaca3011/saros-proxy/compare/v1.3.1...v1.3.2
 [1.3.1]: https://github.com/vitorvilaca3011/saros-proxy/compare/v1.3.0...v1.3.1
 [1.3.0]: https://github.com/vitorvilaca3011/saros-proxy/compare/v1.2.0...v1.3.0
 [1.2.0]: https://github.com/vitorvilaca3011/saros-proxy/compare/v1.1.2...v1.2.0

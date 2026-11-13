@@ -151,18 +151,26 @@ function captureFailedRequest(ctx: RetryContext, status: number, errorBody: stri
 
 /**
  * Resolve the model id to send upstream for one attempt. An '@provider'
- * suffix is saros's routing shim and is always stripped; otherwise, when the
- * serving provider names the same model differently (bare name matches its
- * catalog under a vendor-prefixed id — e.g. 'deepseek-v4-flash' →
- * 'deepseek/deepseek-v4-flash' on commandcode), the provider's native id is
- * used so the upstream recognizes it. null when no rewrite is needed.
+ * suffix is saros's routing shim and is always stripped; on top of that —
+ * pinned or not — when the serving provider names the same model differently
+ * (bare name matches its catalog under a vendor-prefixed id, e.g.
+ * 'deepseek-v4-flash' → 'deepseek/deepseek-v4-flash' on commandcode), the
+ * provider's native id is used so the upstream recognizes it. Without the
+ * rewrite a pinned short name reached commandcode as-is and was answered with
+ * a 400 unsupported_model, which is a request fault: no retry, straight to
+ * the client.
+ *
+ * Returns the id to forward when it differs from the model saros received
+ * (the stripped id for a pinned model), null when no rewrite is needed.
  */
 function targetModelId(modelId: string | undefined, provider: KeyProvider): string | null {
   if (!modelId) return null;
-  if (parseProviderSuffix(modelId)) return stripProviderSuffix(modelId);
-  const bare = modelId.split('/').pop() ?? modelId;
+  const pinned = parseProviderSuffix(modelId) !== null;
+  const stripped = pinned ? stripProviderSuffix(modelId) : modelId;
+  const bare = stripped.split('/').pop() ?? modelId;
   const native = provider.resolveNativeId?.(bare.toLowerCase());
-  return native && native !== modelId ? native : null;
+  if (native && native !== stripped) return native;
+  return pinned ? stripped : null;
 }
 
 /** Outbound body plus the session id saros must add when the client sent none. */
