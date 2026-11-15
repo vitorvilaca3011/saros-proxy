@@ -1164,6 +1164,11 @@ describe('syncModelsInAllHarnesses', () => {
 });
 
 describe('buildCanonicalModels — provider catalogs', () => {
+  // Pinned format string: swapped %s placeholders must fail the positional
+  // assertions below, not just the id values.
+  const ambiguousWarning =
+    'ambiguous bare name "%s" in the %s catalog: "%s" and "%s" normalize to it';
+
   beforeEach(() => {
     mockedFetchModelsDevProvider.mockReset();
     mockedFetchModelsDevProvider.mockResolvedValue(null);
@@ -1267,9 +1272,13 @@ describe('buildCanonicalModels — provider catalogs', () => {
 
     // One warning for the ambiguous pair, naming both catalog ids.
     expect(warn).toHaveBeenCalledTimes(1);
-    const rendered = warn.mock.calls[0].map((part) => String(part)).join(' ');
-    expect(rendered).toContain('vendor/x/alpha');
-    expect(rendered).toContain('vendor/y/alpha');
+    expect(warn).toHaveBeenCalledWith(
+      expect.stringContaining(ambiguousWarning),
+      'alpha',
+      'commandcode',
+      'vendor/x/alpha',
+      'vendor/y/alpha',
+    );
 
     // The first id stays canonical (exact lookup keeps working) and the
     // second remains an alias — ambiguity is reported, not auto-resolved.
@@ -1278,6 +1287,40 @@ describe('buildCanonicalModels — provider catalogs', () => {
     expect(first.name).toBe('X Alpha (1)');
     expect(first.aliases).toEqual(['vendor/y/alpha']);
     expect(result['vendor/y/alpha@commandcode']).toBeUndefined();
+  });
+
+  it('reports a bare name once when three ids of one catalog collide', async () => {
+    mockedFetchUpstreamIds.mockResolvedValue(['glm-5']);
+    mockedFetchModelsDevMetadata.mockResolvedValue(null);
+    mockedBuildMinimalStub.mockImplementation((id: string) => ({ id, name: id }));
+    vi.spyOn(commandcodeProvider, 'fetchCatalog').mockResolvedValue([
+      { id: 'vendor/x/alpha', name: 'X Alpha' },
+      { id: 'vendor/y/alpha', name: 'Y Alpha' },
+      { id: 'vendor/z/alpha', name: 'Z Alpha' },
+    ]);
+    const warn = vi.spyOn(logger, 'warn').mockImplementation(() => {});
+
+    const config = {
+      port: 3000,
+      keys: [{ label: 'cc', key: 'user_cc-key-abcdefghijklmnop', provider: 'commandcode' }],
+    } as unknown as ProxyConfig;
+
+    const result = await buildCanonicalModels(config);
+
+    // The third colliding id is the same finding, not a second warning.
+    expect(warn).toHaveBeenCalledTimes(1);
+    expect(warn).toHaveBeenCalledWith(
+      expect.stringContaining(ambiguousWarning),
+      'alpha',
+      'commandcode',
+      'vendor/x/alpha',
+      'vendor/y/alpha',
+    );
+    // Both losers remain aliases of the first entry.
+    expect((result['vendor/x/alpha@commandcode'] as Record<string, unknown>).aliases).toEqual([
+      'vendor/y/alpha',
+      'vendor/z/alpha',
+    ]);
   });
 
   it('warns once when two upstream ids share a bare name', async () => {
@@ -1289,12 +1332,47 @@ describe('buildCanonicalModels — provider catalogs', () => {
     const result = await buildCanonicalModels({ port: 3000 } as ProxyConfig);
 
     expect(warn).toHaveBeenCalledTimes(1);
-    const rendered = warn.mock.calls[0].map((part) => String(part)).join(' ');
-    expect(rendered).toContain('vendor/x/alpha');
-    expect(rendered).toContain('vendor/y/alpha');
+    expect(warn).toHaveBeenCalledWith(
+      expect.stringContaining(ambiguousWarning),
+      'alpha',
+      'upstream',
+      'vendor/x/alpha',
+      'vendor/y/alpha',
+    );
 
     // Both upstream ids stay addressable exactly; only the bare-name index is
     // ambiguous.
+    expect(result['vendor/x/alpha']).toBeDefined();
+    expect(result['vendor/y/alpha']).toBeDefined();
+  });
+
+  it('warns once for the same pair seen upstream and in a provider catalog', async () => {
+    // The default opencode-go key means the upstream /models pass and
+    // opencodeGoProvider.fetchCatalog() return the same ids.
+    mockedFetchUpstreamIds.mockResolvedValue(['vendor/x/alpha', 'vendor/y/alpha']);
+    mockedFetchModelsDevMetadata.mockResolvedValue(null);
+    mockedBuildMinimalStub.mockImplementation((id: string) => ({ id, name: id }));
+    vi.spyOn(opencodeGoProvider, 'fetchCatalog').mockResolvedValue([
+      { id: 'vendor/x/alpha' },
+      { id: 'vendor/y/alpha' },
+    ]);
+    const warn = vi.spyOn(logger, 'warn').mockImplementation(() => {});
+
+    const config = {
+      port: 3000,
+      keys: [{ label: 'oc', key: 'sk-oc-key-abcdefghijklmnop', provider: 'opencode-go' }],
+    } as unknown as ProxyConfig;
+
+    const result = await buildCanonicalModels(config);
+
+    expect(warn).toHaveBeenCalledTimes(1);
+    expect(warn).toHaveBeenCalledWith(
+      expect.stringContaining(ambiguousWarning),
+      'alpha',
+      'upstream',
+      'vendor/x/alpha',
+      'vendor/y/alpha',
+    );
     expect(result['vendor/x/alpha']).toBeDefined();
     expect(result['vendor/y/alpha']).toBeDefined();
   });
