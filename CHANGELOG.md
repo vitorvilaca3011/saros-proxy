@@ -7,6 +7,50 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.3.3] - 2026-11-15
+
+### Fixed
+
+- **`autostart status` no longer calls an uninstalled unit "unknown".**
+  `systemctl --user is-active` and `is-enabled` answer exit 4 for a unit that
+  does not exist (measured on systemd 255), but the answer-status allowlists
+  only accepted `0|1` and `0|3`, so `status` printed
+  `Cannot determine systemd autostart status` on a host where nothing was
+  installed — a healthy machine reading as a broken install. Exit 4 is now an
+  answer on both queries; any other code still falls through to the warning.
+- **`autostart uninstall` fails when `daemon-reload` fails.** The unit file was
+  removed and a failing reload only produced a warning: the file was gone, the
+  user manager still had the old definition loaded, and a script saw success.
+  The path now exits 1 and keeps the warning.
+- **An ambiguous bare model name is reported instead of dropped silently.**
+  `buildCanonicalModels` kept a first-wins bare-name index, so two ids of one
+  catalog normalizing to the same name left the second as an alias with its
+  limits, modalities and reasoning options discarded before any lookup saw
+  them. The pair is now reported once per build, naming both ids; index
+  insertion stays first-wins and cross-provider aliasing stays silent.
+
+### Changed
+
+- **The 50% shrink guard is documented as deliberate.** The weekly refresh
+  churns models upstream, so a 10% trigger (or "more than 3 removals") would
+  abort a legitimate refresh as soon as a week crosses it, pushing the operator
+  into `--allow-shrink` and cancelling the guard. The one recorded weekly
+  refresh removed 3 of 90 models — under both proposals — but the threshold
+  stays above churn because what it catches is a truncated live catalog, which
+  drops more than half the catalog at once. Behaviour unchanged.
+- **The models.dev `User-Agent` is described as a fixed contract, not a gate.**
+  The 403 for a library-default UA was measured once on 2026-11-06 and did not
+  reproduce; the test moved from claiming a requirement to pinning the header.
+
+### Documentation
+
+- The README links `docs/LLM_INSTRUCTIONS.md` with an absolute GitHub URL: the
+  relative link did not resolve on the npmjs package page, and `docs/` is not
+  part of the published tarball.
+- Verified — in both log modes, with a probe that exits immediately — that the
+  last log line before `process.exit(0)` reaches the destination, so no
+  explicit flush is needed.
+
 ## [1.3.2] - 2026-11-13
 
 ### Fixed
@@ -709,7 +753,8 @@ First stable release. The public surface — the `/v1/*` and `/zen/go/v1/*` rout
 - Hop-by-hop header sanitization
 - Non-root Docker user
 
-[Unreleased]: https://github.com/vitorvilaca3011/saros-proxy/compare/v1.3.2...HEAD
+[Unreleased]: https://github.com/vitorvilaca3011/saros-proxy/compare/v1.3.3...HEAD
+[1.3.3]: https://github.com/vitorvilaca3011/saros-proxy/compare/v1.3.2...v1.3.3
 [1.3.2]: https://github.com/vitorvilaca3011/saros-proxy/compare/v1.3.1...v1.3.2
 [1.3.1]: https://github.com/vitorvilaca3011/saros-proxy/compare/v1.3.0...v1.3.1
 [1.3.0]: https://github.com/vitorvilaca3011/saros-proxy/compare/v1.2.0...v1.3.0
