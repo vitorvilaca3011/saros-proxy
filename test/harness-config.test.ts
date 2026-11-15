@@ -1365,6 +1365,9 @@ describe('buildCanonicalModels — provider catalogs', () => {
 
     const result = await buildCanonicalModels(config);
 
+    // Upstream alone would also warn once: prove the mirrored provider
+    // catalog actually ran, so this exercises the pair dedupe.
+    expect(opencodeGoProvider.fetchCatalog).toHaveBeenCalledTimes(1);
     expect(warn).toHaveBeenCalledTimes(1);
     expect(warn).toHaveBeenCalledWith(
       expect.stringContaining(ambiguousWarning),
@@ -1375,6 +1378,47 @@ describe('buildCanonicalModels — provider catalogs', () => {
     );
     expect(result['vendor/x/alpha']).toBeDefined();
     expect(result['vendor/y/alpha']).toBeDefined();
+  });
+
+  it('warns once when a three-id ambiguous group is mirrored by a provider catalog', async () => {
+    mockedFetchUpstreamIds.mockResolvedValue([
+      'vendor/x/alpha',
+      'vendor/y/alpha',
+      'vendor/z/alpha',
+    ]);
+    mockedFetchModelsDevMetadata.mockResolvedValue(null);
+    mockedBuildMinimalStub.mockImplementation((id: string) => ({ id, name: id }));
+    vi.spyOn(opencodeGoProvider, 'fetchCatalog').mockResolvedValue([
+      { id: 'vendor/x/alpha' },
+      { id: 'vendor/y/alpha' },
+      { id: 'vendor/z/alpha' },
+    ]);
+    const warn = vi.spyOn(logger, 'warn').mockImplementation(() => {});
+
+    const config = {
+      port: 3000,
+      keys: [{ label: 'oc', key: 'sk-oc-key-abcdefghijklmnop', provider: 'opencode-go' }],
+    } as unknown as ProxyConfig;
+
+    const result = await buildCanonicalModels(config);
+
+    // Marking the catalog bare before the pair check keeps the mirrored third
+    // id from starting a new pair warning.
+    expect(opencodeGoProvider.fetchCatalog).toHaveBeenCalledTimes(1);
+    expect(warn).toHaveBeenCalledTimes(1);
+    expect(warn).toHaveBeenCalledWith(
+      expect.stringContaining(ambiguousWarning),
+      'alpha',
+      'upstream',
+      'vendor/x/alpha',
+      'vendor/y/alpha',
+    );
+    // Every mirrored id mounts the canonical entry (exact-id aliases intact).
+    expect((result['vendor/x/alpha'] as Record<string, unknown>).aliases).toEqual([
+      'vendor/x/alpha',
+      'vendor/y/alpha',
+      'vendor/z/alpha',
+    ]);
   });
 
   it('enriches @commandcode entries from models.dev and never drops unknown ones', async () => {

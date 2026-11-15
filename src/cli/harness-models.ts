@@ -280,18 +280,28 @@ async function appendProviderCatalogModels(
 
   // Bare-name index of what's already in the map (from the primary upstream)
   const byBareName = new Map<string, string>();
-  // Ambiguity reports are deduplicated two ways: the same id pair is reported
-  // once per build even when the upstream list and a provider catalog expose
-  // it twice (opencode-go mirrors the upstream /models endpoint), and one
-  // catalog reports a bare name once rather than once per extra colliding id.
+  // Ambiguity reports are deduplicated two ways:
+  //  - reportedCatalogBares assumes one catalog per owner (ALL_PROVIDERS has
+  //    unique ids) and reports a bare name once per catalog, so 3+ colliding
+  //    ids are one finding rather than one warning per extra colliding id.
+  //    It is marked before the pair check: otherwise the mirrored catalog
+  //    would return on the pair and later re-report the same group.
+  //  - reportedPairs reports the same id pair once per build even when the
+  //    upstream list and a provider catalog expose it twice (opencode-go
+  //    mirrors the upstream /models endpoint). When two providers serve the
+  //    same pair, the owner in the log is whichever reported first — under
+  //    Promise.all that can vary between runs.
+  // Both keys join with NUL. Ids come from URL path segments, so NUL is not
+  // reachable and the join is collision-free; JSON.stringify is unnecessary.
   const reportedPairs = new Set<string>();
   const reportedCatalogBares = new Set<string>();
   const warnAmbiguous = (bare: string, firstId: string, secondId: string, owner: string): void => {
     const pairKey = [firstId, secondId].sort().join('\u0000');
     const catalogKey = `${owner}\u0000${bare}`;
-    if (reportedPairs.has(pairKey) || reportedCatalogBares.has(catalogKey)) return;
-    reportedPairs.add(pairKey);
+    if (reportedCatalogBares.has(catalogKey)) return;
     reportedCatalogBares.add(catalogKey);
+    if (reportedPairs.has(pairKey)) return;
+    reportedPairs.add(pairKey);
     logger.warn(
       'ambiguous bare name "%s" in the %s catalog: "%s" and "%s" normalize to it',
       bare,
