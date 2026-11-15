@@ -20,6 +20,7 @@ import {
 import type { ModelsDevModelMap } from '../models-dev.js';
 import { loadModelsCatalog } from '../models-catalog.js';
 import { ensureEffortLadder } from '../model-ladder.js';
+import { logger } from '../logger.js';
 import { allProviders, getProvider, inferProvider } from '../providers/index.js';
 import type { KeyProvider, ProviderId } from '../providers/index.js';
 
@@ -256,6 +257,12 @@ function providerCatalogToCanonical(
  * Provider-only models (claude-*, unique vendor ids) are added as
  * `<id>@<providerId>` suffixed entries.
  *
+ * Two ids in the SAME catalog that normalize to one bare name are ambiguous:
+ * the first stays canonical and the second aliases onto it (unchanged
+ * behavior), but the pair is warned about once per build instead of the
+ * second model's metadata being discarded silently. Cross-provider matches
+ * are intentional and stay silent.
+ *
  * Only providers the user actually has keys for are merged: exposing
  * provider-only models without a usable key would create broken entries in
  * harness configs.
@@ -273,10 +280,45 @@ async function appendProviderCatalogModels(
 
   // Bare-name index of what's already in the map (from the primary upstream)
   const byBareName = new Map<string, string>();
-  for (const id of existingIds) {
+  // Ambiguity reports are deduplicated two ways:
+  //  - reportedCatalogBares assumes one catalog per owner (ALL_PROVIDERS has
+  //    unique ids) and reports a bare name once per catalog, so 3+ colliding
+  //    ids are one finding rather than one warning per extra colliding id.
+  //    It is marked before the pair check: otherwise the mirrored catalog
+  //    would return on the pair and later re-report the same group.
+  //  - reportedPairs reports the same id pair once per build even when the
+  //    upstream list and a provider catalog expose it twice (opencode-go
+  //    mirrors the upstream /models endpoint). When two providers serve the
+  //    same pair, the owner in the log is whichever reported first — under
+  //    Promise.all that can vary between runs.
+  // Both keys join with NUL. Ids come from URL path segments, so NUL is not
+  // reachable and the join is collision-free; JSON.stringify is unnecessary.
+  const reportedPairs = new Set<string>();
+  const reportedCatalogBares = new Set<string>();
+  const warnAmbiguous = (bare: string, firstId: string, secondId: string, owner: string): void => {
+    const pairKey = [firstId, secondId].sort().join('\u0000');
+    const catalogKey = `${owner}\u0000${bare}`;
+    if (reportedCatalogBares.has(catalogKey)) return;
+    reportedCatalogBares.add(catalogKey);
+    if (reportedPairs.has(pairKey)) return;
+    reportedPairs.add(pairKey);
+    logger.warn(
+      'ambiguous bare name "%s" in the %s catalog: "%s" and "%s" normalize to it',
+      bare,
+      owner,
+      firstId,
+      secondId,
+    );
+  };
+  // Index insertion is first-wins (unchanged); the helper reports the pairs
+  // that used to lose their entry silently.
+  const indexBareName = (index: Map<string, string>, id: string, owner: string): void => {
     const bare = bareModelName(id);
-    if (!byBareName.has(bare)) byBareName.set(bare, id);
-  }
+    const firstId = index.get(bare);
+    if (firstId === undefined) index.set(bare, id);
+    else if (firstId !== id) warnAmbiguous(bare, firstId, id, owner);
+  };
+  for (const id of existingIds) indexBareName(byBareName, id, 'upstream');
 
   await Promise.all(
     providers.map(async (provider) => {
@@ -285,9 +327,14 @@ async function appendProviderCatalogModels(
       // models.dev slice for this provider, consulted per entry. Shared TTL
       // cache: when buildMinimalStub already fetched opencode-go this is free.
       const devModels = (await fetchModelsDevProvider(provider.id)) ?? {};
+      // Raw ids already seen in THIS catalog, by bare name. A repeat means the
+      // catalog itself is ambiguous — the cross-provider map below would
+      // otherwise alias the second id onto the first without a trace.
+      const catalogBareIds = new Map<string, string>();
       for (const entry of catalog) {
         const rawId = typeof entry.id === 'string' ? entry.id : '';
         if (!rawId) continue;
+        indexBareName(catalogBareIds, rawId, provider.id);
         const bare = bareModelName(rawId);
         const existingId = byBareName.get(bare);
         if (existingId) {

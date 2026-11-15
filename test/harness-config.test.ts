@@ -122,6 +122,7 @@ import {
 } from '../src/cli/harness-sync.js';
 import { commandcodeProvider } from '../src/providers/commandcode.js';
 import { opencodeGoProvider } from '../src/providers/opencode-go.js';
+import { logger } from '../src/logger.js';
 
 const mockedFs = vi.mocked(fs);
 const mockedFetchUpstreamIds = vi.mocked(fetchUpstreamModelIds);
@@ -1163,6 +1164,11 @@ describe('syncModelsInAllHarnesses', () => {
 });
 
 describe('buildCanonicalModels — provider catalogs', () => {
+  // Pinned format string: swapped %s placeholders must fail the positional
+  // assertions below, not just the id values.
+  const ambiguousWarning =
+    'ambiguous bare name "%s" in the %s catalog: "%s" and "%s" normalize to it';
+
   beforeEach(() => {
     mockedFetchModelsDevProvider.mockReset();
     mockedFetchModelsDevProvider.mockResolvedValue(null);
@@ -1175,6 +1181,7 @@ describe('buildCanonicalModels — provider catalogs', () => {
   });
 
   it('appends commandcode-only models as @commandcode entries and aliases shared ones', async () => {
+    const warn = vi.spyOn(logger, 'warn').mockImplementation(() => {});
     mockedFetchUpstreamIds.mockResolvedValue(['deepseek-v4-flash', 'glm-5']);
     mockedFetchModelsDevMetadata.mockResolvedValue(null);
     mockedBuildMinimalStub.mockImplementation((id: string) => ({
@@ -1241,6 +1248,177 @@ describe('buildCanonicalModels — provider catalogs', () => {
 
     // Rotation width: the upstream entry shows how many keys can serve it.
     expect(((result['glm-5'] as Record<string, unknown>).name)).toBe('glm-5 (1)');
+
+    // Cross-provider aliasing is intentional, not an ambiguous catalog.
+    expect(warn).not.toHaveBeenCalled();
+  });
+
+  it('warns once when two ids of one provider catalog share a bare name', async () => {
+    mockedFetchUpstreamIds.mockResolvedValue(['glm-5']);
+    mockedFetchModelsDevMetadata.mockResolvedValue(null);
+    mockedBuildMinimalStub.mockImplementation((id: string) => ({ id, name: id }));
+    vi.spyOn(commandcodeProvider, 'fetchCatalog').mockResolvedValue([
+      { id: 'vendor/x/alpha', name: 'X Alpha', context_length: 111 },
+      { id: 'vendor/y/alpha', name: 'Y Alpha', context_length: 222 },
+    ]);
+    const warn = vi.spyOn(logger, 'warn').mockImplementation(() => {});
+
+    const config = {
+      port: 3000,
+      keys: [{ label: 'cc', key: 'user_cc-key-abcdefghijklmnop', provider: 'commandcode' }],
+    } as unknown as ProxyConfig;
+
+    const result = await buildCanonicalModels(config);
+
+    // One warning for the ambiguous pair, naming both catalog ids.
+    expect(warn).toHaveBeenCalledTimes(1);
+    expect(warn).toHaveBeenCalledWith(
+      expect.stringContaining(ambiguousWarning),
+      'alpha',
+      'commandcode',
+      'vendor/x/alpha',
+      'vendor/y/alpha',
+    );
+
+    // The first id stays canonical (exact lookup keeps working) and the
+    // second remains an alias — ambiguity is reported, not auto-resolved.
+    const first = result['vendor/x/alpha@commandcode'] as Record<string, unknown>;
+    expect(first).toBeDefined();
+    expect(first.name).toBe('X Alpha (1)');
+    expect(first.aliases).toEqual(['vendor/y/alpha']);
+    expect(result['vendor/y/alpha@commandcode']).toBeUndefined();
+  });
+
+  it('reports a bare name once when three ids of one catalog collide', async () => {
+    mockedFetchUpstreamIds.mockResolvedValue(['glm-5']);
+    mockedFetchModelsDevMetadata.mockResolvedValue(null);
+    mockedBuildMinimalStub.mockImplementation((id: string) => ({ id, name: id }));
+    vi.spyOn(commandcodeProvider, 'fetchCatalog').mockResolvedValue([
+      { id: 'vendor/x/alpha', name: 'X Alpha' },
+      { id: 'vendor/y/alpha', name: 'Y Alpha' },
+      { id: 'vendor/z/alpha', name: 'Z Alpha' },
+    ]);
+    const warn = vi.spyOn(logger, 'warn').mockImplementation(() => {});
+
+    const config = {
+      port: 3000,
+      keys: [{ label: 'cc', key: 'user_cc-key-abcdefghijklmnop', provider: 'commandcode' }],
+    } as unknown as ProxyConfig;
+
+    const result = await buildCanonicalModels(config);
+
+    // The third colliding id is the same finding, not a second warning.
+    expect(warn).toHaveBeenCalledTimes(1);
+    expect(warn).toHaveBeenCalledWith(
+      expect.stringContaining(ambiguousWarning),
+      'alpha',
+      'commandcode',
+      'vendor/x/alpha',
+      'vendor/y/alpha',
+    );
+    // Both losers remain aliases of the first entry.
+    expect((result['vendor/x/alpha@commandcode'] as Record<string, unknown>).aliases).toEqual([
+      'vendor/y/alpha',
+      'vendor/z/alpha',
+    ]);
+  });
+
+  it('warns once when two upstream ids share a bare name', async () => {
+    mockedFetchUpstreamIds.mockResolvedValue(['vendor/x/alpha', 'vendor/y/alpha']);
+    mockedFetchModelsDevMetadata.mockResolvedValue(null);
+    mockedBuildMinimalStub.mockImplementation((id: string) => ({ id, name: id }));
+    const warn = vi.spyOn(logger, 'warn').mockImplementation(() => {});
+
+    const result = await buildCanonicalModels({ port: 3000 } as ProxyConfig);
+
+    expect(warn).toHaveBeenCalledTimes(1);
+    expect(warn).toHaveBeenCalledWith(
+      expect.stringContaining(ambiguousWarning),
+      'alpha',
+      'upstream',
+      'vendor/x/alpha',
+      'vendor/y/alpha',
+    );
+
+    // Both upstream ids stay addressable exactly; only the bare-name index is
+    // ambiguous.
+    expect(result['vendor/x/alpha']).toBeDefined();
+    expect(result['vendor/y/alpha']).toBeDefined();
+  });
+
+  it('warns once for the same pair seen upstream and in a provider catalog', async () => {
+    // The default opencode-go key means the upstream /models pass and
+    // opencodeGoProvider.fetchCatalog() return the same ids.
+    mockedFetchUpstreamIds.mockResolvedValue(['vendor/x/alpha', 'vendor/y/alpha']);
+    mockedFetchModelsDevMetadata.mockResolvedValue(null);
+    mockedBuildMinimalStub.mockImplementation((id: string) => ({ id, name: id }));
+    vi.spyOn(opencodeGoProvider, 'fetchCatalog').mockResolvedValue([
+      { id: 'vendor/x/alpha' },
+      { id: 'vendor/y/alpha' },
+    ]);
+    const warn = vi.spyOn(logger, 'warn').mockImplementation(() => {});
+
+    const config = {
+      port: 3000,
+      keys: [{ label: 'oc', key: 'sk-oc-key-abcdefghijklmnop', provider: 'opencode-go' }],
+    } as unknown as ProxyConfig;
+
+    const result = await buildCanonicalModels(config);
+
+    // Upstream alone would also warn once: prove the mirrored provider
+    // catalog actually ran, so this exercises the pair dedupe.
+    expect(opencodeGoProvider.fetchCatalog).toHaveBeenCalledTimes(1);
+    expect(warn).toHaveBeenCalledTimes(1);
+    expect(warn).toHaveBeenCalledWith(
+      expect.stringContaining(ambiguousWarning),
+      'alpha',
+      'upstream',
+      'vendor/x/alpha',
+      'vendor/y/alpha',
+    );
+    expect(result['vendor/x/alpha']).toBeDefined();
+    expect(result['vendor/y/alpha']).toBeDefined();
+  });
+
+  it('warns once when a three-id ambiguous group is mirrored by a provider catalog', async () => {
+    mockedFetchUpstreamIds.mockResolvedValue([
+      'vendor/x/alpha',
+      'vendor/y/alpha',
+      'vendor/z/alpha',
+    ]);
+    mockedFetchModelsDevMetadata.mockResolvedValue(null);
+    mockedBuildMinimalStub.mockImplementation((id: string) => ({ id, name: id }));
+    vi.spyOn(opencodeGoProvider, 'fetchCatalog').mockResolvedValue([
+      { id: 'vendor/x/alpha' },
+      { id: 'vendor/y/alpha' },
+      { id: 'vendor/z/alpha' },
+    ]);
+    const warn = vi.spyOn(logger, 'warn').mockImplementation(() => {});
+
+    const config = {
+      port: 3000,
+      keys: [{ label: 'oc', key: 'sk-oc-key-abcdefghijklmnop', provider: 'opencode-go' }],
+    } as unknown as ProxyConfig;
+
+    const result = await buildCanonicalModels(config);
+
+    // Marking the catalog bare before the pair check keeps the mirrored third
+    // id from starting a new pair warning.
+    expect(opencodeGoProvider.fetchCatalog).toHaveBeenCalledTimes(1);
+    expect(warn).toHaveBeenCalledTimes(1);
+    expect(warn).toHaveBeenCalledWith(
+      expect.stringContaining(ambiguousWarning),
+      'alpha',
+      'upstream',
+      'vendor/x/alpha',
+      'vendor/y/alpha',
+    );
+    // Every mirrored id mounts the canonical entry (exact-id aliases intact).
+    expect((result['vendor/x/alpha'] as Record<string, unknown>).aliases).toEqual([
+      'vendor/x/alpha',
+      'vendor/y/alpha',
+      'vendor/z/alpha',
+    ]);
   });
 
   it('enriches @commandcode entries from models.dev and never drops unknown ones', async () => {
