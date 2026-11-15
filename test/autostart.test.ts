@@ -850,6 +850,7 @@ describe('autostart — systemd method (Linux)', () => {
       ['--user', 'disable', '--now', 'saros-proxy.service'],
       ['--user', 'daemon-reload'],
     ]);
+    expect(process.exitCode).toBeUndefined();
   });
 
   it('default uninstall on Linux uses systemd', async () => {
@@ -908,7 +909,7 @@ describe('autostart — systemd method (Linux)', () => {
     }
   });
 
-  it('uninstall warns but still removes the unit when daemon-reload fails', async () => {
+  it('uninstall removes the unit, warns, and exits 1 when daemon-reload fails', async () => {
     const { autostartInstall, autostartUninstall } = await import('../src/cli/autostart.js');
     await autostartInstall(4242, 'systemd');
     mockExecFileSync.mockReset();
@@ -930,6 +931,9 @@ describe('autostart — systemd method (Linux)', () => {
       expect(message).toContain('daemon-reload');
       expect(message).toContain('Transport endpoint');
       expect(logSpy).toHaveBeenCalledWith(expect.stringContaining('Auto-start removed'));
+      // The file is gone but the user manager still holds the old unit: scripts
+      // must see the partial failure.
+      expect(process.exitCode).toBe(1);
     } finally {
       logSpy.mockRestore();
     }
@@ -1002,6 +1006,46 @@ describe('autostart — systemd method (Linux)', () => {
       autostartStatus('systemd');
       expect(logSpy).toHaveBeenCalledWith(expect.stringContaining('not installed (systemd)'));
       expect(mockLoggerWarn).not.toHaveBeenCalled();
+    } finally {
+      logSpy.mockRestore();
+    }
+  });
+
+  it('status reports not installed for a missing unit that exits 4 on both queries', async () => {
+    const { autostartStatus } = await import('../src/cli/autostart.js');
+    // Measured on systemd 255: a nonexistent unit answers `inactive`/`not-found`
+    // with exit status 4, not 1/3.
+    mockExecFileSync.mockImplementation((_cmd: string, args: string[]) => {
+      const enabled = args.includes('is-enabled');
+      throw Object.assign(new Error('Command failed'), {
+        status: 4,
+        stdout: Buffer.from(enabled ? 'not-found' : 'inactive'),
+      });
+    });
+    const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+    try {
+      autostartStatus('systemd');
+      expect(logSpy).toHaveBeenCalledWith(expect.stringContaining('not installed (systemd)'));
+      expect(mockLoggerWarn).not.toHaveBeenCalled();
+    } finally {
+      logSpy.mockRestore();
+    }
+  });
+
+  it('status still warns when systemctl exits with an unknown status', async () => {
+    const { autostartStatus } = await import('../src/cli/autostart.js');
+    mockExecFileSync.mockImplementation((_cmd: string, args: string[]) => {
+      const enabled = args.includes('is-enabled');
+      throw Object.assign(new Error('Command failed'), {
+        status: 5,
+        stdout: Buffer.from(enabled ? 'not-found' : 'inactive'),
+      });
+    });
+    const logSpy = vi.spyOn(console, 'log').mockImplementation(() => {});
+    try {
+      autostartStatus('systemd');
+      expect(mockLoggerWarn.mock.calls[0].join(' ')).toContain('Cannot determine');
+      expect(logSpy).not.toHaveBeenCalledWith(expect.stringContaining('not installed (systemd)'));
     } finally {
       logSpy.mockRestore();
     }

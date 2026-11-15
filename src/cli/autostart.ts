@@ -238,12 +238,14 @@ const SYSTEMCTL_TIMEOUT_MS = 10_000;
 
 /**
  * Exit statuses systemctl documents as answers: `is-enabled` returns 0
- * (enabled) or 1 (disabled/not-found); `is-active` returns 0 (active) or 3
- * (inactive). Anything else — missing binary, no user bus, timeout — is a
- * failure to answer.
+ * (enabled), 1 (disabled) or 4 (unit not found); `is-active` returns 0
+ * (active), 3 (inactive) or 4 (unit not found). Measured on systemd 255
+ * (255.4-1ubuntu8.18) with `systemctl --user`: a nonexistent unit prints
+ * `not-found`/`inactive` and exits 4 on both queries. Anything else — missing
+ * binary, no user bus, timeout — is a failure to answer.
  */
-const IS_ENABLED_ANSWER_STATUSES: readonly number[] = [0, 1];
-const IS_ACTIVE_ANSWER_STATUSES: readonly number[] = [0, 3];
+const IS_ENABLED_ANSWER_STATUSES: readonly number[] = [0, 1, 4];
+const IS_ACTIVE_ANSWER_STATUSES: readonly number[] = [0, 3, 4];
 
 /** Set once so a relative XDG_CONFIG_HOME is reported on the first use only. */
 let warnedRelativeXdg = false;
@@ -437,6 +439,9 @@ function systemdUninstall(): void {
     runSystemctl(['daemon-reload']);
   } catch (err) {
     logger.warn('The systemd unit file was removed, but `daemon-reload` failed: %s', describeSystemctlError(err));
+    // The file is gone but the user manager still holds the old unit loaded;
+    // scripts must see the partial failure.
+    process.exitCode = 1;
   }
 
   console.log(`Auto-start removed: ${unitPath}`);
