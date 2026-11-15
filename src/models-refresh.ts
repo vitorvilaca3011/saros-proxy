@@ -664,12 +664,14 @@ function assertRefreshSources(
  *
  * The 50% trigger is deliberate, not a leftover (see #120). The weekly refresh
  * removes and adds many anonymous/rotating models upstream, so a lower trigger
- * (10%, or "more than 3 removals") would abort legitimate refreshes every
- * week: the alarm would become noise and the easy way out would always be
- * `--allow-shrink`, cancelling the guard. What this threshold does catch is the
- * truncated response, which drops about half the catalog at once; smaller
- * removals are accepted as normal upstream churn. The trade-off is conscious —
- * a silent partial cut can still slip through between that churn and 50%.
+ * (10%, or "more than 3 removals") would abort a legitimate refresh as soon as
+ * a week's churn crosses it: the alarm would become noise and the easy way out
+ * would always be `--allow-shrink`, cancelling the guard. The one recorded
+ * weekly refresh removed 3 of 90 models, under both proposals, but a heavier
+ * week is not ruled out. What this threshold does catch is a truncated live
+ * catalog, which drops more than half of the catalog at once; smaller removals
+ * are accepted as normal upstream churn. The trade-off is conscious — a silent
+ * partial cut can still slip through between that churn and 50%.
  */
 function assertShrinkAllowed(
   merge: ModelCatalogMergeResult,
