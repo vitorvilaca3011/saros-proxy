@@ -192,11 +192,15 @@ describe('fetchModelsDevProvider', () => {
     resetModelsDevCache();
   });
 
-  it('fetches with the CLI User-Agent models.dev accepts', async () => {
-    // Measured 2026-11-06: models.dev answered 403 to a library-default UA
-    // where `User-Agent: cli` got 200. The mock enforces that gate, so
-    // dropping or renaming the header makes this test fail; the 403 → null
-    // path itself is covered by 'returns null on non-2xx'.
+  it('sends the stable CLI User-Agent on every fetch', async () => {
+    // The mock pins the header as a fixed contract: it always goes out,
+    // independent of whatever UA the local HTTP stack defaults to, so dropping
+    // or renaming it makes this test fail.
+    //
+    // History: models.dev answered 403 to a library-default UA where the CLI
+    // UA got 200 — measured once, on 2026-11-06. A recheck minutes later
+    // returned 200 for both, so this is not a reproducible gate. The 403 →
+    // null path itself is covered by 'returns null on non-2xx'.
     const fetchMock = vi.fn(async (_url: string, init?: RequestInit) => {
       const headers = (init?.headers ?? {}) as Record<string, string>;
       return headers['User-Agent'] === 'saros-proxy'
