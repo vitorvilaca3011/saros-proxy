@@ -856,7 +856,7 @@ export async function daemonStart(
 const STOP_VERIFY_MS = 2000;
 
 /** The pre-0.11 PID file the operator has not opted into yet (stat only). */
-function legacyPidFileToAdopt(): string | null {
+export function legacyPidFileToAdopt(): string | null {
   if (LEGACY_PID_FILE === null || legacyPidEnabled()) return null;
   return existsSync(LEGACY_PID_FILE) ? LEGACY_PID_FILE : null;
 }
@@ -1008,6 +1008,10 @@ export interface DaemonState {
   port: number;
   stalePid: boolean;
   health?: Record<string, unknown>;
+  /** State dir whose PID file this process reads. */
+  pidDir: string;
+  /** Pre-0.11 PID file waiting for SAROS_ALLOW_LEGACY_PID, or null. */
+  legacyPidFile: string | null;
 }
 
 /**
@@ -1033,6 +1037,8 @@ export async function getDaemonState(
     port,
     stalePid,
     health: probe.ok ? probe.body : undefined,
+    pidDir: PID_DIR,
+    legacyPidFile: legacyPidFileToAdopt(),
   };
 }
 

@@ -84,6 +84,10 @@ interface DepOptions extends Partial<UpdateDependencies> {
   daemonHealthVersion?: string | null;
   daemonPid?: string | null;
   daemonPort?: number;
+  /** State dir the snapshot names; defaults to /home/u/.config/saros. */
+  daemonPidDir?: string;
+  /** Pre-0.11 PID file the snapshot reports; defaults to null. */
+  legacyPidFile?: string | null;
 }
 
 interface Harness {
@@ -94,6 +98,10 @@ interface Harness {
   probes: number[];
   stopOptions: Array<Record<string, unknown>>;
   startOptions: Array<Record<string, unknown>>;
+  /** Ports passed to findPortOwner. */
+  ownerLookups: number[];
+  /** PIDs passed to killPortOwner. */
+  killedPids: number[];
 }
 
 function makeDeps(options: DepOptions = {}): Harness {
@@ -103,6 +111,8 @@ function makeDeps(options: DepOptions = {}): Harness {
   const probes: number[] = [];
   const stopOptions: Array<Record<string, unknown>> = [];
   const startOptions: Array<Record<string, unknown>> = [];
+  const ownerLookups: number[] = [];
+  const killedPids: number[] = [];
   const {
     failInstall,
     failReinstall,
@@ -114,6 +124,8 @@ function makeDeps(options: DepOptions = {}): Harness {
     daemonHealthVersion,
     daemonPid,
     daemonPort,
+    daemonPidDir,
+    legacyPidFile,
     ...overrides
   } = options;
   const currentVersion = overrides.currentVersion ?? '1.1.2';
@@ -154,11 +166,13 @@ function makeDeps(options: DepOptions = {}): Harness {
       return {
         running,
         port: daemonPort ?? 3000,
-        pid: daemonPid ?? (running ? '4242' : null),
+        pid: daemonPid === undefined ? (running ? '4242' : null) : daemonPid,
         health:
           running && daemonHealthVersion !== null
             ? { status: 'ok', version: daemonHealthVersion ?? currentVersion }
             : undefined,
+        pidDir: daemonPidDir ?? '/home/u/.config/saros',
+        legacyPidFile: legacyPidFile ?? null,
       };
     },
     daemonStop: async (callOptions) => {
@@ -169,6 +183,15 @@ function makeDeps(options: DepOptions = {}): Harness {
     daemonStart: async (callOptions) => {
       startOptions.push({ ...callOptions });
       events.push('daemon-start');
+    },
+    // A listener exists but a managed daemon owns the port in most fixtures;
+    // the unmanaged-listener tests replace these two adapters.
+    findPortOwner: (port) => {
+      ownerLookups.push(port);
+      return { pid: 999, command: 'node /srv/orphan.js serve', starttime: '123456' };
+    },
+    killPortOwner: (pid) => {
+      killedPids.push(pid);
     },
     systemdActive: () => false,
     systemdStop: () => {
@@ -196,7 +219,17 @@ function makeDeps(options: DepOptions = {}): Harness {
     ...overrides,
   };
 
-  return { deps, events, execs, confirms, probes, stopOptions, startOptions };
+  return {
+    deps,
+    events,
+    execs,
+    confirms,
+    probes,
+    stopOptions,
+    startOptions,
+    ownerLookups,
+    killedPids,
+  };
 }
 
 /** A real on-disk global install, so entry-point checks see a file. */
@@ -497,7 +530,12 @@ describe('runUpdateCommand', () => {
 
   it('does not start anything when the daemon was stopped', async () => {
     const harness = makeDeps({
-      getDaemonState: async () => ({ running: false, port: 3000 }),
+      getDaemonState: async () => ({
+        running: false,
+        port: 3000,
+        pidDir: '/home/u/.config/saros',
+        legacyPidFile: null,
+      }),
     });
     const out = captureOutput();
 
@@ -568,7 +606,12 @@ describe('runUpdateCommand', () => {
   it('rolls back without starting when the daemon was stopped', async () => {
     const harness = makeDeps({
       failInstall: true,
-      getDaemonState: async () => ({ running: false, port: 3000 }),
+      getDaemonState: async () => ({
+        running: false,
+        port: 3000,
+        pidDir: '/home/u/.config/saros',
+        legacyPidFile: null,
+      }),
     });
     const out = captureOutput();
 
@@ -643,8 +686,380 @@ describe('runUpdateCommand', () => {
     expect(out.all()).toContain('Could not stop the running proxy');
   });
 
+  describe('unmanaged listener on the configured port', () => {
+    const DEFAULT_OWNER = {
+      pid: 999,
+      command: 'node /srv/orphan/dist/index.js serve',
+      starttime: '123456',
+    };
+
+    /**
+     * A listener no PID file owns. findPortOwner reports it while it holds the
+     * port and null once it is gone; the restarted daemon answers /health.
+     */
+    function unmanagedListener(
+      overrides: DepOptions = {},
+      owner: { pid: number; command: string; starttime: string } | null = DEFAULT_OWNER,
+    ) {
+      const harness = makeDeps({
+        daemonPid: null,
+        daemonRunning: true,
+        daemonHealthVersion: '1.1.2',
+        ...overrides,
+      });
+      const ownerLookups: number[] = [];
+      const killedPids: number[] = [];
+      const probes: number[] = [];
+      let phase: 'serving' | 'released' | 'restarted' = 'serving';
+      harness.deps.findPortOwner = (port) => {
+        ownerLookups.push(port);
+        return phase === 'released' ? null : owner;
+      };
+      harness.deps.killPortOwner = (pid) => {
+        killedPids.push(pid);
+        phase = 'released';
+      };
+      harness.deps.probeHealth = async (port) => {
+        probes.push(port);
+        return {
+          ok: true,
+          body: { status: 'ok', version: phase === 'restarted' ? '1.1.3' : '1.1.2' },
+        };
+      };
+      const start = harness.deps.daemonStart;
+      harness.deps.daemonStart = async (callOptions) => {
+        phase = 'restarted';
+        await start(callOptions);
+      };
+      return { harness, ownerLookups, killedPids, probes };
+    }
+
+    it('kills the owner after confirmation and continues the update', async () => {
+      const { harness, ownerLookups, killedPids, probes } = unmanagedListener();
+      const out = captureOutput();
+
+      expect(await runUpdateCommand([], harness.deps)).toBe(0);
+
+      expect(ownerLookups).toEqual([3000, 3000, 3000]);
+      expect(killedPids).toEqual([999]);
+      expect(harness.confirms).toHaveLength(2);
+      expect(harness.confirms[1]).toBe('Kill the process using port 3000 and continue?');
+      expect(harness.events).not.toContain('daemon-stop');
+      expect(harness.events).toContain('daemon-start');
+      expect(harness.execs.map((call) => call.args.join(' '))).toEqual([
+        'root -g',
+        'install -g saros-proxy@1.1.3',
+      ]);
+      // Only the updated proxy's /health: release is measured on the listener.
+      expect(probes).toEqual([3000]);
+      expect(out.all()).toContain('served by PID 999 (node /srv/orphan/dist/index.js serve)');
+      expect(out.all()).toContain('not owned by the PID file in /home/u/.config/saros');
+      expect(out.all()).toContain('Sent SIGTERM to PID 999');
+      expect(out.all()).toContain('Updated to 1.1.3 and restarted the proxy on port 3000.');
+    });
+
+    it('aborts without killing anything when the kill confirmation is declined', async () => {
+      const { harness, killedPids } = unmanagedListener();
+      harness.deps.confirm = async (message) =>
+        !message.includes('Kill the process using port');
+      const out = captureOutput();
+
+      expect(await runUpdateCommand([], harness.deps)).toBe(1);
+
+      expect(killedPids).toEqual([]);
+      expect(harness.events).not.toContain('daemon-start');
+      expect(harness.events).not.toContain('exec:npm install -g saros-proxy@1.1.3');
+      expect(out.all()).toContain('Update cancelled.');
+    });
+
+    it('treats --yes as consent but still names what it killed', async () => {
+      const { harness, killedPids } = unmanagedListener();
+      const out = captureOutput();
+
+      expect(await runUpdateCommand(['--yes'], harness.deps)).toBe(0);
+
+      expect(harness.confirms).toEqual([]);
+      expect(killedPids).toEqual([999]);
+      expect(out.all()).toContain('served by PID 999');
+      expect(out.all()).toContain('Sent SIGTERM to PID 999');
+      expect(out.all()).toContain('Updated to 1.1.3');
+    });
+
+    it('names the PID alone when its command line is unreadable', async () => {
+      const { harness } = unmanagedListener({}, { pid: 999, command: '', starttime: '' });
+      const out = captureOutput();
+
+      expect(await runUpdateCommand(['--yes'], harness.deps)).toBe(0);
+
+      expect(out.all()).toContain('served by PID 999 (command line not readable)');
+    });
+
+    it('aborts when the owner of the port cannot be identified', async () => {
+      const { harness, killedPids } = unmanagedListener({}, null);
+      const out = captureOutput();
+
+      expect(await runUpdateCommand(['--yes'], harness.deps)).toBe(1);
+
+      expect(killedPids).toEqual([]);
+      expect(harness.events).not.toContain('exec:npm install -g saros-proxy@1.1.3');
+      expect(out.all()).toContain(
+        'Port 3000 is served by a process that could not be identified',
+      );
+    });
+
+    it('aborts when SIGTERM leaves the socket bound, naming the holder', async () => {
+      const { harness, ownerLookups, killedPids } = unmanagedListener();
+      // A silent but live process (or a child that inherited the socket):
+      // /health no longer answers, yet the port is still bound.
+      harness.deps.killPortOwner = (pid) => {
+        killedPids.push(pid);
+      };
+      harness.deps.probeHealth = async () => ({ ok: false });
+      const out = captureOutput();
+
+      expect(await runUpdateCommand(['--yes'], harness.deps)).toBe(1);
+
+      expect(killedPids).toEqual([999]);
+      // Discovery, revalidation, then one lookup per release attempt.
+      expect(ownerLookups).toHaveLength(22);
+      expect(harness.events).not.toContain('daemon-start');
+      expect(out.all()).not.toContain('Port 3000 released');
+      expect(out.all()).toContain('Port 3000 is still held by PID 999');
+    });
+
+    it('aborts when SIGTERM cannot be delivered', async () => {
+      const { harness } = unmanagedListener();
+      harness.deps.killPortOwner = () => {
+        throw new Error('EPERM: operation not permitted');
+      };
+      const out = captureOutput();
+
+      expect(await runUpdateCommand(['--yes'], harness.deps)).toBe(1);
+
+      expect(harness.events).not.toContain('daemon-start');
+      expect(out.all()).toContain('Could not stop PID 999: EPERM');
+    });
+
+    it('kills the owner before restarting an already-installed-but-outdated proxy', async () => {
+      const install = makeGlobalInstall();
+      const { harness, killedPids, probes } = unmanagedListener({
+        currentVersion: '1.1.3',
+        fetchLatestVersion: async () => '1.1.3',
+        globalRoot: install.globalRoot,
+        packageRoot: install.packageRoot,
+      });
+      const out = captureOutput();
+
+      expect(await runUpdateCommand(['--yes'], harness.deps)).toBe(0);
+
+      // --yes consented, and the kill prompt is skipped for it.
+      expect(harness.confirms).toEqual([]);
+      expect(killedPids).toEqual([999]);
+      expect(harness.events).not.toContain('daemon-stop');
+      expect(harness.startOptions).toEqual([{ entryPoint: install.entryPoint }]);
+      expect(probes).toEqual([3000]);
+      expect(out.all()).toContain('Sent SIGTERM to PID 999');
+      expect(out.all()).toContain('Restarted saros-proxy 1.1.3');
+    });
+
+    it('aborts a stale restart when the listener cannot be identified', async () => {
+      const install = makeGlobalInstall();
+      const { harness, killedPids } = unmanagedListener(
+        {
+          currentVersion: '1.1.3',
+          fetchLatestVersion: async () => '1.1.3',
+          globalRoot: install.globalRoot,
+          packageRoot: install.packageRoot,
+        },
+        null,
+      );
+      const out = captureOutput();
+
+      expect(await runUpdateCommand(['--yes'], harness.deps)).toBe(1);
+
+      expect(killedPids).toEqual([]);
+      expect(harness.events).not.toContain('daemon-start');
+      expect(out.all()).toContain(
+        'Port 3000 is served by a process that could not be identified',
+      );
+    });
+
+    it('warns about the process before prompting and before signalling it', async () => {
+      const { harness } = unmanagedListener();
+      const timeline: string[] = [];
+      vi.spyOn(console, 'log').mockImplementation((...args: unknown[]) => {
+        timeline.push(`out:${args.map(String).join(' ')}`);
+      });
+      vi.spyOn(console, 'error').mockImplementation((...args: unknown[]) => {
+        timeline.push(`err:${args.map(String).join(' ')}`);
+      });
+      harness.deps.confirm = async (message) => {
+        timeline.push(`prompt:${message}`);
+        return true;
+      };
+      const kill = harness.deps.killPortOwner;
+      harness.deps.killPortOwner = (pid) => {
+        timeline.push('kill');
+        kill(pid);
+      };
+
+      expect(await runUpdateCommand([], harness.deps)).toBe(0);
+
+      const warning = timeline.findIndex((line) => line.includes('is served by PID 999'));
+      const prompt = timeline.findIndex((line) =>
+        line.startsWith('prompt:Kill the process using port 3000'),
+      );
+      const killed = timeline.indexOf('kill');
+      expect(warning).toBeGreaterThan(-1);
+      expect(prompt).toBeGreaterThan(warning);
+      expect(killed).toBeGreaterThan(prompt);
+    });
+
+    it('does not signal a PID that no longer matches the listener', async () => {
+      const { harness, ownerLookups, killedPids } = unmanagedListener();
+      const discover = harness.deps.findPortOwner;
+      let lookups = 0;
+      harness.deps.findPortOwner = (port) => {
+        lookups++;
+        // Same PID, different start time: the listener exited while the
+        // prompt was open and its PID was reused.
+        return lookups === 1
+          ? discover(port)
+          : { ...DEFAULT_OWNER, starttime: '999999' };
+      };
+      const out = captureOutput();
+
+      expect(await runUpdateCommand(['--yes'], harness.deps)).toBe(1);
+
+      expect(ownerLookups).toEqual([3000]);
+      expect(killedPids).toEqual([]);
+      expect(harness.events).not.toContain('daemon-start');
+      expect(out.all()).toContain('no longer the listener on port 3000');
+      expect(out.all()).toContain('could not be identified');
+    });
+
+    it('does not signal when the listener disappeared while the prompt was open', async () => {
+      const { harness, killedPids } = unmanagedListener();
+      const discover = harness.deps.findPortOwner;
+      let lookups = 0;
+      harness.deps.findPortOwner = (port) => {
+        lookups++;
+        return lookups === 1 ? discover(port) : null;
+      };
+      const out = captureOutput();
+
+      expect(await runUpdateCommand(['--yes'], harness.deps)).toBe(1);
+
+      expect(killedPids).toEqual([]);
+      expect(harness.events).not.toContain('daemon-start');
+      expect(out.all()).toContain('no longer the listener on port 3000');
+    });
+
+    it('reports a pre-0.11 PID file and stops before offering the kill', async () => {
+      const { harness, ownerLookups, killedPids } = unmanagedListener({
+        legacyPidFile: '/home/u/.config/saros/daemon.pid',
+      });
+      const out = captureOutput();
+
+      expect(await runUpdateCommand(['--yes'], harness.deps)).toBe(1);
+
+      expect(ownerLookups).toEqual([]);
+      expect(killedPids).toEqual([]);
+      expect(harness.confirms).toEqual([]);
+      expect(harness.events).not.toContain('exec:npm install -g saros-proxy@1.1.3');
+      expect(out.all()).toContain(
+        'A pre-0.11 PID file exists at /home/u/.config/saros/daemon.pid.',
+      );
+      expect(out.all()).toContain('SAROS_ALLOW_LEGACY_PID=1');
+      expect(out.all()).toContain('nothing was stopped');
+    });
+
+    it('does not claim a saros-proxy listener was never launched', async () => {
+      const { harness } = unmanagedListener(
+        {},
+        {
+          pid: 999,
+          command: 'node /usr/lib/node_modules/saros-proxy/dist/index.js serve',
+          starttime: '123456',
+        },
+      );
+      const out = captureOutput();
+
+      expect(await runUpdateCommand(['--yes'], harness.deps)).toBe(0);
+
+      expect(out.all()).not.toContain('did not launch');
+      expect(out.all()).toContain('started outside this state dir (/home/u/.config/saros)');
+    });
+
+    it('follows --port instead of the default port', async () => {
+      const { harness, ownerLookups, killedPids, probes } = unmanagedListener({
+        daemonPort: 4545,
+      });
+      const out = captureOutput();
+
+      expect(await runUpdateCommand(['--yes', '--port', '4545'], harness.deps)).toBe(0);
+
+      expect(ownerLookups).toEqual([4545, 4545, 4545]);
+      expect(killedPids).toEqual([999]);
+      expect(probes).toEqual([4545]);
+      expect(harness.startOptions[0]).toMatchObject({ port: 4545 });
+      expect(out.all()).toContain('Updated to 1.1.3 and restarted the proxy on port 4545.');
+    });
+
+    it('asks for the kill in the stale restart path and honours a refusal', async () => {
+      const install = makeGlobalInstall();
+      const { harness, killedPids } = unmanagedListener({
+        currentVersion: '1.1.3',
+        fetchLatestVersion: async () => '1.1.3',
+        globalRoot: install.globalRoot,
+        packageRoot: install.packageRoot,
+        isTTY: true,
+      });
+      const confirm = harness.deps.confirm;
+      harness.deps.confirm = async (message) => {
+        const approved = await confirm(message);
+        return message.includes('Kill the process using port') ? false : approved;
+      };
+      const out = captureOutput();
+
+      expect(await runUpdateCommand([], harness.deps)).toBe(1);
+
+      expect(killedPids).toEqual([]);
+      expect(harness.confirms).toEqual([
+        'The package is already 1.1.3, but the proxy on port 3000 reports 1.1.2. Restart it?',
+        'Kill the process using port 3000 and continue?',
+      ]);
+      expect(harness.events).not.toContain('daemon-start');
+      expect(out.all()).toContain('Update cancelled.');
+    });
+
+    it('names the process still holding the port when the restarted proxy never answers', async () => {
+      const { harness } = unmanagedListener({ healthAttempts: 1 });
+      harness.deps.probeHealth = async () => ({ ok: false });
+      const out = captureOutput();
+
+      expect(await runUpdateCommand(['--yes'], harness.deps)).toBe(1);
+
+      expect(out.all()).toContain('did not answer /health');
+      expect(out.all()).toContain('Port 3000 is still held by PID 999');
+    });
+
+    it('leaves the managed daemon path untouched', async () => {
+      const harness = makeDeps({ daemonPid: '4242', daemonHealthVersion: '1.1.2' });
+      const out = captureOutput();
+
+      expect(await runUpdateCommand(['--yes'], harness.deps)).toBe(0);
+
+      expect(harness.ownerLookups).toEqual([]);
+      expect(harness.killedPids).toEqual([]);
+      expect(harness.events).toContain('daemon-stop');
+      expect(out.all()).toContain('Updated to 1.1.3');
+    });
+  });
+
   it('reports a health failure with the daemon log and status hint', async () => {
-    const harness = makeDeps({ healthOk: false, healthAttempts: 3 });
+    // Nothing is listening when the health probe gives up: no holder to name.
+    const harness = makeDeps({ healthOk: false, healthAttempts: 3, findPortOwner: () => null });
     const out = captureOutput();
 
     expect(await runUpdateCommand(['--yes'], harness.deps)).toBe(1);
@@ -1247,5 +1662,96 @@ describe('default dependency wiring', () => {
     expect(isSystemdUnitActive()).toBe(false);
     mockExecFileSync.mockReturnValue('active\n');
     expect(isSystemdUnitActive()).toBe(true);
+  });
+
+  describe('default port-owner adapters', () => {
+    /** ss reports an unmanaged listener on 3100; npm/systemd stay quiet. */
+    let listening = true;
+
+    function stubUnmanagedListener(): void {
+      // The listener is this very process: it is alive, /proc is readable, and
+      // no real signal is ever sent (process.kill is spied in each test).
+      listening = true;
+      mockExecFileSync.mockImplementation((command: string, args: string[]) => {
+        if (command === 'npm' && args[0] === 'root') return '/usr/lib/node_modules\n';
+        if (command === 'systemctl' && args[1] === 'is-active') return 'inactive\n';
+        if (command === 'ss') {
+          return listening
+            ? `LISTEN 0 511 127.0.0.1:3100 0.0.0.0:* users:(("node",pid=${process.pid},fd=22))\n`
+            : '';
+        }
+        return '';
+      });
+      mockGetDaemonState.mockResolvedValue({
+        running: true,
+        port: 3100,
+        pid: null,
+        health: { status: 'ok', version: '1.1.2' },
+        pidDir: '/home/u/.config/saros',
+        legacyPidFile: null,
+      });
+      mockDaemonStart.mockResolvedValue(undefined);
+      mockProbeProxyHealth.mockResolvedValue({
+        ok: true,
+        body: { status: 'ok', version: '1.1.3' },
+      });
+    }
+
+    const deps: Partial<UpdateDependencies> = {
+      currentVersion: '1.1.2',
+      fetchLatestVersion: async () => '1.1.3',
+      readInstalledVersion: () => '1.1.3',
+      packageRoot: '/usr/lib/node_modules/saros-proxy',
+      sleep: async () => {},
+      healthAttempts: 2,
+      healthDelayMs: 1,
+      platform: 'linux',
+    };
+
+    it('finds the PID with ss and sends the default SIGTERM', async () => {
+      stubUnmanagedListener();
+      const killSpy = vi.spyOn(process, 'kill').mockImplementation(() => {
+        listening = false;
+        return true;
+      });
+      const out = captureOutput();
+
+      const code = await runUpdateCommand(['--yes'], deps);
+
+      expect(code).toBe(0);
+      expect(killSpy).toHaveBeenCalledWith(process.pid, 'SIGTERM');
+      expect(out.all()).toContain(`Sent SIGTERM to PID ${process.pid}`);
+      expect(out.all()).toContain('Updated to 1.1.3');
+    });
+
+    it('treats an already-exited PID (ESRCH) as stopped', async () => {
+      stubUnmanagedListener();
+      vi.spyOn(process, 'kill').mockImplementation(() => {
+        listening = false;
+        throw Object.assign(new Error('ESRCH'), { code: 'ESRCH' });
+      });
+      const out = captureOutput();
+
+      const code = await runUpdateCommand(['--yes'], deps);
+
+      expect(code).toBe(0);
+      expect(out.all()).not.toContain('Could not stop');
+      expect(out.all()).toContain('Updated to 1.1.3');
+    });
+
+    it('reports a signal the OS refuses (EPERM)', async () => {
+      stubUnmanagedListener();
+      vi.spyOn(process, 'kill').mockImplementation(() => {
+        throw Object.assign(new Error('EPERM: operation not permitted'), {
+          code: 'EPERM',
+        });
+      });
+      const out = captureOutput();
+
+      expect(await runUpdateCommand(['--yes'], deps)).toBe(1);
+
+      expect(mockDaemonStart).not.toHaveBeenCalled();
+      expect(out.all()).toContain(`Could not stop PID ${process.pid}: EPERM`);
+    });
   });
 });
