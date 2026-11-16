@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **`update` can stop a proxy it did not start when that process owns the
+  configured port.** A listener with no PID file used to abort the update
+  (`Something is still serving on port N`), which left an orphan started
+  outside `saros-proxy start` unupdatable. `update` now names the process
+  (`ss`, then `lsof`; Linux only) with its PID and command line, asks
+  `Kill the process using port N and continue?`, sends SIGTERM and waits up to
+  5 s for `/health` to stop answering before installing and restarting.
+  `--yes` counts as consent and still prints the warning; a declined prompt or
+  an owner the OS will not identify aborts with exit 1. The port always comes
+  from `--port` or the config file, and `stop` keeps its refusal to kill a
+  process it cannot account for.
+
 ## [1.3.3] - 2026-11-15
 
 ### Fixed

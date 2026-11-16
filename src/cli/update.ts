@@ -18,6 +18,7 @@ import { setTimeout as delay } from 'node:timers/promises';
 import { fileURLToPath } from 'node:url';
 import chalk from 'chalk';
 import { confirm, isCancel } from './ui.js';
+import { findPortOwner, type PortOwner } from './port-owner.js';
 import { getSarosDir } from '../config.js';
 import { getVersion } from '../version.js';
 import {
@@ -86,6 +87,10 @@ export interface UpdateDependencies {
   probeHealth: (
     port: number,
   ) => Promise<{ ok: boolean; body?: Record<string, unknown> }>;
+  /** Process listening on a port, or null when it cannot be determined. */
+  findPortOwner: (port: number) => PortOwner | null;
+  /** Send SIGTERM to a port owner; a PID that already exited is not an error. */
+  killPortOwner: (pid: number) => void;
   daemonLogPath: string;
   sleep: (ms: number) => Promise<void>;
   healthAttempts: number;
@@ -251,6 +256,18 @@ async function confirmInTerminal(message: string): Promise<boolean> {
   return !isCancel(answer) && answer === true;
 }
 
+/**
+ * SIGTERM the process holding the port. ESRCH means it exited between the
+ * discovery and the signal, which is the outcome this call wanted.
+ */
+function terminatePortOwner(pid: number): void {
+  try {
+    process.kill(pid, 'SIGTERM');
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code !== 'ESRCH') throw err;
+  }
+}
+
 function defaultDaemonLogPath(): string {
   try {
     return join(getSarosDir(), 'daemon.log');
@@ -313,6 +330,8 @@ function resolveDependencies(
     systemdStop: overrides.systemdStop ?? stopSystemdUnit,
     systemdStart: overrides.systemdStart ?? startSystemdUnit,
     probeHealth: overrides.probeHealth ?? probeProxyHealth,
+    findPortOwner: overrides.findPortOwner ?? findPortOwner,
+    killPortOwner: overrides.killPortOwner ?? terminatePortOwner,
     daemonLogPath: overrides.daemonLogPath ?? defaultDaemonLogPath(),
     sleep: overrides.sleep ?? delay,
     healthAttempts: overrides.healthAttempts ?? 20,
@@ -397,6 +416,104 @@ function resolveGlobalRoot(
     return null;
   }
   return globalRoot;
+}
+
+// ---------------------------------------------------------------------------
+// Unmanaged port owner (update only — `stop` keeps refusing to kill)
+// ---------------------------------------------------------------------------
+
+/** SIGTERM, then poll /health this long before giving up on the port. */
+const PORT_RELEASE_ATTEMPTS = 20;
+const PORT_RELEASE_DELAY_MS = 250;
+
+/**
+ * A process serves the configured port but no PID file claims it (started
+ * outside `saros-proxy start`). An active systemd unit owns its processes, so
+ * its listeners are never treated as unmanaged here.
+ */
+function servesWithoutManagedPid(
+  state: DaemonStateSnapshot,
+  systemdActive: boolean,
+): boolean {
+  return !systemdActive && state.running && !state.pid && state.health !== undefined;
+}
+
+/** Poll /health until the released port stops answering. */
+async function waitForPortRelease(
+  deps: UpdateDependencies,
+  port: number,
+): Promise<boolean> {
+  for (let attempt = 0; attempt < PORT_RELEASE_ATTEMPTS; attempt++) {
+    const probe = await deps.probeHealth(port);
+    if (!probe.ok) return true;
+    if (attempt < PORT_RELEASE_ATTEMPTS - 1) {
+      await deps.sleep(PORT_RELEASE_DELAY_MS);
+    }
+  }
+  return false;
+}
+
+/**
+ * Stop the process serving the configured port when no managed daemon owns
+ * it, so the update can install and start its replacement. Returns whether
+ * the update may continue.
+ *
+ * Never guesses: an owner the OS will not name aborts the update. `stop`
+ * keeps its historical refusal; this path exists only for `update`.
+ */
+async function stopUnmanagedPortOwner(
+  deps: UpdateDependencies,
+  args: UpdateArgs,
+  port: number,
+  alreadyApproved: boolean,
+): Promise<boolean> {
+  const owner = deps.findPortOwner(port);
+  if (owner === null) {
+    console.error(
+      chalk.red(
+        `✗ Port ${port} is served by a process that could not be identified. Stop it manually, then re-run \`saros-proxy update\`.`,
+      ),
+    );
+    return false;
+  }
+  const named =
+    owner.command === ''
+      ? `PID ${owner.pid} (command line not readable)`
+      : `PID ${owner.pid} (${owner.command})`;
+  console.error(
+    chalk.yellow(
+      `! Port ${port} is served by ${named}, which \`saros-proxy start\` did not launch.`,
+    ),
+  );
+  if (
+    !alreadyApproved &&
+    !args.yes &&
+    !(await deps.confirm(`Kill the process using port ${port} and continue?`))
+  ) {
+    console.log(chalk.yellow('Update cancelled.'));
+    return false;
+  }
+  try {
+    deps.killPortOwner(owner.pid);
+  } catch (err) {
+    console.error(chalk.red(`✗ Could not stop PID ${owner.pid}: ${errorMessage(err)}`));
+    return false;
+  }
+  console.error(
+    chalk.yellow(
+      `! Sent SIGTERM to PID ${owner.pid}; waiting up to 5s for port ${port} to be released.`,
+    ),
+  );
+  if (!(await waitForPortRelease(deps, port))) {
+    console.error(
+      chalk.red(
+        `✗ Port ${port} is still in use after SIGTERM. Stop PID ${owner.pid} manually, then re-run \`saros-proxy update\`.`,
+      ),
+    );
+    return false;
+  }
+  console.log(chalk.green(`✓ Port ${port} released; continuing the update.`));
+  return true;
 }
 
 // ---------------------------------------------------------------------------
@@ -489,6 +606,10 @@ export async function runUpdateCommand(
     return refuseUnknownDaemonPort(before);
   }
   const systemdActive = deps.platform === 'linux' && deps.systemdActive();
+  const unmanagedOwner = servesWithoutManagedPid(before, systemdActive);
+  if (unmanagedOwner && !(await stopUnmanagedPortOwner(deps, args, before.port, false))) {
+    return 1;
+  }
   const mode = chooseRestartMode(before.running, systemdActive);
   const entryPoint =
     globalRoot === ''
@@ -500,7 +621,7 @@ export async function runUpdateCommand(
   };
 
   try {
-    if (!(await stopService(mode, deps, serviceOptions))) {
+    if (!unmanagedOwner && !(await stopService(mode, deps, serviceOptions))) {
       console.error(
         chalk.red('✗ Could not stop the running proxy; aborting before install.'),
       );
@@ -681,8 +802,14 @@ async function restartIfDaemonIsStale(
       `Package is already ${current}; the running proxy ${serving}. Restarting it.`,
     ),
   );
+  // An unmanaged listener on the port: consent to restart already covers
+  // stopping it, and --yes covers the non-interactive run.
+  const unmanagedOwner = servesWithoutManagedPid(state, systemdActive);
+  if (unmanagedOwner && !(await stopUnmanagedPortOwner(deps, args, state.port, true))) {
+    return 1;
+  }
   try {
-    if (!(await stopService(mode, deps, serviceOptions))) {
+    if (!unmanagedOwner && !(await stopService(mode, deps, serviceOptions))) {
       console.error(
         chalk.red(
           '✗ Could not stop the running proxy; stop it manually, then run `saros-proxy start`.',
