@@ -119,3 +119,37 @@ These are gitignored but needed locally:
 - `config.yaml` — Active proxy configuration
 - `api_keys.txt` — API key reference
 - `.codenomad/`, `.slim/` — Tool session artifacts
+
+## Working Rules for Agents
+
+These apply to every agent working on this repository, not only to whoever wrote the change.
+
+### Non-negotiable
+
+- **Never delete a file or folder without asking.**
+- **Logs are a non-negotiable feature.** New behaviour ships with log lines that explain it — for our debugging and for whoever reads `daemon.log` later.
+
+### Keep the project moving
+
+- Every bug gets a **regression test** that fails before the fix and passes after it.
+- An issue found outside the current change: **ask whether it is already known**, then open it with `gh issue create`. Write it for a reader with no access to our plans — symptom, command, log lines, `file:line` — not a narrative of how we got there.
+- A script written for a repeated task is offered to the user for reuse instead of being left in a scratch directory.
+
+### Contributor context
+
+- Commits follow **Conventional Commits** (`fix(cli): …`, `docs(models): …`).
+- Dates in docs are `YYYY/MM/DD`; PT-BR documents aimed at non-developers use `DD/MM/YYYY`.
+- Any task or documentation edit gets its **own branch**.
+- No identifier or comment named after a plan or story (`Phase4FinalTests`, `// Feature X (D8)`): a future reader has no plan.
+- **ASCII only** in code and comments (no `á`, `é`, `ã`); accented text belongs to documents.
+
+### Code quality
+
+- **TDD** when developing; **DRY**, **KISS**, **YAGNI**, **SOLID** starting with **SRP**; readability first.
+- Comment complex logic only, and only about what the code does — never about local task numbering.
+- After editing a file, run that file's unit tests (`npx vitest run test/<file>.test.ts`) and confirm the behaviour is unchanged.
+- Prefer async APIs; be careful with race conditions in unit tests.
+- Extract a method when a pattern repeats inside a file; extract a helper module when it repeats across files.
+- Limits: cognitive complexity ≤ 15 (target < 10), cyclomatic complexity < 10, nesting ≤ 3 levels, functions aiming under 30 lines.
+- File order is high level to low level: variables (imports, constructors, module state), then the high-level methods that compose the logic, then the low-level methods with the decisions documented. `#region` blocks are welcome where the language supports them; name each one after the file's own context, never "High level methods".
+- Tests never carry real data (PANs, real names, postal codes): use obviously fake fixtures.
