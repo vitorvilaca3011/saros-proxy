@@ -143,6 +143,12 @@ These apply to every agent working on this repository, not only to whoever wrote
 - No identifier or comment named after a plan or story (`Phase4FinalTests`, `// Feature X (D8)`): a future reader has no plan.
 - **ASCII only** in code and comments (no `á`, `é`, `ã`); accented text belongs to documents.
 
+### Presenting measurements
+
+- When a comparison or measurement fits a visual form, use it: diagram, chart, table, timeline, range plot. Two runs side by side belong in a table, not in a comma-separated sentence.
+- Prefer Mermaid over ASCII art for diagrams.
+- Only where it fits: a single number, a constraint or a decision stays as prose. Never force a visual that hides the point.
+
 ### Code quality
 
 - **TDD** when developing; **DRY**, **KISS**, **YAGNI**, **SOLID** starting with **SRP**; readability first.
