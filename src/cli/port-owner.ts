@@ -14,11 +14,17 @@
 import { execFileSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 
-/** A listening process: PID plus the command line when it can be read. */
+/** A listening process: PID plus the process facts needed to not guess. */
 export interface PortOwner {
   pid: number;
   /** Full command line, or '' when /proc is unavailable (permissions, non-Linux). */
   command: string;
+  /**
+   * Field 22 of /proc/<pid>/stat (process start time, clock ticks since
+   * boot), or '' when unreadable. Comparing it before a signal defeats PID
+   * reuse between discovery and kill.
+   */
+  starttime: string;
 }
 
 /** `users:(("node",pid=4711,fd=22))` — the first PID ss reports for the socket. */
@@ -43,6 +49,20 @@ function readCommand(pid: number): string {
   try {
     const raw = readFileSync(`/proc/${pid}/cmdline`, 'utf-8');
     return raw.split('\0').join(' ').trim();
+  } catch {
+    return '';
+  }
+}
+
+/**
+ * Field 22 (starttime) of /proc/<pid>/stat; '' when unreadable. The comm
+ * field is parenthesised and may itself contain spaces or ')', so fields are
+ * counted from the last ')' — field 3 (state) is the first token after it.
+ */
+function readStartTime(pid: number): string {
+  try {
+    const stat = readFileSync(`/proc/${pid}/stat`, 'utf-8');
+    return stat.slice(stat.lastIndexOf(')') + 2).split(' ')[19] ?? '';
   } catch {
     return '';
   }
@@ -78,5 +98,7 @@ export function findPortOwner(
   if (!Number.isInteger(port) || port < 1 || port > 65535) return null;
   if (platform !== 'linux') return null;
   const pid = pidFromSs(port) ?? pidFromLsof(port);
-  return pid === null ? null : { pid, command: readCommand(pid) };
+  return pid === null
+    ? null
+    : { pid, command: readCommand(pid), starttime: readStartTime(pid) };
 }

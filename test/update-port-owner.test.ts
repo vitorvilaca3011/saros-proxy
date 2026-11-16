@@ -56,7 +56,13 @@ describe('update against a configured port', () => {
       systemdActive: () => false,
       findPortOwner: (port) => {
         ownerLookups.push(port);
-        return { pid: 4711, command: 'node /srv/orphan/dist/index.js serve' };
+        return phase === 'released'
+          ? null
+          : {
+              pid: 4711,
+              command: 'node /srv/orphan/dist/index.js serve',
+              starttime: '987654',
+            };
       },
       killPortOwner: (pid) => {
         killedPids.push(pid);
@@ -64,10 +70,9 @@ describe('update against a configured port', () => {
       },
       probeHealth: async (port) => {
         probes.push(port);
-        if (phase === 'released') return { ok: false };
         return {
           ok: true,
-          body: { status: 'ok', version: phase === 'serving' ? '1.1.2' : '1.1.3' },
+          body: { status: 'ok', version: phase === 'restarted' ? '1.1.3' : '1.1.2' },
         };
       },
       daemonStop: async () => {
@@ -95,10 +100,11 @@ describe('update against a configured port', () => {
     const code = await runUpdateCommand(['--yes', '--config', configPath], deps);
 
     expect(code).toBe(0);
-    expect(ownerLookups).toEqual([4545]);
+    // Discovery, revalidation before the signal, then the release poll.
+    expect(ownerLookups).toEqual([4545, 4545, 4545]);
     expect(killedPids).toEqual([4711]);
-    // One probe to see the port released, one for the updated proxy's /health.
-    expect(probes).toEqual([4545, 4545]);
+    // Only the updated proxy's /health: release is measured on the listener.
+    expect(probes).toEqual([4545]);
     expect(starts).toHaveLength(1);
     expect(starts[0]).toEqual({
       configPath,

@@ -14,12 +14,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (`Something is still serving on port N`), which left an orphan started
   outside `saros-proxy start` unupdatable. `update` now names the process
   (`ss`, then `lsof`; Linux only) with its PID and command line, asks
-  `Kill the process using port N and continue?`, sends SIGTERM and waits up to
-  5 s for `/health` to stop answering before installing and restarting.
-  `--yes` counts as consent and still prints the warning; a declined prompt or
-  an owner the OS will not identify aborts with exit 1. The port always comes
-  from `--port` or the config file, and `stop` keeps its refusal to kill a
-  process it cannot account for.
+  `Kill the process using port N and continue?`, sends SIGTERM and waits for
+  the port to stop being listened on before installing and restarting. The
+  PID is re-read (including its `/proc` start time) right before the signal,
+  so a process that exited while the prompt was open is never signalled. The
+  same consent applies on both update paths; `--yes` counts as consent and
+  still prints the warning. A refused prompt, an owner the OS will not
+  identify, a pre-0.11 PID file, or a socket still bound after SIGTERM aborts
+  with exit 1, naming the holder. The port always comes from `--port` or the
+  config file, and `stop` keeps its refusal to kill a process it cannot
+  account for.
 
 ## [1.3.3] - 2026-11-15
 

@@ -28,7 +28,11 @@ import { findPortOwner } from '../src/cli/port-owner.js';
 
 /** A single ss listener line for an orphan proxy on 3000. */
 const SS_ORPHAN =
-  'LISTEN 0      511        127.0.0.1:3000      0.0.0.0:*    users:(("node",pid=4711,fd=22))\n';
+  'LISTEN 0      511        127.0.0.1:3000      0.0.0:*    users:(("node",pid=4711,fd=22))\n';
+
+/** /proc/4711/stat, cut after field 22 (starttime = 987654). */
+const STAT_ORPHAN =
+  '4711 (node) S 1 4711 4711 0 -1 4194560 1000 0 0 0 12 3 0 0 20 0 1 0 987654 123456789 4567';
 
 beforeEach(() => {
   mockExecFileSync.mockReset();
@@ -36,13 +40,18 @@ beforeEach(() => {
 });
 
 describe('findPortOwner', () => {
-  it('reads the PID from ss and the command line from /proc', () => {
+  it('reads the PID from ss, and the command line and start time from /proc', () => {
     mockExecFileSync.mockReturnValue(SS_ORPHAN);
-    mockReadFileSync.mockReturnValue('node\0/srv/orphan/dist/index.js\0serve\0');
+    mockReadFileSync.mockImplementation((path: string) => {
+      if (path === '/proc/4711/cmdline') return 'node\0/srv/orphan/dist/index.js\0serve\0';
+      if (path === '/proc/4711/stat') return STAT_ORPHAN;
+      throw new Error('ENOENT');
+    });
 
     expect(findPortOwner(3000)).toEqual({
       pid: 4711,
       command: 'node /srv/orphan/dist/index.js serve',
+      starttime: '987654',
     });
     expect(mockExecFileSync).toHaveBeenCalledWith(
       'ss',
@@ -50,6 +59,17 @@ describe('findPortOwner', () => {
       expect.objectContaining({ encoding: 'utf-8' }),
     );
     expect(mockReadFileSync).toHaveBeenCalledWith('/proc/4711/cmdline', 'utf-8');
+    expect(mockReadFileSync).toHaveBeenCalledWith('/proc/4711/stat', 'utf-8');
+  });
+
+  it('counts stat fields from the last ")" so a comm with spaces still parses', () => {
+    mockExecFileSync.mockReturnValue(SS_ORPHAN);
+    mockReadFileSync.mockImplementation((path: string) => {
+      if (path === '/proc/4711/cmdline') return 'node\0';
+      return '4711 (node (odd) name) S 1 4711 4711 0 -1 4194560 1000 0 0 0 12 3 0 0 20 0 1 0 424242 123456789 4567';
+    });
+
+    expect(findPortOwner(3000)?.starttime).toBe('424242');
   });
 
   it('falls back to lsof when ss reports no PID, and tolerates an unreadable /proc', () => {
@@ -60,7 +80,7 @@ describe('findPortOwner', () => {
       throw new Error('EACCES: permission denied');
     });
 
-    expect(findPortOwner(3000)).toEqual({ pid: 4712, command: '' });
+    expect(findPortOwner(3000)).toEqual({ pid: 4712, command: '', starttime: '' });
     expect(mockExecFileSync).toHaveBeenLastCalledWith(
       'lsof',
       ['-nP', '-iTCP:3000', '-sTCP:LISTEN', '-t'],
@@ -75,6 +95,24 @@ describe('findPortOwner', () => {
 
     expect(findPortOwner(3000)).toBeNull();
     expect(mockReadFileSync).not.toHaveBeenCalled();
+  });
+
+  it('treats a non-string tool output as no answer', () => {
+    mockExecFileSync.mockReturnValue(Buffer.from(SS_ORPHAN));
+    mockReadFileSync.mockImplementation(() => {
+      throw new Error('ENOENT: no such file or directory');
+    });
+
+    expect(findPortOwner(3000)).toBeNull();
+  });
+
+  it('leaves the start time empty when /proc/<pid>/stat is truncated', () => {
+    mockExecFileSync.mockReturnValue(SS_ORPHAN);
+    mockReadFileSync.mockImplementation((path: string) =>
+      path.endsWith('cmdline') ? 'node\0' : '4711 (node) S 1',
+    );
+
+    expect(findPortOwner(3000)).toMatchObject({ pid: 4711, starttime: '' });
   });
 
   it('rejects an impossible port before running a tool', () => {

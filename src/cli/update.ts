@@ -66,6 +66,10 @@ export interface DaemonStateSnapshot {
   port: number;
   pid?: string | null;
   health?: Record<string, unknown>;
+  /** State dir whose PID file the daemon module read. */
+  pidDir: string;
+  /** Pre-0.11 PID file waiting for SAROS_ALLOW_LEGACY_PID, or null. */
+  legacyPidFile: string | null;
 }
 
 export interface UpdateDependencies {
@@ -309,6 +313,8 @@ function resolveDependencies(
           port: state.port,
           pid: state.pid,
           health: state.health,
+          pidDir: state.pidDir,
+          legacyPidFile: state.legacyPidFile,
         };
       }),
     daemonStop:
@@ -422,14 +428,16 @@ function resolveGlobalRoot(
 // Unmanaged port owner (update only — `stop` keeps refusing to kill)
 // ---------------------------------------------------------------------------
 
-/** SIGTERM, then poll /health this long before giving up on the port. */
+/** Poll for the listener this many times, PORT_RELEASE_DELAY_MS apart. */
 const PORT_RELEASE_ATTEMPTS = 20;
 const PORT_RELEASE_DELAY_MS = 250;
 
 /**
- * A process serves the configured port but no PID file claims it (started
- * outside `saros-proxy start`). An active systemd unit owns its processes, so
- * its listeners are never treated as unmanaged here.
+ * A process serves the configured port but no PID file claims it. An active
+ * systemd unit owns its processes, so its listeners are never treated as
+ * unmanaged here. A pre-0.11 PID file and a PID file in another state dir are
+ * indistinguishable from this process, hence the guard in
+ * `stopUnmanagedPortOwner`.
  */
 function servesWithoutManagedPid(
   state: DaemonStateSnapshot,
@@ -438,19 +446,54 @@ function servesWithoutManagedPid(
   return !systemdActive && state.running && !state.pid && state.health !== undefined;
 }
 
-/** Poll /health until the released port stops answering. */
+/** "PID 999 (node ...)" or "PID 999 (command line not readable)". */
+function describePortOwner(owner: PortOwner): string {
+  return owner.command === ''
+    ? `PID ${owner.pid} (command line not readable)`
+    : `PID ${owner.pid} (${owner.command})`;
+}
+
+function unidentifiedPortMessage(port: number): string {
+  return `✗ Port ${port} is served by a process that could not be identified. Stop it manually, then re-run \`saros-proxy update\`.`;
+}
+
+/**
+ * The pre-0.11 handle the current state dir does not hold. `stop` asks the
+ * operator to opt in with SAROS_ALLOW_LEGACY_PID; update says the same rather
+ * than killing a daemon whose PID file it cannot read.
+ */
+function printLegacyPidHint(legacyFile: string): void {
+  console.log(chalk.yellow(`A pre-0.11 PID file exists at ${legacyFile}.`));
+  console.log(
+    chalk.cyan('Re-run with SAROS_ALLOW_LEGACY_PID=1 to let this command read and stop it.'),
+  );
+}
+
+/**
+ * Wait for the port to stop being listened on. /health is not the measure: a
+ * process that answers 503, stops answering, or passed the socket to a child
+ * still holds the port. Returns null when released, else the last owner seen.
+ */
 async function waitForPortRelease(
   deps: UpdateDependencies,
   port: number,
-): Promise<boolean> {
+): Promise<PortOwner | null> {
+  let holder: PortOwner | null = null;
   for (let attempt = 0; attempt < PORT_RELEASE_ATTEMPTS; attempt++) {
-    const probe = await deps.probeHealth(port);
-    if (!probe.ok) return true;
+    holder = deps.findPortOwner(port);
+    if (holder === null) return null;
     if (attempt < PORT_RELEASE_ATTEMPTS - 1) {
       await deps.sleep(PORT_RELEASE_DELAY_MS);
     }
   }
-  return false;
+  return holder;
+}
+
+/** Name whoever still holds the port when a restarted proxy cannot answer. */
+function reportPortHolder(deps: UpdateDependencies, port: number): void {
+  const owner = deps.findPortOwner(port);
+  if (owner === null) return;
+  console.error(chalk.dim(`Port ${port} is still held by ${describePortOwner(owner)}.`));
 }
 
 /**
@@ -458,32 +501,35 @@ async function waitForPortRelease(
  * it, so the update can install and start its replacement. Returns whether
  * the update may continue.
  *
- * Never guesses: an owner the OS will not name aborts the update. `stop`
- * keeps its historical refusal; this path exists only for `update`.
+ * Never guesses: an owner this process cannot verify aborts the update. The
+ * signal is sent only after re-reading the listener, so a PID that exited
+ * while the prompt was open is not reused. `stop` keeps its historical
+ * refusal; this path exists only for `update`.
  */
 async function stopUnmanagedPortOwner(
   deps: UpdateDependencies,
   args: UpdateArgs,
-  port: number,
+  state: DaemonStateSnapshot,
   alreadyApproved: boolean,
 ): Promise<boolean> {
-  const owner = deps.findPortOwner(port);
-  if (owner === null) {
+  const port = state.port;
+  if (state.legacyPidFile) {
+    printLegacyPidHint(state.legacyPidFile);
     console.error(
-      chalk.red(
-        `✗ Port ${port} is served by a process that could not be identified. Stop it manually, then re-run \`saros-proxy update\`.`,
-      ),
+      chalk.red(`✗ Port ${port} is served by a pre-0.11 instance; nothing was stopped.`),
     );
     return false;
   }
-  const named =
-    owner.command === ''
-      ? `PID ${owner.pid} (command line not readable)`
-      : `PID ${owner.pid} (${owner.command})`;
+  const owner = deps.findPortOwner(port);
+  if (owner === null) {
+    console.error(chalk.red(unidentifiedPortMessage(port)));
+    return false;
+  }
+  const ownership = owner.command.includes('saros-proxy')
+    ? `a saros-proxy process started outside this state dir (${state.pidDir})`
+    : `not owned by the PID file in ${state.pidDir}`;
   console.error(
-    chalk.yellow(
-      `! Port ${port} is served by ${named}, which \`saros-proxy start\` did not launch.`,
-    ),
+    chalk.yellow(`! Port ${port} is served by ${describePortOwner(owner)}, ${ownership}.`),
   );
   if (
     !alreadyApproved &&
@@ -491,6 +537,22 @@ async function stopUnmanagedPortOwner(
     !(await deps.confirm(`Kill the process using port ${port} and continue?`))
   ) {
     console.log(chalk.yellow('Update cancelled.'));
+    return false;
+  }
+  // The prompt can wait; the PID may not. Field 22 keeps a recycled PID from
+  // receiving a signal meant for the listener that owned the port.
+  const confirmed = deps.findPortOwner(port);
+  if (
+    confirmed === null ||
+    confirmed.pid !== owner.pid ||
+    confirmed.starttime !== owner.starttime
+  ) {
+    console.error(
+      chalk.yellow(
+        `! PID ${owner.pid} is no longer the listener on port ${port}; nothing was signalled.`,
+      ),
+    );
+    console.error(chalk.red(unidentifiedPortMessage(port)));
     return false;
   }
   try {
@@ -501,13 +563,14 @@ async function stopUnmanagedPortOwner(
   }
   console.error(
     chalk.yellow(
-      `! Sent SIGTERM to PID ${owner.pid}; waiting up to 5s for port ${port} to be released.`,
+      `! Sent SIGTERM to PID ${owner.pid}; waiting for port ${port} to be released.`,
     ),
   );
-  if (!(await waitForPortRelease(deps, port))) {
+  const holder = await waitForPortRelease(deps, port);
+  if (holder !== null) {
     console.error(
       chalk.red(
-        `✗ Port ${port} is still in use after SIGTERM. Stop PID ${owner.pid} manually, then re-run \`saros-proxy update\`.`,
+        `✗ Port ${port} is still held by ${describePortOwner(holder)} after SIGTERM. Stop PID ${holder.pid} manually, then re-run \`saros-proxy update\`.`,
       ),
     );
     return false;
@@ -607,7 +670,7 @@ export async function runUpdateCommand(
   }
   const systemdActive = deps.platform === 'linux' && deps.systemdActive();
   const unmanagedOwner = servesWithoutManagedPid(before, systemdActive);
-  if (unmanagedOwner && !(await stopUnmanagedPortOwner(deps, args, before.port, false))) {
+  if (unmanagedOwner && !(await stopUnmanagedPortOwner(deps, args, before, false))) {
     return 1;
   }
   const mode = chooseRestartMode(before.running, systemdActive);
@@ -692,6 +755,7 @@ export async function runUpdateCommand(
         `✗ saros-proxy ${latest} is installed, but the proxy on port ${before.port} ${healthFailureDetail(health)}.`,
       ),
     );
+    reportPortHolder(deps, before.port);
     await rollback(mode, deps, before.port, current, restartOptions, true);
     return 1;
   }
@@ -802,10 +866,10 @@ async function restartIfDaemonIsStale(
       `Package is already ${current}; the running proxy ${serving}. Restarting it.`,
     ),
   );
-  // An unmanaged listener on the port: consent to restart already covers
-  // stopping it, and --yes covers the non-interactive run.
+  // An unmanaged listener on the port: the restart prompt did not mention the
+  // process or that it would die, so the kill needs its own consent.
   const unmanagedOwner = servesWithoutManagedPid(state, systemdActive);
-  if (unmanagedOwner && !(await stopUnmanagedPortOwner(deps, args, state.port, true))) {
+  if (unmanagedOwner && !(await stopUnmanagedPortOwner(deps, args, state, false))) {
     return 1;
   }
   try {
@@ -849,6 +913,7 @@ async function restartIfDaemonIsStale(
         `✗ saros-proxy ${current} is installed, but the proxy on port ${state.port} ${healthFailureDetail(health)}.`,
       ),
     );
+    reportPortHolder(deps, state.port);
     console.error(
       chalk.dim(`Check ${deps.daemonLogPath} and run \`saros-proxy status\`.`),
     );
