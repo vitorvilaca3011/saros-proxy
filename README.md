@@ -4,6 +4,7 @@
 [![npm version](https://img.shields.io/npm/v/saros-proxy.svg)](https://www.npmjs.com/package/saros-proxy)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Node.js Version](https://img.shields.io/badge/node-%3E%3D%2022.0.0-brightgreen.svg)](https://nodejs.org/)
+[![XERJ Corpus Hub contributor](https://hub.xerj.org/contributors/vitorvilaca3011/badge.svg)](https://hub.xerj.org/contributors/vitorvilaca3011)
 
 Saros — like the eclipse cycle, this proxy predicts exhaustion and rotates accounts before they run out. Built for the OpenCode-Go API, now multi-provider.
 
