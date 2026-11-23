@@ -23,7 +23,7 @@
 
 import { spawn, execFileSync } from 'node:child_process';
 import chalk from 'chalk';
-import { existsSync, writeFileSync, readFileSync, rmSync, mkdirSync, copyFileSync, statSync, renameSync, openSync, closeSync, chmodSync, readSync, fstatSync, realpathSync } from 'node:fs';
+import { existsSync, writeFileSync, readFileSync, rmSync, mkdirSync, copyFileSync, statSync, renameSync, openSync, closeSync, chmodSync, readSync, fstatSync, realpathSync, appendFileSync } from 'node:fs';
 import {
   resolve as pathResolve,
   join as pathJoin,
@@ -363,6 +363,17 @@ export function openDaemonLog(): number | null {
 
 /** Enough of the boot tail to hold a stack trace; diagnostics only. */
 const LOG_TAIL_BYTES = 16 * 1024;
+
+/** Append one line to daemon.log without creating a long-lived writer. */
+function appendDaemonLog(message: string): void {
+  if (!assertStateDir(DAEMON_LOG, 'write')) return;
+  try {
+    ensurePidDir();
+    appendFileSync(DAEMON_LOG, message, { encoding: 'utf-8', mode: 0o600 });
+  } catch {
+    // Diagnostics only: a failed log write must not change the start result.
+  }
+}
 
 /** Current daemon.log size — the offset past which this boot's output starts. */
 function logSize(): number {
@@ -752,11 +763,23 @@ export async function daemonStart(
   const bootOffset = logSize();
 
   const child = spawn('node', args, {
-    cwd: PACKAGE_ROOT,
+    // Never start the child inside a versioned store directory: pnpm may drop
+    // that directory on the next install, and a missing cwd makes spawn fail
+    // before the proxy can even run. The entry point's directory is stable.
+    cwd: options.entryPoint ? pathDirname(options.entryPoint) : PACKAGE_ROOT,
     stdio: ['ignore', logFd ?? 'ignore', logFd ?? 'ignore'],
     detached: true,
     windowsHide: true,
     env,
+  });
+
+  // A failed spawn emits 'error' asynchronously. Without a listener Node
+  // crashes the process; capture it so the caller sees a normal start failure.
+  const spawnFailure = new Promise<Error>((resolve) => {
+    child.once('error', (err) => {
+      appendDaemonLog(`proxy failed to spawn: ${err.message}\n`);
+      resolve(err);
+    });
   });
 
   // The child holds its own duplicates of the descriptor.
@@ -771,7 +794,18 @@ export async function daemonStart(
   // Allow parent to exit independently while child continues
   child.unref();
 
-  const pid = child.pid!;
+  // No pid means the process never started; the error event names the reason.
+  if (typeof child.pid !== 'number') {
+    const err = await spawnFailure;
+    const message = `Failed to start the proxy: ${err.message}`;
+    console.error(chalk.red(`✗ ${message}`));
+    if (exitOnComplete) {
+      process.exit(1);
+      return;
+    }
+    throw new Error(message);
+  }
+  const pid = child.pid;
   writePid(pid);
 
   // Wait briefly then verify the process is alive
