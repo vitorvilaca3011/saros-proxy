@@ -14,7 +14,7 @@
  */
 
 import { execFileSync } from 'node:child_process';
-import { existsSync, lstatSync, readFileSync, realpathSync } from 'node:fs';
+import { existsSync, lstatSync, readFileSync, readlinkSync, realpathSync } from 'node:fs';
 import { dirname, join, resolve, sep } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { fileURLToPath } from 'node:url';
@@ -36,8 +36,10 @@ import {
 } from './daemon.js';
 import {
   isSystemdUnitActive,
+  refreshSystemdUnitEntry,
   startSystemdUnit,
   stopSystemdUnit,
+  warnStaleWindowsAutostart,
 } from './autostart.js';
 
 // ---------------------------------------------------------------------------
@@ -61,6 +63,11 @@ export interface ServiceOptions {
   configPath?: string;
   /** Entry point of the package that must serve after the update. */
   entryPoint?: string;
+  /**
+   * Entry point that may be written into an existing systemd unit. Absent for
+   * a `--force` checkout: autostart must never point systemd at a checkout.
+   */
+  systemdEntryPoint?: string;
 }
 
 export interface DaemonStateSnapshot {
@@ -90,6 +97,8 @@ export interface UpdateDependencies {
   systemdActive: () => boolean;
   systemdStop: () => void;
   systemdStart: (entryPoint?: string) => void;
+  /** Rewrite an installed systemd unit's ExecStart to this entry point. */
+  refreshSystemdUnit: (entryPoint: string) => void;
   probeHealth: (
     port: number,
   ) => Promise<{ ok: boolean; body?: Record<string, unknown> }>;
@@ -241,11 +250,31 @@ function isInsidePath(file: string, dir: string, platform: NodeJS.Platform): boo
 }
 
 /**
+ * Is the entry a link? `lstat` is the fast path, but a Windows junction can be
+ * reported as a plain directory; `readlink` still answers for junctions and
+ * symlinks, so either signal means "do not fall back to a plain path compare".
+ */
+function isLinkEntry(entryPath: string): boolean {
+  try {
+    if (lstatSync(entryPath).isSymbolicLink()) return true;
+  } catch {
+    // Missing path: readlink below decides.
+  }
+  try {
+    readlinkSync(entryPath);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
  * pnpm's global entry is normally a symlink into its store. Accept it only
- * when the link resolves inside `<dirname(root)>/.pnpm`, the store next to
- * `node_modules`: a link to a checkout (`pnpm link`) must hit the same
- * refusal as `npm link`, or the update would replace the user's checkout.
- * A broken symlink never resolves, so it never matches. A non-symlink entry
+ * when the link resolves inside `dirname(root)`, the pnpm global directory: a
+ * link to a checkout (`pnpm link`) lives outside it and must hit the same
+ * refusal as `npm link`, or the update would replace the user's checkout. A
+ * custom `virtual-store-dir` inside the global directory still matches. A
+ * broken symlink never resolves, so it never matches. A non-link entry
  * (hoisted layout) keeps the plain canonical comparison.
  */
 function matchesPnpmInstall(
@@ -254,21 +283,17 @@ function matchesPnpmInstall(
   platform: NodeJS.Platform,
 ): boolean {
   const expectedPath = join(root, 'saros-proxy');
-  let isLink = false;
-  try {
-    isLink = lstatSync(expectedPath).isSymbolicLink();
-  } catch {
-    // Missing path: the canonical comparison below decides.
+  if (!isLinkEntry(expectedPath)) {
+    return samePath(packageRoot, expectedPath, platform);
   }
-  if (!isLink) return samePath(packageRoot, expectedPath, platform);
   let target: string;
   try {
     target = realpathSync(expectedPath);
   } catch {
     return false;
   }
-  const store = canonicalPath(join(dirname(root), '.pnpm'));
-  if (!isInsidePath(target, store, platform)) return false;
+  const globalDir = canonicalPath(dirname(root));
+  if (!isInsidePath(target, globalDir, platform)) return false;
   const actual = canonicalPath(packageRoot);
   return platform === 'win32'
     ? actual.toLowerCase() === target.toLowerCase()
@@ -504,6 +529,7 @@ function resolveDependencies(
     systemdStop: overrides.systemdStop ?? stopSystemdUnit,
     systemdStart:
       overrides.systemdStart ?? ((entryPoint) => startSystemdUnit(entryPoint)),
+    refreshSystemdUnit: overrides.refreshSystemdUnit ?? refreshSystemdUnitEntry,
     probeHealth: overrides.probeHealth ?? probeProxyHealth,
     findPortOwner: overrides.findPortOwner ?? findPortOwner,
     killPortOwner: overrides.killPortOwner ?? terminatePortOwner,
@@ -523,13 +549,22 @@ function errorMessage(err: unknown): string {
 // Service lifecycle (shared by the success and rollback paths)
 // ---------------------------------------------------------------------------
 
+/** The subset of service options the daemon adapter understands. */
+function daemonServiceOptions(options: ServiceOptions): ServiceOptions {
+  const daemonOptions: ServiceOptions = {};
+  if (options.port !== undefined) daemonOptions.port = options.port;
+  if (options.configPath !== undefined) daemonOptions.configPath = options.configPath;
+  if (options.entryPoint !== undefined) daemonOptions.entryPoint = options.entryPoint;
+  return daemonOptions;
+}
+
 async function startService(
   mode: RestartMode,
   deps: UpdateDependencies,
   options: ServiceOptions,
 ): Promise<void> {
-  if (mode === 'systemd') deps.systemdStart(options.entryPoint);
-  else if (mode === 'daemon') await deps.daemonStart(options);
+  if (mode === 'systemd') deps.systemdStart(options.systemdEntryPoint);
+  else if (mode === 'daemon') await deps.daemonStart(daemonServiceOptions(options));
 }
 
 async function stopService(
@@ -555,6 +590,12 @@ function healthFailureDetail(
     : 'does not report its version';
 }
 
+interface ResolvedGlobalInstall {
+  install: GlobalInstall;
+  /** False when `--force` fell back to npm for a checkout. */
+  detected: boolean;
+}
+
 /**
  * Resolve which package manager owns the global install and where its root
  * is. Prints the reason and returns null when the caller must not touch the
@@ -564,7 +605,7 @@ function healthFailureDetail(
 function resolveGlobalInstall(
   deps: UpdateDependencies,
   args: UpdateArgs,
-): GlobalInstall | null {
+): ResolvedGlobalInstall | null {
   const probe = probeGlobalInstall(deps.packageRoot, deps.exec, deps.platform);
   if (probe.install !== null) {
     console.log(
@@ -572,9 +613,11 @@ function resolveGlobalInstall(
         `Detected the ${probe.install.manager} global install at ${probe.install.root}.`,
       ),
     );
-    return probe.install;
+    return { install: probe.install, detected: true };
   }
-  if (args.force) return { manager: 'npm', root: probe.npmRoot ?? '' };
+  if (args.force) {
+    return { install: { manager: 'npm', root: probe.npmRoot ?? '' }, detected: false };
+  }
   const probes = GLOBAL_DISCOVERIES.map((discovery) =>
     formatInvocation(discovery.command, discovery.args),
   ).join(', ');
@@ -592,6 +635,32 @@ function resolveGlobalInstall(
   );
   console.error(chalk.dim(`Checked: ${probes}.`));
   return null;
+}
+
+/**
+ * After a successful install, repair autostart entries independent of the
+ * restart mode: an inactive unit or a Windows login entry left on the old pnpm
+ * store path starts stale code on the next boot. Systemd is rewritten only
+ * when a global entry point was detected (never a checkout); existing Windows
+ * entries are reported rather than rewritten blindly.
+ */
+function repairAutostartAfterInstall(
+  deps: UpdateDependencies,
+  entryPoint: string | undefined,
+  version: string,
+): void {
+  if (deps.platform === 'linux' && entryPoint !== undefined) {
+    try {
+      deps.refreshSystemdUnit(entryPoint);
+    } catch (err) {
+      console.error(
+        chalk.yellow(
+          `! Could not update the systemd autostart unit: ${errorMessage(err)}`,
+        ),
+      );
+    }
+  }
+  if (deps.platform === 'win32') warnStaleWindowsAutostart(version, deps.platform);
 }
 
 // ---------------------------------------------------------------------------
@@ -820,8 +889,9 @@ export async function runUpdateCommand(
     return 1;
   }
 
-  const install = resolveGlobalInstall(deps, args);
-  if (install === null) return 1;
+  const resolved = resolveGlobalInstall(deps, args);
+  if (resolved === null) return 1;
+  const install = resolved.install;
 
   console.log(chalk.cyan(`Updating saros-proxy: ${current} → ${latest}`));
   if (!args.yes) {
@@ -848,9 +918,11 @@ export async function runUpdateCommand(
     install.root === ''
       ? undefined
       : join(install.root, 'saros-proxy', 'dist', 'index.js');
+  const systemdEntryPoint = resolved.detected ? entryPoint : undefined;
   const restartOptions: ServiceOptions = {
     ...serviceOptions,
     ...(entryPoint === undefined ? {} : { entryPoint }),
+    ...(systemdEntryPoint === undefined ? {} : { systemdEntryPoint }),
   };
 
   try {
@@ -908,6 +980,8 @@ export async function runUpdateCommand(
     );
     return 1;
   }
+
+  repairAutostartAfterInstall(deps, systemdEntryPoint, latest);
 
   if (mode === 'none') {
     console.log(
@@ -1010,8 +1084,9 @@ function installedEntryPoint(
   args: UpdateArgs,
   current: string,
 ): string | null {
-  const install = resolveGlobalInstall(deps, args);
-  if (install === null) return null;
+  const resolved = resolveGlobalInstall(deps, args);
+  if (resolved === null) return null;
+  const install = resolved.install;
   const entryPoint =
     install.root === ''
       ? ''
@@ -1024,6 +1099,17 @@ function installedEntryPoint(
     ),
   );
   return null;
+}
+
+/**
+ * Global entry point for autostart repair, without messages: a checkout and a
+ * missing entry point both return null, which leaves the unit untouched.
+ */
+function detectGlobalEntryPoint(deps: UpdateDependencies): string | null {
+  const probe = probeGlobalInstall(deps.packageRoot, deps.exec, deps.platform);
+  if (probe.install === null || probe.install.root === '') return null;
+  const entryPoint = join(probe.install.root, 'saros-proxy', 'dist', 'index.js');
+  return existsSync(entryPoint) ? entryPoint : null;
 }
 
 /**
@@ -1065,6 +1151,9 @@ async function restartIfDaemonIsStale(
     const entryPoint = installedEntryPoint(deps, args, current);
     if (entryPoint === null) return 1;
     restartOptions.entryPoint = entryPoint;
+  } else if (mode === 'systemd') {
+    const entryPoint = detectGlobalEntryPoint(deps);
+    if (entryPoint !== null) restartOptions.systemdEntryPoint = entryPoint;
   }
 
   console.log(

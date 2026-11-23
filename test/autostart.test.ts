@@ -7,7 +7,7 @@
  */
 
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
-import { existsSync, mkdirSync, rmSync, readFileSync, writeFileSync, mkdtempSync } from 'node:fs';
+import { existsSync, lstatSync, mkdirSync, rmSync, readFileSync, symlinkSync, writeFileSync, mkdtempSync } from 'node:fs';
 import type * as NodeFs from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
@@ -344,6 +344,86 @@ describe('autostart — Registry method', () => {
     const { autostartStatus } = await import('../src/cli/autostart.js');
 
     expect(() => autostartStatus('registry')).not.toThrow();
+  });
+});
+
+describe('autostart — stale pnpm entries', () => {
+  let appData: string;
+
+  const startupDir = (): string =>
+    join(appData, 'Microsoft', 'Windows', 'Start Menu', 'Programs', 'Startup');
+  const vbsFile = (): string => join(startupDir(), 'saros-proxy-daemon.vbs');
+
+  const writeVbs = (content: string): void => {
+    mkdirSync(startupDir(), { recursive: true });
+    writeFileSync(vbsFile(), content, 'utf-8');
+  };
+
+  beforeEach(() => {
+    appData = mkdtempSync(join(tmpdir(), 'saros-stale-autostart-'));
+    vi.stubEnv('APPDATA', appData);
+    mockLoggerWarn.mockReset();
+    mockExecFileSync.mockReset();
+    mockExecFileSync.mockReturnValue(Buffer.from(''));
+  });
+
+  afterEach(() => {
+    vi.unstubAllEnvs();
+    rmSync(appData, { recursive: true, force: true });
+  });
+
+  it('warns when the VBS entry points at another pnpm version', async () => {
+    writeVbs(
+      'shell.Run "node ""C:\\Users\\u\\.pnpm\\saros-proxy@1.3.3\\node_modules\\saros-proxy\\dist\\index.js"" start", 0, False',
+    );
+    const { warnStaleWindowsAutostart } = await import('../src/cli/autostart.js');
+
+    warnStaleWindowsAutostart('1.3.4', 'win32');
+
+    expect(mockLoggerWarn).toHaveBeenCalledTimes(1);
+    const message = mockLoggerWarn.mock.calls[0].join(' ');
+    expect(message).toContain('saros-proxy autostart install');
+    expect(message).toContain('saros-proxy-daemon.vbs');
+    expect(message).toContain('.pnpm');
+  });
+
+  it('does not warn when the VBS entry already uses the stable path', async () => {
+    writeVbs(
+      'shell.Run "node ""C:\\saros-proxy\\dist\\index.js"" start", 0, False',
+    );
+    const { warnStaleWindowsAutostart } = await import('../src/cli/autostart.js');
+
+    warnStaleWindowsAutostart('1.3.4', 'win32');
+
+    expect(mockLoggerWarn).not.toHaveBeenCalled();
+  });
+
+  it('warns when the registry value points at another pnpm version', async () => {
+    mockExecFileSync.mockReturnValue(
+      Buffer.from(
+        '    Saros Proxy    REG_SZ    "C:\\Users\\u\\.pnpm\\saros-proxy@1.3.3\\node_modules\\saros-proxy\\dist\\index.js" start\r\n',
+      ),
+    );
+    const { warnStaleWindowsAutostart } = await import('../src/cli/autostart.js');
+
+    warnStaleWindowsAutostart('1.3.4', 'win32');
+
+    expect(mockLoggerWarn).toHaveBeenCalledTimes(1);
+    const message = mockLoggerWarn.mock.calls[0].join(' ');
+    expect(message).toContain('saros-proxy autostart install');
+    expect(message).toContain('Saros Proxy');
+    expect(message).toContain('.pnpm');
+  });
+
+  it('does not warn for a stable registry value', async () => {
+    mockExecFileSync.mockReturnValue(
+      Buffer.from('    Saros Proxy    REG_SZ    "C:\\saros-proxy\\dist\\index.js" start\r\n'),
+    );
+    const { warnStaleWindowsAutostart } = await import('../src/cli/autostart.js');
+
+    warnStaleWindowsAutostart('1.3.4', 'win32');
+
+    expect(mockLoggerWarn).not.toHaveBeenCalled();
   });
 });
 
@@ -926,6 +1006,78 @@ describe('autostart — systemd method (Linux)', () => {
       ['--user', 'start', 'saros-proxy.service'],
     ]);
     expect(readFileSync(unitPath(), 'utf-8')).toBe(before);
+  });
+
+  it('reports a daemon-reload failure without hiding the rewritten unit', async () => {
+    const stableEntry = stablePnpmEntry();
+    const oldEntry = join(
+      configHome,
+      'pnpm',
+      'global',
+      '5',
+      '.pnpm',
+      'saros-proxy@1.3.3',
+      'node_modules',
+      'saros-proxy',
+      'dist',
+      'index.js',
+    );
+    mkdirSync(join(configHome, 'systemd', 'user'), { recursive: true });
+    writeFileSync(
+      unitPath(),
+      `[Service]\nExecStart="${process.execPath}" "${oldEntry}" serve\n`,
+      'utf-8',
+    );
+    mockExecFileSync.mockImplementation((_command: string, args: string[]) => {
+      if (args.includes('daemon-reload')) throw new Error('Failed to connect to bus');
+      return Buffer.from('');
+    });
+    const { startSystemdUnit } = await import('../src/cli/autostart.js');
+
+    startSystemdUnit(stableEntry);
+
+    expect(readFileSync(unitPath(), 'utf-8')).toContain(stableEntry);
+    expect(mockLoggerWarn).toHaveBeenCalledTimes(1);
+    const message = mockLoggerWarn.mock.calls[0].join(' ');
+    expect(message).toContain('unit was updated');
+    expect(message).toContain('previous unit');
+    expect(mockExecFileSync.mock.calls.map((call: unknown[]) => call[1])).toContainEqual([
+      '--user',
+      'start',
+      'saros-proxy.service',
+    ]);
+  });
+
+  it('rewrites a unit symlinked into dotfiles without replacing the link', async () => {
+    const stableEntry = stablePnpmEntry();
+    const oldEntry = join(
+      configHome,
+      'pnpm',
+      'global',
+      '5',
+      '.pnpm',
+      'saros-proxy@1.3.3',
+      'node_modules',
+      'saros-proxy',
+      'dist',
+      'index.js',
+    );
+    const dotfiles = join(configHome, 'dotfiles');
+    const target = join(dotfiles, 'saros-proxy.service');
+    mkdirSync(dotfiles, { recursive: true });
+    writeFileSync(
+      target,
+      `[Service]\nExecStart="${process.execPath}" "${oldEntry}" serve\n`,
+      'utf-8',
+    );
+    mkdirSync(join(configHome, 'systemd', 'user'), { recursive: true });
+    symlinkSync(target, unitPath());
+    const { startSystemdUnit } = await import('../src/cli/autostart.js');
+
+    startSystemdUnit(stableEntry);
+
+    expect(lstatSync(unitPath()).isSymbolicLink()).toBe(true);
+    expect(readFileSync(target, 'utf-8')).toContain(stableEntry);
   });
 
   it('fails with a build hint instead of emitting a bare ExecStart', async () => {

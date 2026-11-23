@@ -10,6 +10,7 @@
 
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { mkdtempSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import type * as NodeFs from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import type * as ClackPrompts from '@clack/prompts';
@@ -25,6 +26,18 @@ vi.mock('node:child_process', () => ({
   execFileSync: (...args: unknown[]) => mockExecFileSync(...args),
   spawn: (...args: unknown[]) => mockSpawn(...args),
 }));
+
+// Windows reports some junctions as plain directories. Keep every fs function
+// real except lstat, so one test can force that misreport.
+const mockLstatSync = vi.hoisted(() => vi.fn());
+
+vi.mock('node:fs', async (importOriginal) => {
+  const actual = await importOriginal<typeof NodeFs>();
+  mockLstatSync.mockImplementation((...args: unknown[]) =>
+    (actual.lstatSync as (...a: unknown[]) => unknown)(...args),
+  );
+  return { ...actual, lstatSync: mockLstatSync };
+});
 
 // The daemon module owns process.exit paths and the real PID file. Replace it
 // with spies so the default adapters can be exercised safely.
@@ -59,6 +72,7 @@ import {
   type UpdateDependencies,
 } from '../src/cli/update.js';
 import { isSystemdUnitActive } from '../src/cli/autostart.js';
+import { logger } from '../src/logger.js';
 
 // ---------------------------------------------------------------------------
 // Harness
@@ -104,6 +118,10 @@ interface Harness {
   probes: number[];
   stopOptions: Array<Record<string, unknown>>;
   startOptions: Array<Record<string, unknown>>;
+  /** Entry points passed to the systemd repair adapter. */
+  refreshes: string[];
+  /** Entry points passed to the systemd start adapter. */
+  systemdStarts: Array<string | undefined>;
   /** Ports passed to findPortOwner. */
   ownerLookups: number[];
   /** PIDs passed to killPortOwner. */
@@ -117,6 +135,8 @@ function makeDeps(options: DepOptions = {}): Harness {
   const probes: number[] = [];
   const stopOptions: Array<Record<string, unknown>> = [];
   const startOptions: Array<Record<string, unknown>> = [];
+  const refreshes: string[] = [];
+  const systemdStarts: Array<string | undefined> = [];
   const ownerLookups: number[] = [];
   const killedPids: number[] = [];
   const {
@@ -221,8 +241,12 @@ function makeDeps(options: DepOptions = {}): Harness {
     systemdStop: () => {
       events.push('systemd-stop');
     },
-    systemdStart: () => {
+    systemdStart: (entryPoint) => {
+      systemdStarts.push(entryPoint);
       events.push('systemd-start');
+    },
+    refreshSystemdUnit: (entryPoint) => {
+      refreshes.push(entryPoint);
     },
     probeHealth: async (port) => {
       probes.push(port);
@@ -251,6 +275,8 @@ function makeDeps(options: DepOptions = {}): Harness {
     probes,
     stopOptions,
     startOptions,
+    refreshes,
+    systemdStarts,
     ownerLookups,
     killedPids,
   };
@@ -323,6 +349,36 @@ function makeYarnInstall(): {
 
 function symlinkType(): 'junction' | 'dir' {
   return process.platform === 'win32' ? 'junction' : 'dir';
+}
+
+/**
+ * Write a systemd unit whose ExecStart points into a versioned pnpm store and
+ * point XDG_CONFIG_HOME at it. Returns the unit path and the stale entry.
+ */
+function makeVersionedUnit(portArg = ''): { unitPath: string; oldEntry: string } {
+  const xdgHome = join(tempDir, 'xdg');
+  const unitDir = join(xdgHome, 'systemd', 'user');
+  const unitPath = join(unitDir, 'saros-proxy.service');
+  const oldEntry = join(
+    tempDir,
+    'pnpm',
+    'global',
+    '5',
+    '.pnpm',
+    'saros-proxy@1.3.3',
+    'node_modules',
+    'saros-proxy',
+    'dist',
+    'index.js',
+  );
+  mkdirSync(unitDir, { recursive: true });
+  writeFileSync(
+    unitPath,
+    `[Service]\nExecStart="${process.execPath}" "${oldEntry}" serve${portArg}\n`,
+    'utf-8',
+  );
+  vi.stubEnv('XDG_CONFIG_HOME', xdgHome);
+  return { unitPath, oldEntry };
 }
 
 function formatExec(call: ExecCall): string {
@@ -539,6 +595,51 @@ describe('detectGlobalInstall', () => {
       detectGlobalInstall(
         checkout,
         discoveryExec({ npm: globalRoot, pnpm: null, yarn: null }),
+        'linux',
+      ),
+    ).toBeNull();
+  });
+
+  it('accepts a pnpm link into a custom store inside the global directory', () => {
+    const prefix = join(tempDir, 'pnpm', 'global', '5');
+    const pnpmRoot = join(prefix, 'node_modules');
+    const packageRoot = join(
+      prefix,
+      'custom-store',
+      'saros-proxy@1.3.4',
+      'node_modules',
+      'saros-proxy',
+    );
+    mkdirSync(packageRoot, { recursive: true });
+    mkdirSync(pnpmRoot, { recursive: true });
+    symlinkSync(packageRoot, join(pnpmRoot, 'saros-proxy'), symlinkType());
+
+    expect(
+      detectGlobalInstall(
+        packageRoot,
+        discoveryExec({ npm: '/usr/lib/node_modules', pnpm: pnpmRoot, yarn: null }),
+        'linux',
+      ),
+    ).toEqual({ manager: 'pnpm', root: pnpmRoot });
+  });
+
+  it('treats a junction reported as a directory as a link and refuses a checkout', () => {
+    const pnpmRoot = join(tempDir, 'pnpm', 'global', '5', 'node_modules');
+    const checkout = join(tempDir, 'checkout');
+    mkdirSync(pnpmRoot, { recursive: true });
+    mkdirSync(checkout, { recursive: true });
+    const expected = join(pnpmRoot, 'saros-proxy');
+    symlinkSync(checkout, expected, symlinkType());
+    // Windows can report the junction as a plain directory; readlink still
+    // answers, which must force the link path (and its store containment).
+    mockLstatSync.mockImplementationOnce(
+      () => ({ isSymbolicLink: () => false }) as NodeFs.Stats,
+    );
+
+    expect(
+      detectGlobalInstall(
+        checkout,
+        discoveryExec({ npm: null, pnpm: pnpmRoot, yarn: null }),
         'linux',
       ),
     ).toBeNull();
@@ -1006,6 +1107,76 @@ describe('runUpdateCommand', () => {
     const start = harness.events.indexOf('systemd-start');
     expect(stop).toBeLessThan(install);
     expect(install).toBeLessThan(start);
+  });
+
+  it('repairs an inactive systemd unit after installing', async () => {
+    const pnpm = makePnpmInstall();
+    const harness = makeDeps({
+      packageRoot: pnpm.packageRoot,
+      pnpmRoot: pnpm.pnpmRoot,
+      daemonRunning: false,
+    });
+
+    expect(await runUpdateCommand(['--yes'], harness.deps)).toBe(0);
+
+    expect(harness.refreshes).toEqual([pnpm.entryPoint]);
+    expect(harness.events).not.toContain('systemd-start');
+  });
+
+  it('repairs the systemd unit after a daemon-mode install', async () => {
+    const pnpm = makePnpmInstall();
+    const harness = makeDeps({
+      packageRoot: pnpm.packageRoot,
+      pnpmRoot: pnpm.pnpmRoot,
+    });
+
+    expect(await runUpdateCommand(['--yes'], harness.deps)).toBe(0);
+
+    expect(harness.refreshes).toEqual([pnpm.entryPoint]);
+    expect(harness.events).toContain('daemon-start');
+  });
+
+  it('does not rewrite autostart from a forced checkout', async () => {
+    const harness = makeDeps({ packageRoot: '/home/user/Projetos/saros-proxy' });
+
+    expect(await runUpdateCommand(['--yes', '--force'], harness.deps)).toBe(0);
+
+    expect(harness.refreshes).toEqual([]);
+    expect(harness.systemdStarts).toEqual([]);
+  });
+
+  it('passes the detected entry point to a stale systemd restart', async () => {
+    const pnpm = makePnpmInstall();
+    const harness = makeDeps({
+      currentVersion: '1.1.3',
+      fetchLatestVersion: async () => '1.1.3',
+      daemonHealthVersion: '1.1.2',
+      packageRoot: pnpm.packageRoot,
+      pnpmRoot: pnpm.pnpmRoot,
+      systemdActive: () => true,
+    });
+    captureOutput();
+
+    expect(await runUpdateCommand(['--yes'], harness.deps)).toBe(0);
+
+    expect(harness.systemdStarts).toEqual([pnpm.entryPoint]);
+  });
+
+  it('does not pass a checkout entry point to a stale systemd restart', async () => {
+    const checkout = join(tempDir, 'checkout');
+    mkdirSync(checkout, { recursive: true });
+    const harness = makeDeps({
+      currentVersion: '1.1.3',
+      fetchLatestVersion: async () => '1.1.3',
+      daemonHealthVersion: '1.1.2',
+      packageRoot: checkout,
+      systemdActive: () => true,
+    });
+    captureOutput();
+
+    expect(await runUpdateCommand(['--yes'], harness.deps)).toBe(0);
+
+    expect(harness.systemdStarts).toEqual([undefined]);
   });
 
   it('refuses without a TTY and without --yes, before any exec', async () => {
@@ -2062,6 +2233,159 @@ describe('default dependency wiring', () => {
     expect(commands).toContain('pnpm add -g saros-proxy@1.1.3');
     expect(commands.indexOf('systemctl --user daemon-reload')).toBeLessThan(
       commands.indexOf('systemctl --user start saros-proxy.service'),
+    );
+  });
+
+  it('rewrites an inactive systemd unit after a pnpm install', async () => {
+    const pnpm = makePnpmInstall();
+    const { unitPath } = makeVersionedUnit(' --port 4242');
+    mockExecFileSync.mockImplementation((command: string, args: string[]) => {
+      if (command === 'npm' && args[0] === 'root') return '/usr/lib/node_modules\n';
+      if (command === 'pnpm' && args[0] === 'root') return `${pnpm.pnpmRoot}\n`;
+      if (command === 'systemctl' && args.includes('is-active')) return 'inactive\n';
+      return '';
+    });
+    mockGetDaemonState.mockResolvedValue({ running: false, port: 3000 });
+    captureOutput();
+
+    const code = await runUpdateCommand(['--yes'], {
+      currentVersion: '1.1.2',
+      fetchLatestVersion: async () => '1.1.3',
+      readInstalledVersion: () => '1.1.3',
+      packageRoot: pnpm.packageRoot,
+      isTTY: true,
+      daemonLogPath: join(tempDir, 'daemon.log'),
+      sleep: async () => {},
+      healthAttempts: 1,
+      healthDelayMs: 1,
+      platform: 'linux',
+    });
+
+    expect(code).toBe(0);
+    const unit = readFileSync(unitPath, 'utf-8');
+    expect(unit).toContain(join(pnpm.pnpmRoot, 'saros-proxy', 'dist', 'index.js'));
+    expect(unit).not.toContain('.pnpm/saros-proxy@');
+    expect(unit).toContain('serve --port 4242');
+    const commands = mockExecFileSync.mock.calls.map((call) =>
+      [call[0], ...(call[1] as string[])].join(' '),
+    );
+    expect(commands).toContain('systemctl --user daemon-reload');
+    expect(commands).not.toContain('systemctl --user start saros-proxy.service');
+  });
+
+  it('repairs a stale pnpm systemd unit before restarting it', async () => {
+    const pnpm = makePnpmInstall();
+    const { unitPath } = makeVersionedUnit();
+    mockExecFileSync.mockImplementation((command: string, args: string[]) => {
+      if (command === 'npm' && args[0] === 'root') return '/usr/lib/node_modules\n';
+      if (command === 'pnpm' && args[0] === 'root') return `${pnpm.pnpmRoot}\n`;
+      if (command === 'systemctl' && args.includes('is-active')) return 'active\n';
+      return '';
+    });
+    mockGetDaemonState.mockResolvedValue({
+      running: true,
+      port: 3000,
+      health: { status: 'ok', version: '1.1.2' },
+    });
+    mockProbeProxyHealth.mockResolvedValue({
+      ok: true,
+      body: { status: 'ok', version: '1.1.3' },
+    });
+    captureOutput();
+
+    const code = await runUpdateCommand(['--yes'], {
+      currentVersion: '1.1.3',
+      fetchLatestVersion: async () => '1.1.3',
+      packageRoot: pnpm.packageRoot,
+      isTTY: true,
+      daemonLogPath: join(tempDir, 'daemon.log'),
+      sleep: async () => {},
+      healthAttempts: 1,
+      healthDelayMs: 1,
+      platform: 'linux',
+    });
+
+    expect(code).toBe(0);
+    const unit = readFileSync(unitPath, 'utf-8');
+    expect(unit).toContain(join(pnpm.pnpmRoot, 'saros-proxy', 'dist', 'index.js'));
+    expect(unit).not.toContain('.pnpm/saros-proxy@');
+    const commands = mockExecFileSync.mock.calls.map((call) =>
+      [call[0], ...(call[1] as string[])].join(' '),
+    );
+    expect(commands.indexOf('systemctl --user daemon-reload')).toBeLessThan(
+      commands.indexOf('systemctl --user start saros-proxy.service'),
+    );
+  });
+
+  it('leaves the unit alone when a forced checkout is updated', async () => {
+    const checkout = join(tempDir, 'checkout');
+    mkdirSync(checkout, { recursive: true });
+    const { unitPath } = makeVersionedUnit(' --port 4242');
+    const before = readFileSync(unitPath, 'utf-8');
+    mockExecFileSync.mockImplementation((command: string, args: string[]) => {
+      if (command === 'npm' && args[0] === 'root') return '/usr/lib/node_modules\n';
+      if (command === 'systemctl' && args.includes('is-active')) return 'inactive\n';
+      return '';
+    });
+    mockGetDaemonState.mockResolvedValue({ running: false, port: 3000 });
+    captureOutput();
+
+    const code = await runUpdateCommand(['--yes', '--force'], {
+      currentVersion: '1.1.2',
+      fetchLatestVersion: async () => '1.1.3',
+      readInstalledVersion: () => '1.1.3',
+      packageRoot: checkout,
+      isTTY: true,
+      daemonLogPath: join(tempDir, 'daemon.log'),
+      sleep: async () => {},
+      healthAttempts: 1,
+      healthDelayMs: 1,
+      platform: 'linux',
+    });
+
+    expect(code).toBe(0);
+    expect(readFileSync(unitPath, 'utf-8')).toBe(before);
+  });
+
+  it('warns about a Windows VBS entry pinned to the old pnpm store', async () => {
+    const pnpm = makePnpmInstall();
+    const appData = join(tempDir, 'appdata');
+    const startup = join(appData, 'Microsoft', 'Windows', 'Start Menu', 'Programs', 'Startup');
+    mkdirSync(startup, { recursive: true });
+    const vbs = join(startup, 'saros-proxy-daemon.vbs');
+    writeFileSync(
+      vbs,
+      'shell.Run "node ""C:\\Users\\u\\.pnpm\\saros-proxy@1.1.2\\node_modules\\saros-proxy\\dist\\index.js"" start", 0, False\n',
+      'utf-8',
+    );
+    vi.stubEnv('APPDATA', appData);
+    const warnSpy = vi.spyOn(logger, 'warn').mockImplementation(() => {});
+    mockExecFileSync.mockImplementation((command: string, args: string[]) => {
+      if (command === 'npm' && args[0] === 'root') return '/usr/lib/node_modules\n';
+      if (command === 'pnpm' && args[0] === 'root') return `${pnpm.pnpmRoot}\n`;
+      return '';
+    });
+    mockGetDaemonState.mockResolvedValue({ running: false, port: 3000 });
+    captureOutput();
+
+    const code = await runUpdateCommand(['--yes'], {
+      currentVersion: '1.1.2',
+      fetchLatestVersion: async () => '1.1.3',
+      readInstalledVersion: () => '1.1.3',
+      packageRoot: pnpm.packageRoot,
+      isTTY: true,
+      daemonLogPath: join(tempDir, 'daemon.log'),
+      sleep: async () => {},
+      healthAttempts: 1,
+      healthDelayMs: 1,
+      platform: 'win32',
+    });
+
+    expect(code).toBe(0);
+    expect(warnSpy).toHaveBeenCalledWith(
+      expect.stringContaining('saros-proxy autostart install'),
+      vbs,
+      expect.stringContaining('.pnpm'),
     );
   });
 
