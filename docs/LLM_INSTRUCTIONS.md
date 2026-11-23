@@ -119,8 +119,14 @@ Once you have all the info, execute in order:
 | Method | Command |
 |--------|---------|
 | npm | `npm install -g saros-proxy` |
+| pnpm | `pnpm add -g saros-proxy` |
 | Docker | `npm run docker:build` |
 | Source | `git clone https://github.com/vitorvilaca3011/saros-proxy.git && cd proxy && npm install && npm run build` |
+
+`pnpm install` builds the same tree from source (one content-addressed store per
+machine); `saros-proxy update` detects which manager installed the package — it
+probes `npm root -g`, `pnpm root -g` and `yarn global dir` — and reinstalls with
+that one, so never tell a pnpm user to `npm install -g`.
 
 ### 2.2 Read Keys & Generate Config
 

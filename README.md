@@ -205,10 +205,11 @@ Follow the instructions on docs/LLM_INSTRUCTIONS.md.
 
 ---
 
-### Quick Install (npm)
+### Quick Install
 
 ```bash
-npm install -g saros-proxy
+npm install -g saros-proxy     # npm
+pnpm add -g saros-proxy        # pnpm
 ```
 
 ### From Source
@@ -219,6 +220,13 @@ cd proxy
 npm install
 npm run build
 ```
+
+With pnpm the same tree builds after `pnpm install`: pnpm keeps one copy of each
+dependency per machine instead of one `node_modules` per project. pnpm 10 blocks
+dependency build scripts by default, so it prints
+`Ignored build scripts: esbuild` on the first install — the committed
+`pnpm.onlyBuiltDependencies` already allows it, or run `pnpm approve-builds`
+once if your pnpm predates that field.
 
 > **Requirements:** Node.js >= 22.0.0
 
@@ -583,7 +591,7 @@ npx tsx src/index.ts --config /etc/saros/config.yaml
 
 ### Run as background daemon (all platforms)
 
-The proxy ships with a built-in daemon. Once installed globally (`npm install -g saros-proxy`):
+The proxy ships with a built-in daemon. Once installed globally (`npm install -g saros-proxy` or `pnpm add -g saros-proxy`):
 
 ```bash
 # Show the overview (running state, harnesses, API keys, config path)
@@ -626,12 +634,19 @@ saros-proxy autostart uninstall [--method systemd|vbs|registry|auto]
 # Check autostart status
 saros-proxy autostart status [--method systemd|vbs|registry|auto]
 
-# Update a global npm install: stop, npm install -g, start again, verify
+# Update a global install: stop, reinstall with the manager that installed it, start again, verify
 saros-proxy update
 saros-proxy update --check          # only compare installed vs npm latest (exit 1 when outdated)
 saros-proxy update --yes --force    # no prompt; --force allows a non-global checkout
 saros-proxy update --port 3100      # restart the daemon that serves 3100, not the default port
 ```
+
+`update` reinstalls with the manager that installed the package: it probes
+`npm root -g`, `pnpm root -g` and `yarn global dir` and compares the canonical
+path against the running package, so a pnpm (`pnpm add -g`) or yarn 1
+(`yarn global add`) install updates with its own manager instead of being
+refused as "not a global npm package". A checkout, or an `npm link` into one, is
+still refused unless `--force` is passed.
 
 On Linux the default is a `systemd --user` unit at
 `~/.config/systemd/user/saros-proxy.service` (honouring `$XDG_CONFIG_HOME`), enabled
