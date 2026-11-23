@@ -224,10 +224,10 @@ npm run build
 With pnpm the same tree builds after `pnpm install`. pnpm keeps one copy of each
 dependency in a machine-wide store and links it into the project, instead of a
 full copy per project. pnpm 10 blocks dependency build scripts unless the package
-says otherwise, so this repo declares `pnpm.onlyBuiltDependencies: ["esbuild"]`
-in `package.json`: a clean `pnpm install` runs esbuild's script and prints no
-`Ignored build scripts` warning. Without that field pnpm warns and points at
-`pnpm approve-builds`.
+says otherwise, so this repo declares `pnpm.onlyBuiltDependencies` in
+`package.json` (`esbuild`, plus `fsevents` on macOS): a clean `pnpm install` runs
+those scripts and prints no `Ignored build scripts` warning. Without that field
+pnpm warns and points at `pnpm approve-builds`.
 
 > **Requirements:** Node.js >= 22.0.0
 

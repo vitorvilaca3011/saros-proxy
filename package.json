@@ -75,7 +75,8 @@
   },
   "pnpm": {
     "onlyBuiltDependencies": [
-      "esbuild"
+      "esbuild",
+      "fsevents"
     ]
   }
 }
