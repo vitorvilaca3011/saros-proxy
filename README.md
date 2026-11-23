@@ -221,12 +221,13 @@ npm install
 npm run build
 ```
 
-With pnpm the same tree builds after `pnpm install`: pnpm keeps one copy of each
-dependency per machine instead of one `node_modules` per project. pnpm 10 blocks
-dependency build scripts by default, so it prints
-`Ignored build scripts: esbuild` on the first install — the committed
-`pnpm.onlyBuiltDependencies` already allows it, or run `pnpm approve-builds`
-once if your pnpm predates that field.
+With pnpm the same tree builds after `pnpm install`. pnpm keeps one copy of each
+dependency in a machine-wide store and links it into the project, instead of a
+full copy per project. pnpm 10 blocks dependency build scripts unless the package
+says otherwise, so this repo declares `pnpm.onlyBuiltDependencies: ["esbuild"]`
+in `package.json`: a clean `pnpm install` runs esbuild's script and prints no
+`Ignored build scripts` warning. Without that field pnpm warns and points at
+`pnpm approve-builds`.
 
 > **Requirements:** Node.js >= 22.0.0
 
@@ -645,8 +646,15 @@ saros-proxy update --port 3100      # restart the daemon that serves 3100, not t
 `npm root -g`, `pnpm root -g` and `yarn global dir` and compares the canonical
 path against the running package, so a pnpm (`pnpm add -g`) or yarn 1
 (`yarn global add`) install updates with its own manager instead of being
-refused as "not a global npm package". A checkout, or an `npm link` into one, is
-still refused unless `--force` is passed.
+refused as "not a global npm package". A checkout, an `npm link` or a
+`pnpm link` into one is still refused unless `--force` is passed.
+
+On a pnpm install the package really lives in a versioned store directory
+(`.pnpm/saros-proxy@<version>/…`), so the autostart entry written by
+`autostart install` uses the unversioned `node_modules/saros-proxy` path and
+`update` rewrites the unit's `ExecStart` to it before `systemctl start` — a
+version pinned in the unit would otherwise restart the old code after an
+update.
 
 On Linux the default is a `systemd --user` unit at
 `~/.config/systemd/user/saros-proxy.service` (honouring `$XDG_CONFIG_HOME`), enabled

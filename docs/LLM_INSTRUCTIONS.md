@@ -24,6 +24,7 @@ Use the `question` tool to ask the user all of these **at once** (batch into one
       "header": "Install Method",
       "options": [
         { "label": "npm (Recommended)", "description": "npm install -g saros-proxy" },
+        { "label": "pnpm", "description": "pnpm add -g saros-proxy" },
         { "label": "Docker", "description": "No Node.js needed" },
         { "label": "From source", "description": "git clone + npm install" }
       ]
