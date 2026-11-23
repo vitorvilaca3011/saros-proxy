@@ -9,7 +9,7 @@
  */
 
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
-import { mkdtempSync, mkdirSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { mkdtempSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import type * as ClackPrompts from '@clack/prompts';
@@ -544,12 +544,27 @@ describe('detectGlobalInstall', () => {
     ).toBeNull();
   });
 
-  it('refuses a pnpm symlink whose store target no longer exists', () => {
+  it('refuses a pnpm link that points at a checkout', () => {
     const pnpmRoot = join(tempDir, 'pnpm', 'global', '5', 'node_modules');
-    const packageRoot = join(tempDir, 'store', 'saros-proxy');
+    const checkout = join(tempDir, 'checkout');
     mkdirSync(pnpmRoot, { recursive: true });
-    mkdirSync(packageRoot, { recursive: true });
-    symlinkSync(join(tempDir, 'store', 'gone'), join(pnpmRoot, 'saros-proxy'), symlinkType());
+    mkdirSync(checkout, { recursive: true });
+    symlinkSync(checkout, join(pnpmRoot, 'saros-proxy'), symlinkType());
+
+    expect(
+      detectGlobalInstall(
+        checkout,
+        discoveryExec({ npm: '/usr/lib/node_modules', pnpm: pnpmRoot, yarn: null }),
+        'linux',
+      ),
+    ).toBeNull();
+  });
+
+  it('refuses a broken pnpm symlink even when packageRoot is the link itself', () => {
+    const pnpmRoot = join(tempDir, 'pnpm', 'global', '5', 'node_modules');
+    mkdirSync(pnpmRoot, { recursive: true });
+    const packageRoot = join(pnpmRoot, 'saros-proxy');
+    symlinkSync(join(tempDir, 'store', 'gone'), packageRoot, symlinkType());
 
     expect(
       detectGlobalInstall(
@@ -806,12 +821,35 @@ describe('runUpdateCommand', () => {
 
   it('refuses a pnpm entry whose symlink target is missing', async () => {
     const pnpmRoot = join(tempDir, 'pnpm', 'global', '5', 'node_modules');
-    const packageRoot = join(tempDir, 'store', 'saros-proxy');
     mkdirSync(pnpmRoot, { recursive: true });
-    mkdirSync(packageRoot, { recursive: true });
-    symlinkSync(join(tempDir, 'store', 'gone'), join(pnpmRoot, 'saros-proxy'), symlinkType());
+    const packageRoot = join(pnpmRoot, 'saros-proxy');
+    symlinkSync(join(tempDir, 'store', 'gone'), packageRoot, symlinkType());
     const harness = makeDeps({
       packageRoot,
+      pnpmRoot,
+      yarnGlobalDir: null,
+    });
+    const out = captureOutput();
+
+    expect(await runUpdateCommand(['--yes'], harness.deps)).toBe(1);
+
+    expect(harness.execs.map(formatExec)).toEqual([
+      'npm root -g',
+      'pnpm root -g',
+      'yarn global dir',
+    ]);
+    expect(harness.events).not.toContain('daemon-stop');
+    expect(out.all()).toContain('not a global npm, pnpm or yarn package');
+  });
+
+  it('refuses a pnpm link to a checkout without installing anything', async () => {
+    const pnpmRoot = join(tempDir, 'pnpm', 'global', '5', 'node_modules');
+    const checkout = join(tempDir, 'checkout');
+    mkdirSync(pnpmRoot, { recursive: true });
+    mkdirSync(checkout, { recursive: true });
+    symlinkSync(checkout, join(pnpmRoot, 'saros-proxy'), symlinkType());
+    const harness = makeDeps({
+      packageRoot: checkout,
       pnpmRoot,
       yarnGlobalDir: null,
     });
@@ -869,9 +907,9 @@ describe('runUpdateCommand', () => {
       'exec:yarn global dir',
     ]);
     expect(out.all()).toContain('not a global npm, pnpm or yarn package');
-    expect(out.all()).toContain('npm install -g saros-proxy');
-    expect(out.all()).toContain('pnpm add -g saros-proxy');
-    expect(out.all()).toContain('yarn global add saros-proxy');
+    expect(out.all()).toContain('npm root -g');
+    expect(out.all()).toContain('pnpm root -g');
+    expect(out.all()).toContain('yarn global dir');
 
     const forced = makeDeps({ packageRoot: '/home/user/Projetos/saros-proxy' });
     const forcedOut = captureOutput();
@@ -897,6 +935,40 @@ describe('runUpdateCommand', () => {
       'yarn global dir',
     ]);
     expect(harness.events).not.toContain('daemon-stop');
+  });
+
+  it('reports when no package manager can name a global prefix', async () => {
+    const harness = makeDeps({
+      globalRoot: null,
+      pnpmRoot: null,
+      yarnGlobalDir: null,
+    });
+    const out = captureOutput();
+
+    expect(await runUpdateCommand(['--yes'], harness.deps)).toBe(1);
+    expect(out.all()).toContain('Could not determine');
+    expect(out.all()).toContain('npm root -g');
+    expect(out.all()).toContain('pnpm root -g');
+    expect(out.all()).toContain('yarn global dir');
+    expect(harness.events).not.toContain('daemon-stop');
+  });
+
+  it('keeps the npm entry point for --force with an empty package root', async () => {
+    const harness = makeDeps({ packageRoot: '' });
+
+    expect(await runUpdateCommand(['--yes', '--force'], harness.deps)).toBe(0);
+
+    expect(harness.execs.map(formatExec)).toEqual([
+      'npm root -g',
+      'pnpm root -g',
+      'yarn global dir',
+      'npm install -g saros-proxy@1.1.3',
+    ]);
+    expect(harness.startOptions).toEqual([
+      expect.objectContaining({
+        entryPoint: '/usr/lib/node_modules/saros-proxy/dist/index.js',
+      }),
+    ]);
   });
 
   it('does not start anything when the daemon was stopped', async () => {
@@ -1925,6 +1997,72 @@ describe('default dependency wiring', () => {
     expect(mockDaemonStart).not.toHaveBeenCalled();
     expect(mockProbeProxyHealth).toHaveBeenCalledWith(3000);
     expect(out.all()).toContain('Updated to 1.1.3');
+  });
+
+  it('updates a pnpm systemd unit and starts the repaired stable entry', async () => {
+    const pnpm = makePnpmInstall();
+    const xdgHome = join(tempDir, 'xdg');
+    const unitPath = join(xdgHome, 'systemd', 'user', 'saros-proxy.service');
+    const oldEntry = join(
+      tempDir,
+      'pnpm',
+      'global',
+      '5',
+      '.pnpm',
+      'saros-proxy@1.3.3',
+      'node_modules',
+      'saros-proxy',
+      'dist',
+      'index.js',
+    );
+    mkdirSync(join(xdgHome, 'systemd', 'user'), { recursive: true });
+    writeFileSync(
+      unitPath,
+      `[Service]\nExecStart="${process.execPath}" "${oldEntry}" serve\n`,
+      'utf-8',
+    );
+    vi.stubEnv('XDG_CONFIG_HOME', xdgHome);
+    mockExecFileSync.mockImplementation((command: string, args: string[]) => {
+      if (command === 'npm' && args[0] === 'root') return '/usr/lib/node_modules\n';
+      if (command === 'pnpm' && args[0] === 'root') return `${pnpm.pnpmRoot}\n`;
+      if (command === 'systemctl' && args.includes('is-active')) return 'active\n';
+      return '';
+    });
+    mockGetDaemonState.mockResolvedValue({ running: true, port: 3000 });
+    mockProbeProxyHealth.mockResolvedValue({
+      ok: true,
+      body: { status: 'ok', version: '1.1.3' },
+    });
+    captureOutput();
+
+    const code = await runUpdateCommand(['--yes'], {
+      currentVersion: '1.1.2',
+      fetchLatestVersion: async () => '1.1.3',
+      readInstalledVersion: () => '1.1.3',
+      packageRoot: pnpm.packageRoot,
+      isTTY: true,
+      daemonLogPath: join(tempDir, 'daemon.log'),
+      sleep: async () => {},
+      healthAttempts: 1,
+      healthDelayMs: 1,
+      platform: 'linux',
+    });
+
+    expect(code).toBe(0);
+    const unit = readFileSync(unitPath, 'utf-8');
+    expect(unit).not.toContain('.pnpm/saros-proxy@');
+    expect(unit).not.toContain('saros-proxy@1.3.3');
+    expect(unit).toContain(join(pnpm.pnpmRoot, 'saros-proxy', 'dist', 'index.js'));
+    const commands = mockExecFileSync.mock.calls.map((call) =>
+      [call[0], ...(call[1] as string[])].join(' '),
+    );
+    expect(commands).toContain('systemctl --user stop saros-proxy.service');
+    expect(commands).toContain('systemctl --user daemon-reload');
+    expect(commands).toContain('systemctl --user start saros-proxy.service');
+    expect(commands).toContain('pnpm add -g saros-proxy@1.1.3');
+    expect(commands.indexOf('systemctl --user daemon-reload')).toBeLessThan(
+      commands.indexOf('systemctl --user start saros-proxy.service'),
+    );
   });
 
   it('runs pnpm and yarn through a shell on Windows', async () => {

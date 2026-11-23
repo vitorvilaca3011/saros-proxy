@@ -745,6 +745,114 @@ describe('autostart — systemd method (Linux)', () => {
     expect(content).toMatch(/^ExecStart=".+" ".*dist[/\\]index\.js" serve --port 4242$/m);
   });
 
+  it('writes the stable node_modules entry for a pnpm store path', async () => {
+    const prefix = join(configHome, 'pnpm', 'global', '5');
+    const versioned = join(
+      prefix,
+      '.pnpm',
+      'saros-proxy@1.3.4',
+      'node_modules',
+      'saros-proxy',
+      'dist',
+      'index.js',
+    );
+    const { buildSystemdUnit } = await import('../src/cli/autostart.js');
+
+    const content = buildSystemdUnit(39111, versioned);
+
+    expect(content).toContain(join(prefix, 'node_modules', 'saros-proxy', 'dist', 'index.js'));
+    expect(content).not.toContain('.pnpm/saros-proxy@');
+    expect(content).toMatch(/^ExecStart=.+ serve --port 39111$/m);
+  });
+
+  it('falls back to the resolved entry when the stable pnpm link is absent', async () => {
+    const versioned = join(
+      configHome,
+      'pnpm',
+      'global',
+      '5',
+      '.pnpm',
+      'saros-proxy@1.3.4',
+      'node_modules',
+      'saros-proxy',
+      'dist',
+      'index.js',
+    );
+    const restore = stubDistEntry(false);
+    try {
+      const { stableEntryPath } = await import('../src/cli/autostart.js');
+
+      expect(stableEntryPath(versioned)).toBe(versioned);
+    } finally {
+      restore();
+    }
+  });
+
+  it('repairs an older unit entry before starting it', async () => {
+    const stableEntry = join(
+      configHome,
+      'pnpm',
+      'global',
+      '5',
+      'node_modules',
+      'saros-proxy',
+      'dist',
+      'index.js',
+    );
+    const oldEntry = join(
+      configHome,
+      'pnpm',
+      'global',
+      '5',
+      '.pnpm',
+      'saros-proxy@1.3.3',
+      'node_modules',
+      'saros-proxy',
+      'dist',
+      'index.js',
+    );
+    mkdirSync(join(configHome, 'systemd', 'user'), { recursive: true });
+    writeFileSync(
+      unitPath(),
+      `[Service]\nExecStart="${process.execPath}" "${oldEntry}" serve --port 4242\n`,
+      'utf-8',
+    );
+    const { startSystemdUnit } = await import('../src/cli/autostart.js');
+
+    startSystemdUnit(stableEntry);
+
+    const content = readFileSync(unitPath(), 'utf-8');
+    expect(content).not.toContain('.pnpm/saros-proxy@');
+    expect(content).toContain(stableEntry);
+    expect(content).toContain('serve --port 4242');
+    expect(mockExecFileSync.mock.calls.map((call: unknown[]) => call[1])).toEqual([
+      ['--user', 'daemon-reload'],
+      ['--user', 'start', 'saros-proxy.service'],
+    ]);
+  });
+
+  it('starts a unit that already names the stable entry without a reload', async () => {
+    const stableEntry = join(
+      configHome,
+      'pnpm',
+      'global',
+      '5',
+      'node_modules',
+      'saros-proxy',
+      'dist',
+      'index.js',
+    );
+    mkdirSync(join(configHome, 'systemd', 'user'), { recursive: true });
+    const { buildSystemdUnit, startSystemdUnit } = await import('../src/cli/autostart.js');
+    writeFileSync(unitPath(), buildSystemdUnit(4242, stableEntry), 'utf-8');
+
+    startSystemdUnit(stableEntry);
+
+    expect(mockExecFileSync.mock.calls.map((call: unknown[]) => call[1])).toEqual([
+      ['--user', 'start', 'saros-proxy.service'],
+    ]);
+  });
+
   it('fails with a build hint instead of emitting a bare ExecStart', async () => {
     const restore = stubDistEntry(false);
     try {

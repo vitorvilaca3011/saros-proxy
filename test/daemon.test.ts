@@ -15,6 +15,7 @@ import { dirname, join } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { tmpdir } from 'node:os';
 import { createServer } from 'node:http';
+import { EventEmitter } from 'node:events';
 import type * as Daemon from '../src/cli/daemon.js';
 import type * as ConfigModule from '../src/config.js';
 import type * as HarnessSyncModule from '../src/cli/harness-sync.js';
@@ -23,6 +24,21 @@ import { DAEMON_SYNC_TIMEOUT_MS } from '../src/constants.js';
 // ---------------------------------------------------------------------------
 // Module-level mocks
 // ---------------------------------------------------------------------------
+
+interface FakeChild extends EventEmitter {
+  pid: number | undefined;
+  unref: () => void;
+  stderr: null;
+}
+
+/** A child process stand-in that can emit `error`/`spawn` like the real one. */
+function fakeChild(pid: number | undefined = 12345): FakeChild {
+  const child = new EventEmitter() as FakeChild;
+  child.pid = pid;
+  child.unref = vi.fn();
+  child.stderr = null;
+  return child;
+}
 
 // os.homedir() caches its result, so a process.env.HOME override is ignored.
 // Mock homedir() to a mutable ref (same pattern as harness-config.test.ts).
@@ -33,11 +49,7 @@ vi.mock('node:os', async (importOriginal) => {
 });
 
 const mockSpawn = vi.hoisted(() =>
-  vi.fn((..._args: unknown[]): { pid: number; unref: () => void; stderr: null } => ({
-    pid: 12345,
-    unref: vi.fn(),
-    stderr: null,
-  })),
+  vi.fn((..._args: unknown[]): FakeChild => fakeChild()),
 );
 const mockExecFileSync = vi.hoisted(() =>
   vi.fn((..._args: unknown[]): Buffer => Buffer.from('')),
@@ -1008,7 +1020,7 @@ describe('daemonRestart', () => {
     vi.unstubAllGlobals();
     vi.restoreAllMocks();
     vi.useRealTimers();
-    mockSpawn.mockImplementation(() => ({ pid: 12345, unref: vi.fn(), stderr: null }));
+    mockSpawn.mockImplementation(() => fakeChild());
   });
 
   function writeDaemonPid(pid: number): string {
@@ -1442,7 +1454,7 @@ describe('daemonStart', () => {
     vi.restoreAllMocks();
     vi.useRealTimers();
     // restoreAllMocks may reset plain vi.fn()s — re-assert the defaults.
-    mockSpawn.mockImplementation(() => ({ pid: 12345, unref: vi.fn(), stderr: null }));
+    mockSpawn.mockImplementation(() => fakeChild());
     mockExecFileSync.mockImplementation(() => Buffer.from(''));
   });
 
@@ -1483,9 +1495,42 @@ describe('daemonStart', () => {
       entryPoint: '/opt/global/node_modules/saros-proxy/dist/index.js',
     });
 
-    const [, args] = mockSpawn.mock.calls.at(-1) as unknown as [string, string[]];
-    expect(args[0]).toBe('/opt/global/node_modules/saros-proxy/dist/index.js');
+    const [command, args, options] = mockSpawn.mock.calls.at(-1) as unknown as [
+      string,
+      string[],
+      { cwd: string },
+    ];
+    expect(command).toBe('node');
+    expect(args).toEqual([
+      '/opt/global/node_modules/saros-proxy/dist/index.js',
+      'serve',
+    ]);
+    expect(options.cwd).toBe('/opt/global/node_modules/saros-proxy/dist');
     await vi.advanceTimersByTimeAsync(2000);
+  });
+
+  it('reports a spawn error as a start failure without writing a PID', async () => {
+    stubHealthDown();
+    mockSpawn.mockClear();
+    const errorSpy = vi.spyOn(console, 'error').mockImplementation(() => {});
+    const logPath = join(sarosDir, 'daemon.log');
+    mockSpawn.mockImplementationOnce(() => {
+      const child = fakeChild();
+      child.pid = undefined;
+      // spawn() reports the failure on the next tick, after the listener exists.
+      queueMicrotask(() => {
+        child.emit('error', Object.assign(new Error('spawn node ENOENT'), { code: 'ENOENT' }));
+      });
+      return child;
+    });
+
+    await expect(
+      daemon.daemonStart(undefined, undefined, { exitOnComplete: false }),
+    ).rejects.toThrow('spawn node ENOENT');
+
+    expect(existsSync(join(sarosDir, 'daemon.pid'))).toBe(false);
+    expect(readFileSync(logPath, 'utf-8')).toContain('spawn node ENOENT');
+    expect(errorSpy).toHaveBeenCalledWith(expect.stringContaining('spawn node ENOENT'));
   });
 
   it('loads config once and reuses that object for the harness sync', async () => {
@@ -1662,7 +1707,7 @@ describe('daemonStart', () => {
       const { stdio } = args[2] as { stdio: unknown[] };
       writeSync(stdio[1] as number, '{"evt":"boot"}\n');
       writeSync(stdio[2] as number, 'Error: crash on boot\n');
-      return { pid: 12345, unref: vi.fn(), stderr: null };
+      return fakeChild();
     });
 
     await daemon.daemonStart();
@@ -1686,7 +1731,7 @@ describe('daemonStart', () => {
     let childStderrFd = -1;
     mockSpawn.mockImplementationOnce(() => {
       childStderrFd = openSync(logPath, 'a', 0o600);
-      return { pid: 12345, unref: vi.fn(), stderr: null };
+      return fakeChild();
     });
 
     await daemon.daemonStart();
@@ -1720,7 +1765,7 @@ describe('daemonStart', () => {
     const logPath = join(sarosDir, 'daemon.log');
     mockSpawn.mockImplementationOnce(() => {
       appendFileSync(logPath, 'Error: listen EADDRINUSE: address already in use :::3100\n');
-      return { pid: 12345, unref: vi.fn(), stderr: null };
+      return fakeChild();
     });
 
     await daemon.daemonStart(3100);
@@ -1741,7 +1786,7 @@ describe('daemonStart', () => {
     const logPath = join(sarosDir, 'daemon.log');
     mockSpawn.mockImplementationOnce(() => {
       appendFileSync(logPath, '✗ No valid API keys configured\n');
-      return { pid: 12345, unref: vi.fn(), stderr: null };
+      return fakeChild();
     });
 
     await daemon.daemonStart();
@@ -1762,7 +1807,7 @@ describe('daemonStart', () => {
     const logPath = join(sarosDir, 'daemon.log');
     mockSpawn.mockImplementationOnce(() => {
       appendFileSync(logPath, 'Error: Cannot find module \'./dist/index.js\'\n    at boot\n');
-      return { pid: 12345, unref: vi.fn(), stderr: null };
+      return fakeChild();
     });
 
     await daemon.daemonStart();

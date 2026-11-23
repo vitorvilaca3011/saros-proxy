@@ -15,7 +15,7 @@
 
 import { execFileSync } from 'node:child_process';
 import { existsSync, lstatSync, readFileSync, realpathSync } from 'node:fs';
-import { dirname, join, resolve } from 'node:path';
+import { dirname, join, resolve, sep } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { fileURLToPath } from 'node:url';
 import chalk from 'chalk';
@@ -89,7 +89,7 @@ export interface UpdateDependencies {
   daemonStart: (options: ServiceOptions) => Promise<void>;
   systemdActive: () => boolean;
   systemdStop: () => void;
-  systemdStart: () => void;
+  systemdStart: (entryPoint?: string) => void;
   probeHealth: (
     port: number,
   ) => Promise<{ ok: boolean; body?: Record<string, unknown> }>;
@@ -230,6 +230,51 @@ function samePath(
     : actual === expected;
 }
 
+/** Is `file` the same as `dir` or inside it? Both paths are already canonical. */
+function isInsidePath(file: string, dir: string, platform: NodeJS.Platform): boolean {
+  const normalizedFile = platform === 'win32' ? file.toLowerCase() : file;
+  const normalizedDir = platform === 'win32' ? dir.toLowerCase() : dir;
+  return (
+    normalizedFile === normalizedDir ||
+    normalizedFile.startsWith(`${normalizedDir}${sep}`)
+  );
+}
+
+/**
+ * pnpm's global entry is normally a symlink into its store. Accept it only
+ * when the link resolves inside `<dirname(root)>/.pnpm`, the store next to
+ * `node_modules`: a link to a checkout (`pnpm link`) must hit the same
+ * refusal as `npm link`, or the update would replace the user's checkout.
+ * A broken symlink never resolves, so it never matches. A non-symlink entry
+ * (hoisted layout) keeps the plain canonical comparison.
+ */
+function matchesPnpmInstall(
+  packageRoot: string,
+  root: string,
+  platform: NodeJS.Platform,
+): boolean {
+  const expectedPath = join(root, 'saros-proxy');
+  let isLink = false;
+  try {
+    isLink = lstatSync(expectedPath).isSymbolicLink();
+  } catch {
+    // Missing path: the canonical comparison below decides.
+  }
+  if (!isLink) return samePath(packageRoot, expectedPath, platform);
+  let target: string;
+  try {
+    target = realpathSync(expectedPath);
+  } catch {
+    return false;
+  }
+  const store = canonicalPath(join(dirname(root), '.pnpm'));
+  if (!isInsidePath(target, store, platform)) return false;
+  const actual = canonicalPath(packageRoot);
+  return platform === 'win32'
+    ? actual.toLowerCase() === target.toLowerCase()
+    : actual === target;
+}
+
 /** Is the running package the one npm considers global? */
 export function isGlobalInstall(
   packageRoot: string,
@@ -255,14 +300,16 @@ interface GlobalInstallProbe {
   install: GlobalInstall | null;
   /** `npm root -g` when it answered; `--force` uses it for a checkout. */
   npmRoot: string | null;
+  /** Discovery commands that exited successfully (empty output included). */
+  answered: number;
 }
 
 /**
  * Ask each package manager where its global packages live and compare that
  * location with the running package. A missing binary is not an error: it
  * simply has no candidate. pnpm's global entry is normally a symlink into its
- * store; both sides are canonicalized, so it matches while a broken link does
- * not. npm keeps its stricter `npm link` guard.
+ * store; it matches only when the link resolves there. npm keeps its stricter
+ * `npm link` guard.
  */
 function probeGlobalInstall(
   packageRoot: string,
@@ -270,7 +317,7 @@ function probeGlobalInstall(
   platform: NodeJS.Platform,
 ): GlobalInstallProbe {
   let npmRoot: string | null = null;
-  if (packageRoot === '') return { install: null, npmRoot };
+  let answered = 0;
   for (const discovery of GLOBAL_DISCOVERIES) {
     let output: string;
     try {
@@ -278,16 +325,20 @@ function probeGlobalInstall(
     } catch {
       continue;
     }
+    answered++;
     if (output === '') continue;
     const root = discovery.rootFromOutput(output);
     if (discovery.manager === 'npm') npmRoot = root;
+    if (packageRoot === '') continue;
     const matched =
       discovery.manager === 'npm'
         ? isGlobalInstall(packageRoot, root, platform)
-        : samePath(packageRoot, join(root, 'saros-proxy'), platform);
-    if (matched) return { install: { manager: discovery.manager, root }, npmRoot };
+        : discovery.manager === 'pnpm'
+          ? matchesPnpmInstall(packageRoot, root, platform)
+          : samePath(packageRoot, join(root, 'saros-proxy'), platform);
+    if (matched) return { install: { manager: discovery.manager, root }, npmRoot, answered };
   }
-  return { install: null, npmRoot };
+  return { install: null, npmRoot, answered };
 }
 
 /** Which package manager owns `packageRoot`, or null when none does. */
@@ -451,7 +502,8 @@ function resolveDependencies(
         })),
     systemdActive: overrides.systemdActive ?? isSystemdUnitActive,
     systemdStop: overrides.systemdStop ?? stopSystemdUnit,
-    systemdStart: overrides.systemdStart ?? startSystemdUnit,
+    systemdStart:
+      overrides.systemdStart ?? ((entryPoint) => startSystemdUnit(entryPoint)),
     probeHealth: overrides.probeHealth ?? probeProxyHealth,
     findPortOwner: overrides.findPortOwner ?? findPortOwner,
     killPortOwner: overrides.killPortOwner ?? terminatePortOwner,
@@ -476,7 +528,7 @@ async function startService(
   deps: UpdateDependencies,
   options: ServiceOptions,
 ): Promise<void> {
-  if (mode === 'systemd') deps.systemdStart();
+  if (mode === 'systemd') deps.systemdStart(options.entryPoint);
   else if (mode === 'daemon') await deps.daemonStart(options);
 }
 
@@ -523,18 +575,22 @@ function resolveGlobalInstall(
     return probe.install;
   }
   if (args.force) return { manager: 'npm', root: probe.npmRoot ?? '' };
-  const installCommands = GLOBAL_DISCOVERIES.map((discovery) =>
-    formatInvocation(discovery.command, [
-      ...INSTALL_ARGS[discovery.manager],
-      'saros-proxy',
-    ]),
+  const probes = GLOBAL_DISCOVERIES.map((discovery) =>
+    formatInvocation(discovery.command, discovery.args),
   ).join(', ');
+  if (probe.answered === 0) {
+    console.error(
+      chalk.red('✗ Could not determine the global prefix of any package manager.'),
+    );
+    console.error(chalk.dim(`Tried: ${probes}.`));
+    return null;
+  }
   console.error(
     chalk.red(
       '✗ This install is not a global npm, pnpm or yarn package — update the checkout instead.',
     ),
   );
-  console.error(chalk.dim(`Checked: ${installCommands}.`));
+  console.error(chalk.dim(`Checked: ${probes}.`));
   return null;
 }
 
@@ -1093,10 +1149,10 @@ function refuseUnknownDaemonPort(state: DaemonStateSnapshot): number {
 }
 
 /**
- * Put the previous version back after a failed attempt: reinstall it (npm may
- * already have removed the old tree), then start it and verify. When the
- * reinstall itself fails, start whatever is on disk and say so; never pretend
- * the old version is back.
+ * Put the previous version back after a failed attempt: reinstall it (the
+ * package manager may already have removed the old tree), then start it and
+ * verify. When the reinstall itself fails, start whatever is on disk and say
+ * so; never pretend the old version is back.
  */
 async function rollback(
   mode: RestartMode,
