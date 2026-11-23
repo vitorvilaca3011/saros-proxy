@@ -499,6 +499,14 @@ export function stopSystemdUnit(): void {
   runSystemctl(['stop', SYSTEMD_UNIT_NAME]);
 }
 
+/** Report a failed unit repair without changing the start result. */
+function warnUnitEntryFailure(err: unknown): void {
+  logger.warn(
+    'Could not update the systemd unit entry point: %s',
+    describeSystemctlError(err),
+  );
+}
+
 /**
  * Point an existing unit at the stable entry path before `systemctl start`.
  * `start` reads the unit from disk: a unit written by an older pnpm install
@@ -508,9 +516,18 @@ export function stopSystemdUnit(): void {
  */
 function refreshSystemdUnitEntry(entryPath: string): void {
   const unitPath = systemdUnitPath();
-  if (!existsSync(unitPath)) return;
+  // No existsSync first: the unit can disappear between a check and this read,
+  // and a missing unit simply means there is nothing to repair. Let the read
+  // answer and treat its ENOENT as that same no-op.
+  let content: string;
   try {
-    const content = readFileSync(unitPath, 'utf-8');
+    content = readFileSync(unitPath, 'utf-8');
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code === 'ENOENT') return;
+    warnUnitEntryFailure(err);
+    return;
+  }
+  try {
     const entry = stableEntryPath(entryPath);
     const updated = content.replace(
       /^(ExecStart=.*?)\s+"[^"]*dist[/\\]index\.js"/m,
@@ -521,10 +538,7 @@ function refreshSystemdUnitEntry(entryPath: string): void {
     logger.info('Updated the systemd unit entry point to %s', entry);
     runSystemctl(['daemon-reload']);
   } catch (err) {
-    logger.warn(
-      'Could not update the systemd unit entry point: %s',
-      describeSystemctlError(err),
-    );
+    warnUnitEntryFailure(err);
   }
 }
 

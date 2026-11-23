@@ -26,15 +26,20 @@ vi.mock('node:child_process', () => ({
 
 // ---------------------------------------------------------------------------
 // Mock node:fs so we can force resolveCommand()'s fallback branch (no dist
-// build). Everything else passes through to the real fs.
+// build) and simulate reads that lose a race with unit removal. Everything
+// else passes through to the real fs.
 // ---------------------------------------------------------------------------
 
 const mockExistsSync = vi.hoisted(() => vi.fn());
+const mockReadFileSync = vi.hoisted(() => vi.fn());
 
 vi.mock('node:fs', async (importOriginal) => {
   const actual = await importOriginal<typeof NodeFs>();
   mockExistsSync.mockImplementation((p: string) => actual.existsSync(p));
-  return { ...actual, existsSync: mockExistsSync };
+  mockReadFileSync.mockImplementation((...args: unknown[]) =>
+    (actual.readFileSync as (...a: unknown[]) => unknown)(...args),
+  );
+  return { ...actual, existsSync: mockExistsSync, readFileSync: mockReadFileSync };
 });
 
 // ---------------------------------------------------------------------------
@@ -680,6 +685,10 @@ describe('autostart — systemd method (Linux)', () => {
 
   const unitPath = (): string => join(configHome, 'systemd', 'user', 'saros-proxy.service');
 
+  /** Stable pnpm entry the update would hand to systemd. */
+  const stablePnpmEntry = (): string =>
+    join(configHome, 'pnpm', 'global', '5', 'node_modules', 'saros-proxy', 'dist', 'index.js');
+
   /**
    * Force resolveSystemdCommand()'s dist-existence check, so the suite does not
    * depend on whether `npm run build` ran in the working tree.
@@ -789,16 +798,7 @@ describe('autostart — systemd method (Linux)', () => {
   });
 
   it('repairs an older unit entry before starting it', async () => {
-    const stableEntry = join(
-      configHome,
-      'pnpm',
-      'global',
-      '5',
-      'node_modules',
-      'saros-proxy',
-      'dist',
-      'index.js',
-    );
+    const stableEntry = stablePnpmEntry();
     const oldEntry = join(
       configHome,
       'pnpm',
@@ -832,16 +832,7 @@ describe('autostart — systemd method (Linux)', () => {
   });
 
   it('starts a unit that already names the stable entry without a reload', async () => {
-    const stableEntry = join(
-      configHome,
-      'pnpm',
-      'global',
-      '5',
-      'node_modules',
-      'saros-proxy',
-      'dist',
-      'index.js',
-    );
+    const stableEntry = stablePnpmEntry();
     mkdirSync(join(configHome, 'systemd', 'user'), { recursive: true });
     const { buildSystemdUnit, startSystemdUnit } = await import('../src/cli/autostart.js');
     writeFileSync(unitPath(), buildSystemdUnit(4242, stableEntry), 'utf-8');
@@ -851,6 +842,90 @@ describe('autostart — systemd method (Linux)', () => {
     expect(mockExecFileSync.mock.calls.map((call: unknown[]) => call[1])).toEqual([
       ['--user', 'start', 'saros-proxy.service'],
     ]);
+  });
+
+  it('starts without reading or warning when no unit exists', async () => {
+    const { startSystemdUnit } = await import('../src/cli/autostart.js');
+
+    startSystemdUnit(stablePnpmEntry());
+
+    expect(mockLoggerWarn).not.toHaveBeenCalled();
+    expect(mockExecFileSync.mock.calls.map((call: unknown[]) => call[1])).toEqual([
+      ['--user', 'start', 'saros-proxy.service'],
+    ]);
+  });
+
+  it('treats a unit removed between the start and the read as absent', async () => {
+    const oldEntry = join(
+      configHome,
+      'pnpm',
+      'global',
+      '5',
+      '.pnpm',
+      'saros-proxy@1.3.3',
+      'node_modules',
+      'saros-proxy',
+      'dist',
+      'index.js',
+    );
+    mkdirSync(join(configHome, 'systemd', 'user'), { recursive: true });
+    writeFileSync(
+      unitPath(),
+      `[Service]\nExecStart="${process.execPath}" "${oldEntry}" serve --port 4242\n`,
+      'utf-8',
+    );
+    const before = readFileSync(unitPath(), 'utf-8');
+    // existsSync answers true (the file is there), but the read loses the race.
+    mockReadFileSync.mockImplementationOnce(() => {
+      throw Object.assign(new Error('ENOENT: no such file or directory'), {
+        code: 'ENOENT',
+      });
+    });
+    const { startSystemdUnit } = await import('../src/cli/autostart.js');
+
+    startSystemdUnit(stablePnpmEntry());
+
+    expect(mockLoggerWarn).not.toHaveBeenCalled();
+    expect(mockExecFileSync.mock.calls.map((call: unknown[]) => call[1])).toEqual([
+      ['--user', 'start', 'saros-proxy.service'],
+    ]);
+    expect(readFileSync(unitPath(), 'utf-8')).toBe(before);
+  });
+
+  it('warns and keeps the unit when it cannot be read', async () => {
+    const oldEntry = join(
+      configHome,
+      'pnpm',
+      'global',
+      '5',
+      '.pnpm',
+      'saros-proxy@1.3.3',
+      'node_modules',
+      'saros-proxy',
+      'dist',
+      'index.js',
+    );
+    mkdirSync(join(configHome, 'systemd', 'user'), { recursive: true });
+    writeFileSync(
+      unitPath(),
+      `[Service]\nExecStart="${process.execPath}" "${oldEntry}" serve --port 4242\n`,
+      'utf-8',
+    );
+    const before = readFileSync(unitPath(), 'utf-8');
+    mockReadFileSync.mockImplementationOnce(() => {
+      throw Object.assign(new Error('EACCES: permission denied'), { code: 'EACCES' });
+    });
+    const { startSystemdUnit } = await import('../src/cli/autostart.js');
+
+    startSystemdUnit(stablePnpmEntry());
+
+    expect(mockLoggerWarn).toHaveBeenCalledTimes(1);
+    expect(mockLoggerWarn.mock.calls[0].join(' ')).toContain('Could not update');
+    expect(mockLoggerWarn.mock.calls[0].join(' ')).toContain('EACCES');
+    expect(mockExecFileSync.mock.calls.map((call: unknown[]) => call[1])).toEqual([
+      ['--user', 'start', 'saros-proxy.service'],
+    ]);
+    expect(readFileSync(unitPath(), 'utf-8')).toBe(before);
   });
 
   it('fails with a build hint instead of emitting a bare ExecStart', async () => {
