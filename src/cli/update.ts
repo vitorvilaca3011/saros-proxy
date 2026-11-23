@@ -1,14 +1,16 @@
 /**
- * update.ts — `saros-proxy update`: replace a global npm install and restart
- * whatever was serving.
+ * update.ts — `saros-proxy update`: replace a global npm, pnpm or yarn
+ * install and restart whatever was serving.
  *
  * Safety rules:
- *   - only a package living in the npm global prefix is updated (--force
- *     overrides), so a git checkout is never replaced behind the user's back;
+ *   - only a package living in a package manager's global prefix is updated
+ *     (--force overrides), so a git checkout is never replaced behind the
+ *     user's back;
  *   - the running proxy is stopped first and is always restarted after a
  *     failed install, so the host is never left without a proxy;
  *   - success is verified by reading the installed package.json and by
- *     checking the restarted proxy's /health version, not by npm's exit code.
+ *     checking the restarted proxy's /health version, not by the install
+ *     command's exit code.
  */
 
 import { execFileSync } from 'node:child_process';
@@ -76,7 +78,7 @@ export interface UpdateDependencies {
   currentVersion: string;
   /** Registry lookup; rejects with a human-readable reason. */
   fetchLatestVersion: () => Promise<string>;
-  /** Run npm/systemctl. Throws on non-zero; returns trimmed stdout. */
+  /** Run npm/pnpm/yarn/systemctl. Throws on non-zero; returns trimmed stdout. */
   exec: (command: string, args: readonly string[], options?: ExecOptions) => string;
   packageRoot: string;
   readInstalledVersion: (packageRoot: string) => string | null;
@@ -109,6 +111,16 @@ export interface ExecOptions {
 
 /** Restart path: systemd unit, PID-file daemon, or nothing was running. */
 export type RestartMode = 'systemd' | 'daemon' | 'none';
+
+/** Package manager that owns a global install. */
+export type PackageManager = 'npm' | 'pnpm' | 'yarn';
+
+/** A global install whose `saros-proxy` child is the running package. */
+export interface GlobalInstall {
+  manager: PackageManager;
+  /** Directory whose `saros-proxy` child is the installed package. */
+  root: string;
+}
 
 // ---------------------------------------------------------------------------
 // Pure decisions
@@ -161,6 +173,63 @@ export function chooseRestartMode(
   return daemonRunning ? 'daemon' : 'none';
 }
 
+interface GlobalDiscovery {
+  manager: PackageManager;
+  command: string;
+  args: readonly string[];
+  /** Turn the command's output into a directory with a `saros-proxy` child. */
+  rootFromOutput: (output: string) => string;
+}
+
+/**
+ * npm is probed first so an npm install keeps the resolution path it always
+ * had. The commands disagree on the layout: yarn's `global dir` is the
+ * prefix, and its packages live under `node_modules`.
+ */
+const GLOBAL_DISCOVERIES: readonly GlobalDiscovery[] = [
+  { manager: 'npm', command: 'npm', args: ['root', '-g'], rootFromOutput: (output) => output },
+  { manager: 'pnpm', command: 'pnpm', args: ['root', '-g'], rootFromOutput: (output) => output },
+  {
+    manager: 'yarn',
+    command: 'yarn',
+    args: ['global', 'dir'],
+    rootFromOutput: (output) => join(output, 'node_modules'),
+  },
+];
+
+const INSTALL_ARGS: Record<PackageManager, readonly string[]> = {
+  npm: ['install', '-g'],
+  pnpm: ['add', '-g'],
+  yarn: ['global', 'add'],
+};
+
+function installInvocation(
+  manager: PackageManager,
+  version: string,
+): { command: string; args: string[] } {
+  return {
+    command: manager,
+    args: [...INSTALL_ARGS[manager], `saros-proxy@${version}`],
+  };
+}
+
+function formatInvocation(command: string, args: readonly string[]): string {
+  return `${command} ${args.join(' ')}`;
+}
+
+/** Compare two paths whether or not they traverse symlinks. */
+function samePath(
+  actualPath: string,
+  expectedPath: string,
+  platform: NodeJS.Platform,
+): boolean {
+  const actual = canonicalPath(actualPath);
+  const expected = canonicalPath(expectedPath);
+  return platform === 'win32'
+    ? actual.toLowerCase() === expected.toLowerCase()
+    : actual === expected;
+}
+
 /** Is the running package the one npm considers global? */
 export function isGlobalInstall(
   packageRoot: string,
@@ -178,11 +247,56 @@ export function isGlobalInstall(
     // Missing path: fall through to the canonical comparison (tests and a
     // first install both reach this).
   }
-  const actual = canonicalPath(packageRoot);
-  const expected = canonicalPath(expectedPath);
-  return platform === 'win32'
-    ? actual.toLowerCase() === expected.toLowerCase()
-    : actual === expected;
+  return samePath(packageRoot, expectedPath, platform);
+}
+
+interface GlobalInstallProbe {
+  /** The manager that owns `packageRoot`, when one matched. */
+  install: GlobalInstall | null;
+  /** `npm root -g` when it answered; `--force` uses it for a checkout. */
+  npmRoot: string | null;
+}
+
+/**
+ * Ask each package manager where its global packages live and compare that
+ * location with the running package. A missing binary is not an error: it
+ * simply has no candidate. pnpm's global entry is normally a symlink into its
+ * store; both sides are canonicalized, so it matches while a broken link does
+ * not. npm keeps its stricter `npm link` guard.
+ */
+function probeGlobalInstall(
+  packageRoot: string,
+  exec: (command: string, args: readonly string[]) => string,
+  platform: NodeJS.Platform,
+): GlobalInstallProbe {
+  let npmRoot: string | null = null;
+  if (packageRoot === '') return { install: null, npmRoot };
+  for (const discovery of GLOBAL_DISCOVERIES) {
+    let output: string;
+    try {
+      output = exec(discovery.command, discovery.args).trim();
+    } catch {
+      continue;
+    }
+    if (output === '') continue;
+    const root = discovery.rootFromOutput(output);
+    if (discovery.manager === 'npm') npmRoot = root;
+    const matched =
+      discovery.manager === 'npm'
+        ? isGlobalInstall(packageRoot, root, platform)
+        : samePath(packageRoot, join(root, 'saros-proxy'), platform);
+    if (matched) return { install: { manager: discovery.manager, root }, npmRoot };
+  }
+  return { install: null, npmRoot };
+}
+
+/** Which package manager owns `packageRoot`, or null when none does. */
+export function detectGlobalInstall(
+  packageRoot: string,
+  exec: (command: string, args: readonly string[]) => string,
+  platform: NodeJS.Platform = process.platform,
+): GlobalInstall | null {
+  return probeGlobalInstall(packageRoot, exec, platform).install;
 }
 
 /** Read `<packageRoot>/package.json`'s version, or null when unusable. */
@@ -239,6 +353,9 @@ function thisPackageRoot(): string {
   return resolve(dirname(fileURLToPath(import.meta.url)), '..', '..');
 }
 
+/** Package-manager CLIs are `.cmd` shims on Windows and need a shell. */
+const WINDOWS_SHIM_COMMANDS: Record<string, true> = { npm: true, pnpm: true, yarn: true };
+
 function defaultExec(
   command: string,
   args: readonly string[],
@@ -246,8 +363,8 @@ function defaultExec(
 ): string {
   const output = execFileSync(command, [...args], {
     encoding: 'utf-8',
-    // npm is npm.cmd on Windows; CreateProcess cannot run a .cmd without a shell.
-    shell: process.platform === 'win32' && command === 'npm',
+    // CreateProcess cannot run a `.cmd` without a shell on Windows.
+    shell: process.platform === 'win32' && WINDOWS_SHIM_COMMANDS[command] === true,
     ...(options.inherit
       ? { stdio: 'inherit' as const }
       : { stdio: 'pipe' as const, timeout: 30_000 }),
@@ -387,41 +504,38 @@ function healthFailureDetail(
 }
 
 /**
- * Resolve the npm global prefix the package must live in. Prints the reason
- * and returns null when the caller must not touch the install. `--force`
- * only bypasses a failed `npm root -g`; a checkout still needs it to find
- * the installed package's entry point.
+ * Resolve which package manager owns the global install and where its root
+ * is. Prints the reason and returns null when the caller must not touch the
+ * install. A failed discovery is not fatal: `--force` falls back to npm's
+ * root (when it answered) so a checkout can still restart the global package.
  */
-function resolveGlobalRoot(
+function resolveGlobalInstall(
   deps: UpdateDependencies,
   args: UpdateArgs,
-): string | null {
-  let globalRoot = '';
-  try {
-    globalRoot = deps.exec('npm', ['root', '-g']);
-  } catch (err) {
-    if (!args.force) {
-      console.error(
-        chalk.red(
-          `✗ Could not determine the npm global prefix: ${errorMessage(err)}`,
-        ),
-      );
-      return null;
-    }
-  }
-
-  if (
-    !isGlobalInstall(deps.packageRoot, globalRoot, deps.platform) &&
-    !args.force
-  ) {
-    console.error(
-      chalk.red(
-        '✗ This install is not a global npm package — update the checkout instead.',
+): GlobalInstall | null {
+  const probe = probeGlobalInstall(deps.packageRoot, deps.exec, deps.platform);
+  if (probe.install !== null) {
+    console.log(
+      chalk.dim(
+        `Detected the ${probe.install.manager} global install at ${probe.install.root}.`,
       ),
     );
-    return null;
+    return probe.install;
   }
-  return globalRoot;
+  if (args.force) return { manager: 'npm', root: probe.npmRoot ?? '' };
+  const installCommands = GLOBAL_DISCOVERIES.map((discovery) =>
+    formatInvocation(discovery.command, [
+      ...INSTALL_ARGS[discovery.manager],
+      'saros-proxy',
+    ]),
+  ).join(', ');
+  console.error(
+    chalk.red(
+      '✗ This install is not a global npm, pnpm or yarn package — update the checkout instead.',
+    ),
+  );
+  console.error(chalk.dim(`Checked: ${installCommands}.`));
+  return null;
 }
 
 // ---------------------------------------------------------------------------
@@ -650,8 +764,8 @@ export async function runUpdateCommand(
     return 1;
   }
 
-  const globalRoot = resolveGlobalRoot(deps, args);
-  if (globalRoot === null) return 1;
+  const install = resolveGlobalInstall(deps, args);
+  if (install === null) return 1;
 
   console.log(chalk.cyan(`Updating saros-proxy: ${current} → ${latest}`));
   if (!args.yes) {
@@ -675,9 +789,9 @@ export async function runUpdateCommand(
   }
   const mode = chooseRestartMode(before.running, systemdActive);
   const entryPoint =
-    globalRoot === ''
+    install.root === ''
       ? undefined
-      : join(globalRoot, 'saros-proxy', 'dist', 'index.js');
+      : join(install.root, 'saros-proxy', 'dist', 'index.js');
   const restartOptions: ServiceOptions = {
     ...serviceOptions,
     ...(entryPoint === undefined ? {} : { entryPoint }),
@@ -697,20 +811,29 @@ export async function runUpdateCommand(
     return 1;
   }
 
+  const invocation = installInvocation(install.manager, latest);
   try {
-    deps.exec('npm', ['install', '-g', `saros-proxy@${latest}`], {
-      inherit: true,
-    });
+    deps.exec(invocation.command, invocation.args, { inherit: true });
   } catch (err) {
     console.error(
-      chalk.red(`✗ npm install -g saros-proxy@${latest} failed: ${errorMessage(err)}`),
+      chalk.red(
+        `✗ ${formatInvocation(invocation.command, invocation.args)} failed: ${errorMessage(err)}`,
+      ),
     );
-    await rollback(mode, deps, before.port, current, restartOptions, false);
+    await rollback(
+      mode,
+      deps,
+      before.port,
+      current,
+      restartOptions,
+      false,
+      install.manager,
+    );
     return 1;
   }
 
   const installedRoot =
-    globalRoot === '' ? deps.packageRoot : join(globalRoot, 'saros-proxy');
+    install.root === '' ? deps.packageRoot : join(install.root, 'saros-proxy');
   const installedVersion = deps.readInstalledVersion(installedRoot);
   if (installedVersion !== latest) {
     console.error(
@@ -718,7 +841,15 @@ export async function runUpdateCommand(
         `✗ The global package reports ${installedVersion ?? 'no version'}, expected ${latest}.`,
       ),
     );
-    await rollback(mode, deps, before.port, current, restartOptions, false);
+    await rollback(
+      mode,
+      deps,
+      before.port,
+      current,
+      restartOptions,
+      false,
+      install.manager,
+    );
     return 1;
   }
 
@@ -737,7 +868,15 @@ export async function runUpdateCommand(
     console.error(
       chalk.red(`✗ Updated to ${latest}, but the proxy failed to start: ${errorMessage(err)}`),
     );
-    await rollback(mode, deps, before.port, current, restartOptions, false);
+    await rollback(
+      mode,
+      deps,
+      before.port,
+      current,
+      restartOptions,
+      false,
+      install.manager,
+    );
     return 1;
   }
 
@@ -756,7 +895,15 @@ export async function runUpdateCommand(
       ),
     );
     reportPortHolder(deps, before.port);
-    await rollback(mode, deps, before.port, current, restartOptions, true);
+    await rollback(
+      mode,
+      deps,
+      before.port,
+      current,
+      restartOptions,
+      true,
+      install.manager,
+    );
     return 1;
   }
 
@@ -807,14 +954,17 @@ function installedEntryPoint(
   args: UpdateArgs,
   current: string,
 ): string | null {
-  const globalRoot = resolveGlobalRoot(deps, args);
-  if (globalRoot === null) return null;
+  const install = resolveGlobalInstall(deps, args);
+  if (install === null) return null;
   const entryPoint =
-    globalRoot === '' ? '' : join(globalRoot, 'saros-proxy', 'dist', 'index.js');
+    install.root === ''
+      ? ''
+      : join(install.root, 'saros-proxy', 'dist', 'index.js');
   if (entryPoint !== '' && existsSync(entryPoint)) return entryPoint;
+  const reinstall = installInvocation(install.manager, current);
   console.error(
     chalk.red(
-      `✗ Cannot restart the proxy from the installed package: its entry point${entryPoint === '' ? '' : ` (${entryPoint})`} is not available. Reinstall it with \`npm install -g saros-proxy@${current}\`, then run \`saros-proxy restart\`.`,
+      `✗ Cannot restart the proxy from the installed package: its entry point${entryPoint === '' ? '' : ` (${entryPoint})`} is not available. Reinstall it with \`${formatInvocation(reinstall.command, reinstall.args)}\`, then run \`saros-proxy restart\`.`,
     ),
   );
   return null;
@@ -955,6 +1105,7 @@ async function rollback(
   version: string,
   options: ServiceOptions,
   stopFirst: boolean,
+  manager: PackageManager,
 ): Promise<void> {
   if (mode === 'none') {
     console.log(
@@ -982,10 +1133,9 @@ async function rollback(
   }
 
   let reinstalled = false;
+  const invocation = installInvocation(manager, version);
   try {
-    deps.exec('npm', ['install', '-g', `saros-proxy@${version}`], {
-      inherit: true,
-    });
+    deps.exec(invocation.command, invocation.args, { inherit: true });
     reinstalled = true;
   } catch (err) {
     console.error(

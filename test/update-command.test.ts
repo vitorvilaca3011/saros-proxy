@@ -2,9 +2,10 @@
  * update-command.test.ts — Tests for `saros-proxy update`.
  *
  * The command is driven through injected dependencies: no test runs npm,
- * systemd or the real daemon. One wiring test mocks node:child_process to
- * prove the default adapters pass `systemctl --user stop/start` and
- * `npm install -g saros-proxy@<latest>`.
+ * pnpm, yarn, systemd or the real daemon. Wiring tests mock
+ * node:child_process to prove the default adapters pass `systemctl --user
+ * stop/start`, the manager-specific global install, and `shell: true` for
+ * the Windows shims.
  */
 
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
@@ -49,6 +50,7 @@ vi.mock('@clack/prompts', async (importOriginal) => {
 
 import {
   chooseRestartMode,
+  detectGlobalInstall,
   isGlobalInstall,
   parseUpdateArgs,
   readPackageVersion,
@@ -73,6 +75,10 @@ interface DepOptions extends Partial<UpdateDependencies> {
   failReinstall?: boolean;
   /** null makes `npm root -g` fail. */
   globalRoot?: string | null;
+  /** Root that `pnpm root -g` reports; null makes pnpm absent. */
+  pnpmRoot?: string | null;
+  /** Directory that `yarn global dir` reports; null makes yarn absent. */
+  yarnGlobalDir?: string | null;
   /** Defaults to the latest version; null makes package.json unreadable. */
   installedVersion?: string | null;
   /** Defaults to ok; false makes /health fail. */
@@ -117,6 +123,8 @@ function makeDeps(options: DepOptions = {}): Harness {
     failInstall,
     failReinstall,
     globalRoot,
+    pnpmRoot,
+    yarnGlobalDir,
     installedVersion,
     healthOk,
     healthVersion,
@@ -141,8 +149,24 @@ function makeDeps(options: DepOptions = {}): Harness {
         if (globalRoot === null) throw new Error('npm was not found on PATH');
         return globalRoot ?? '/usr/lib/node_modules';
       }
-      if (command === 'npm' && args[0] === 'install') {
-        const reinstalling = (args[2] ?? '').endsWith(`@${currentVersion}`);
+      if (command === 'pnpm' && args[0] === 'root') {
+        if (pnpmRoot === null) throw new Error('pnpm was not found on PATH');
+        return pnpmRoot ?? '';
+      }
+      if (command === 'yarn' && args[0] === 'global' && args[1] === 'dir') {
+        if (yarnGlobalDir === null) throw new Error('yarn was not found on PATH');
+        return yarnGlobalDir ?? '';
+      }
+      const installTarget =
+        command === 'npm' && args[0] === 'install'
+          ? args[2]
+          : command === 'pnpm' && args[0] === 'add'
+            ? args[2]
+            : command === 'yarn' && args[0] === 'global' && args[1] === 'add'
+              ? args[2]
+              : undefined;
+      if (installTarget !== undefined) {
+        const reinstalling = installTarget.endsWith(`@${currentVersion}`);
         if (failInstall && !reinstalling) {
           throw new Error('EACCES: permission denied');
         }
@@ -247,6 +271,92 @@ function makeGlobalInstall(): {
     packageRoot,
     entryPoint: join(packageRoot, 'dist', 'index.js'),
   };
+}
+
+/**
+ * A pnpm global layout: `root/saros-proxy` is a symlink into the
+ * content-addressed store, and the running package lives at the real path.
+ */
+function makePnpmInstall(): {
+  pnpmRoot: string;
+  packageRoot: string;
+  entryPoint: string;
+} {
+  const pnpmHome = join(tempDir, 'pnpm');
+  const pnpmRoot = join(pnpmHome, 'global', '5', 'node_modules');
+  const packageRoot = join(
+    pnpmHome,
+    'global',
+    '5',
+    '.pnpm',
+    'saros-proxy@1.3.4',
+    'node_modules',
+    'saros-proxy',
+  );
+  mkdirSync(join(packageRoot, 'dist'), { recursive: true });
+  writeFileSync(join(packageRoot, 'dist', 'index.js'), '');
+  mkdirSync(pnpmRoot, { recursive: true });
+  symlinkSync(packageRoot, join(pnpmRoot, 'saros-proxy'), symlinkType());
+  return {
+    pnpmRoot,
+    packageRoot,
+    entryPoint: join(pnpmRoot, 'saros-proxy', 'dist', 'index.js'),
+  };
+}
+
+/** A yarn 1 global layout: `<dir>/node_modules/saros-proxy` is a real dir. */
+function makeYarnInstall(): {
+  yarnDir: string;
+  packageRoot: string;
+  entryPoint: string;
+} {
+  const yarnDir = join(tempDir, 'yarn-global');
+  const packageRoot = join(yarnDir, 'node_modules', 'saros-proxy');
+  mkdirSync(join(packageRoot, 'dist'), { recursive: true });
+  writeFileSync(join(packageRoot, 'dist', 'index.js'), '');
+  return {
+    yarnDir,
+    packageRoot,
+    entryPoint: join(packageRoot, 'dist', 'index.js'),
+  };
+}
+
+function symlinkType(): 'junction' | 'dir' {
+  return process.platform === 'win32' ? 'junction' : 'dir';
+}
+
+function formatExec(call: ExecCall): string {
+  return `${call.command} ${call.args.join(' ')}`;
+}
+
+/** Discovery stand-in: each manager answers its root, throws when absent. */
+function discoveryExec(
+  roots: { npm?: string | null; pnpm?: string | null; yarn?: string | null },
+  calls: string[] = [],
+): (command: string, args: readonly string[]) => string {
+  return (command, args) => {
+    calls.push(`${command} ${args.join(' ')}`);
+    const value =
+      command === 'npm' ? roots.npm : command === 'pnpm' ? roots.pnpm : roots.yarn;
+    if (value === null) throw new Error(`${command} was not found on PATH`);
+    return value ?? '';
+  };
+}
+
+async function withProcessPlatform<T>(
+  platform: NodeJS.Platform,
+  run: () => Promise<T>,
+): Promise<T> {
+  const original = process.platform;
+  Object.defineProperty(process, 'platform', { value: platform, configurable: true });
+  try {
+    return await run();
+  } finally {
+    Object.defineProperty(process, 'platform', {
+      value: original,
+      configurable: true,
+    });
+  }
 }
 
 function captureOutput(): { stdout: string[]; stderr: string[]; all: () => string } {
@@ -364,6 +474,110 @@ describe('isGlobalInstall', () => {
     symlinkSync(checkout, join(globalRoot, 'saros-proxy'), process.platform === 'win32' ? 'junction' : 'dir');
 
     expect(isGlobalInstall(checkout, globalRoot, 'linux')).toBe(false);
+  });
+});
+
+describe('detectGlobalInstall', () => {
+  it('detects npm from its global root and stops probing the other managers', () => {
+    const globalRoot = join(tempDir, 'node_modules');
+    const packageRoot = join(globalRoot, 'saros-proxy');
+    mkdirSync(packageRoot, { recursive: true });
+    const calls: string[] = [];
+
+    expect(
+      detectGlobalInstall(
+        packageRoot,
+        discoveryExec({ npm: globalRoot }, calls),
+        'linux',
+      ),
+    ).toEqual({ manager: 'npm', root: globalRoot });
+    expect(calls).toEqual(['npm root -g']);
+  });
+
+  it('accepts a pnpm entry that is a symlink into the store', () => {
+    const pnpm = makePnpmInstall();
+    const calls: string[] = [];
+
+    expect(
+      detectGlobalInstall(
+        pnpm.packageRoot,
+        discoveryExec(
+          { npm: '/usr/lib/node_modules', pnpm: pnpm.pnpmRoot, yarn: null },
+          calls,
+        ),
+        'linux',
+      ),
+    ).toEqual({ manager: 'pnpm', root: pnpm.pnpmRoot });
+    expect(calls).toEqual(['npm root -g', 'pnpm root -g']);
+  });
+
+  it('detects yarn and normalizes its global dir to the node_modules root', () => {
+    const yarn = makeYarnInstall();
+    const calls: string[] = [];
+
+    expect(
+      detectGlobalInstall(
+        yarn.packageRoot,
+        discoveryExec(
+          { npm: '/usr/lib/node_modules', pnpm: null, yarn: yarn.yarnDir },
+          calls,
+        ),
+        'linux',
+      ),
+    ).toEqual({ manager: 'yarn', root: join(yarn.yarnDir, 'node_modules') });
+    expect(calls).toEqual(['npm root -g', 'pnpm root -g', 'yarn global dir']);
+  });
+
+  it('refuses an npm link that points at a checkout', () => {
+    const globalRoot = join(tempDir, 'node_modules');
+    const checkout = join(tempDir, 'checkout');
+    mkdirSync(globalRoot, { recursive: true });
+    mkdirSync(checkout, { recursive: true });
+    symlinkSync(checkout, join(globalRoot, 'saros-proxy'), symlinkType());
+
+    expect(
+      detectGlobalInstall(
+        checkout,
+        discoveryExec({ npm: globalRoot, pnpm: null, yarn: null }),
+        'linux',
+      ),
+    ).toBeNull();
+  });
+
+  it('refuses a pnpm symlink whose store target no longer exists', () => {
+    const pnpmRoot = join(tempDir, 'pnpm', 'global', '5', 'node_modules');
+    const packageRoot = join(tempDir, 'store', 'saros-proxy');
+    mkdirSync(pnpmRoot, { recursive: true });
+    mkdirSync(packageRoot, { recursive: true });
+    symlinkSync(join(tempDir, 'store', 'gone'), join(pnpmRoot, 'saros-proxy'), symlinkType());
+
+    expect(
+      detectGlobalInstall(
+        packageRoot,
+        discoveryExec({ npm: '/usr/lib/node_modules', pnpm: pnpmRoot, yarn: null }),
+        'linux',
+      ),
+    ).toBeNull();
+  });
+
+  it('treats a missing binary or empty output as no candidate', () => {
+    expect(
+      detectGlobalInstall(
+        '/usr/lib/node_modules/saros-proxy',
+        discoveryExec({ npm: null, pnpm: null, yarn: null }),
+        'linux',
+      ),
+    ).toBeNull();
+    expect(
+      detectGlobalInstall(
+        '/usr/lib/node_modules/saros-proxy',
+        discoveryExec({ npm: '  ', pnpm: null, yarn: null }),
+        'linux',
+      ),
+    ).toBeNull();
+    expect(
+      detectGlobalInstall('', discoveryExec({ npm: '/usr/lib/node_modules' }), 'linux'),
+    ).toBeNull();
   });
 });
 
@@ -499,33 +713,190 @@ describe('runUpdateCommand', () => {
     expect(out.all()).toContain('Restarted saros-proxy 1.1.2 (the previous install).');
   });
 
+  it('detects a pnpm install, installs with pnpm and restarts its entry point', async () => {
+    const pnpm = makePnpmInstall();
+    const harness = makeDeps({
+      packageRoot: pnpm.packageRoot,
+      pnpmRoot: pnpm.pnpmRoot,
+    });
+    const out = captureOutput();
+
+    expect(await runUpdateCommand(['--yes'], harness.deps)).toBe(0);
+
+    expect(harness.execs.map(formatExec)).toEqual([
+      'npm root -g',
+      'pnpm root -g',
+      'pnpm add -g saros-proxy@1.1.3',
+    ]);
+    expect(harness.execs[2].inherit).toBe(true);
+    expect(harness.startOptions).toEqual([
+      expect.objectContaining({ entryPoint: pnpm.entryPoint }),
+    ]);
+    expect(out.all()).toContain('Detected the pnpm global install');
+  });
+
+  it('rolls back a pnpm install with pnpm add -g', async () => {
+    const pnpm = makePnpmInstall();
+    const harness = makeDeps({
+      packageRoot: pnpm.packageRoot,
+      pnpmRoot: pnpm.pnpmRoot,
+      failInstall: true,
+      probeHealth: async () => ({ ok: true, body: { status: 'ok', version: '1.1.2' } }),
+    });
+    const out = captureOutput();
+
+    expect(await runUpdateCommand(['--yes'], harness.deps)).toBe(1);
+
+    expect(harness.execs.map(formatExec)).toEqual([
+      'npm root -g',
+      'pnpm root -g',
+      'pnpm add -g saros-proxy@1.1.3',
+      'pnpm add -g saros-proxy@1.1.2',
+    ]);
+    expect(out.all()).toContain('pnpm add -g saros-proxy@1.1.3 failed');
+    expect(out.all()).toContain('Restarted saros-proxy 1.1.2 (the previous install).');
+  });
+
+  it('detects a yarn install, installs with yarn and restarts its entry point', async () => {
+    const yarn = makeYarnInstall();
+    const harness = makeDeps({
+      packageRoot: yarn.packageRoot,
+      pnpmRoot: null,
+      yarnGlobalDir: yarn.yarnDir,
+    });
+    const out = captureOutput();
+
+    expect(await runUpdateCommand(['--yes'], harness.deps)).toBe(0);
+
+    expect(harness.execs.map(formatExec)).toEqual([
+      'npm root -g',
+      'pnpm root -g',
+      'yarn global dir',
+      'yarn global add saros-proxy@1.1.3',
+    ]);
+    expect(harness.startOptions).toEqual([
+      expect.objectContaining({ entryPoint: yarn.entryPoint }),
+    ]);
+    expect(out.all()).toContain('Detected the yarn global install');
+  });
+
+  it('rolls back a yarn install with yarn global add', async () => {
+    const yarn = makeYarnInstall();
+    const harness = makeDeps({
+      packageRoot: yarn.packageRoot,
+      pnpmRoot: null,
+      yarnGlobalDir: yarn.yarnDir,
+      failInstall: true,
+      probeHealth: async () => ({ ok: true, body: { status: 'ok', version: '1.1.2' } }),
+    });
+    const out = captureOutput();
+
+    expect(await runUpdateCommand(['--yes'], harness.deps)).toBe(1);
+
+    expect(harness.execs.map(formatExec)).toEqual([
+      'npm root -g',
+      'pnpm root -g',
+      'yarn global dir',
+      'yarn global add saros-proxy@1.1.3',
+      'yarn global add saros-proxy@1.1.2',
+    ]);
+    expect(out.all()).toContain('yarn global add saros-proxy@1.1.3 failed');
+    expect(out.all()).toContain('Restarted saros-proxy 1.1.2 (the previous install).');
+  });
+
+  it('refuses a pnpm entry whose symlink target is missing', async () => {
+    const pnpmRoot = join(tempDir, 'pnpm', 'global', '5', 'node_modules');
+    const packageRoot = join(tempDir, 'store', 'saros-proxy');
+    mkdirSync(pnpmRoot, { recursive: true });
+    mkdirSync(packageRoot, { recursive: true });
+    symlinkSync(join(tempDir, 'store', 'gone'), join(pnpmRoot, 'saros-proxy'), symlinkType());
+    const harness = makeDeps({
+      packageRoot,
+      pnpmRoot,
+      yarnGlobalDir: null,
+    });
+    const out = captureOutput();
+
+    expect(await runUpdateCommand(['--yes'], harness.deps)).toBe(1);
+
+    expect(harness.execs.map(formatExec)).toEqual([
+      'npm root -g',
+      'pnpm root -g',
+      'yarn global dir',
+    ]);
+    expect(harness.events).not.toContain('daemon-stop');
+    expect(out.all()).toContain('not a global npm, pnpm or yarn package');
+  });
+
+  it('refuses an npm link without installing anything', async () => {
+    const globalRoot = join(tempDir, 'node_modules');
+    const checkout = join(tempDir, 'checkout');
+    mkdirSync(globalRoot, { recursive: true });
+    mkdirSync(checkout, { recursive: true });
+    symlinkSync(checkout, join(globalRoot, 'saros-proxy'), symlinkType());
+    const harness = makeDeps({
+      packageRoot: checkout,
+      globalRoot,
+      pnpmRoot: null,
+      yarnGlobalDir: null,
+    });
+    const out = captureOutput();
+
+    expect(await runUpdateCommand(['--yes'], harness.deps)).toBe(1);
+
+    expect(harness.execs.map(formatExec)).toEqual([
+      'npm root -g',
+      'pnpm root -g',
+      'yarn global dir',
+    ]);
+    expect(harness.events).not.toContain('daemon-stop');
+    expect(out.all()).toContain('not a global npm, pnpm or yarn package');
+  });
+
   it('refuses a non-global checkout without --force, and updates with it', async () => {
     const checkout = makeDeps({ packageRoot: '/home/user/Projetos/saros-proxy' });
     const out = captureOutput();
 
     expect(await runUpdateCommand(['--yes'], checkout.deps)).toBe(1);
-    expect(checkout.execs.map((call) => call.args.join(' '))).toEqual(['root -g']);
-    expect(checkout.events).toEqual(['exec:npm root -g']);
-    expect(out.all()).toContain('not a global npm package');
+    expect(checkout.execs.map(formatExec)).toEqual([
+      'npm root -g',
+      'pnpm root -g',
+      'yarn global dir',
+    ]);
+    expect(checkout.events).toEqual([
+      'exec:npm root -g',
+      'exec:pnpm root -g',
+      'exec:yarn global dir',
+    ]);
+    expect(out.all()).toContain('not a global npm, pnpm or yarn package');
+    expect(out.all()).toContain('npm install -g saros-proxy');
+    expect(out.all()).toContain('pnpm add -g saros-proxy');
+    expect(out.all()).toContain('yarn global add saros-proxy');
 
     const forced = makeDeps({ packageRoot: '/home/user/Projetos/saros-proxy' });
     const forcedOut = captureOutput();
     expect(await runUpdateCommand(['--yes', '--force'], forced.deps)).toBe(0);
-    expect(forced.execs.map((call) => call.args.join(' '))).toEqual([
-      'root -g',
-      'install -g saros-proxy@1.1.3',
+    expect(forced.execs.map(formatExec)).toEqual([
+      'npm root -g',
+      'pnpm root -g',
+      'yarn global dir',
+      'npm install -g saros-proxy@1.1.3',
     ]);
     expect(forcedOut.all()).toContain('Updated to 1.1.3');
   });
 
-  it('refuses when the npm global prefix cannot be determined, unless forced', async () => {
+  it('refuses when no package manager owns the install', async () => {
     const harness = makeDeps({ globalRoot: null });
     const out = captureOutput();
 
     expect(await runUpdateCommand(['--yes'], harness.deps)).toBe(1);
-    expect(out.all()).toContain('Could not determine the npm global prefix');
-    expect(harness.execs).toHaveLength(1);
-    expect(harness.execs[0].args).toEqual(['root', '-g']);
+    expect(out.all()).toContain('not a global npm, pnpm or yarn package');
+    expect(harness.execs.map(formatExec)).toEqual([
+      'npm root -g',
+      'pnpm root -g',
+      'yarn global dir',
+    ]);
+    expect(harness.events).not.toContain('daemon-stop');
   });
 
   it('does not start anything when the daemon was stopped', async () => {
@@ -1226,10 +1597,15 @@ describe('runUpdateCommand', () => {
 
     expect(await runUpdateCommand(['--yes'], harness.deps)).toBe(1);
 
-    expect(harness.events).toEqual(['daemon-state', 'exec:npm root -g']);
+    expect(harness.events).toEqual([
+      'daemon-state',
+      'exec:npm root -g',
+      'exec:pnpm root -g',
+      'exec:yarn global dir',
+    ]);
     expect(harness.stopOptions).toEqual([]);
     expect(harness.startOptions).toEqual([]);
-    expect(out.all()).toContain('not a global npm package');
+    expect(out.all()).toContain('not a global npm, pnpm or yarn package');
   });
 
   it('does not restart a daemon when the installed package entry point is missing', async () => {
@@ -1549,6 +1925,64 @@ describe('default dependency wiring', () => {
     expect(mockDaemonStart).not.toHaveBeenCalled();
     expect(mockProbeProxyHealth).toHaveBeenCalledWith(3000);
     expect(out.all()).toContain('Updated to 1.1.3');
+  });
+
+  it('runs pnpm and yarn through a shell on Windows', async () => {
+    await withProcessPlatform('win32', async () => {
+      const pnpm = makePnpmInstall();
+      mockExecFileSync.mockImplementation((command: string) => {
+        if (command === 'npm') return '/usr/lib/node_modules\n';
+        if (command === 'pnpm') return `${pnpm.pnpmRoot}\n`;
+        return '';
+      });
+      mockGetDaemonState.mockResolvedValue({ running: false, port: 3000 });
+      captureOutput();
+
+      expect(
+        await runUpdateCommand(['--yes'], {
+          currentVersion: '1.1.2',
+          fetchLatestVersion: async () => '1.1.3',
+          readInstalledVersion: () => '1.1.3',
+          packageRoot: pnpm.packageRoot,
+          isTTY: true,
+          sleep: async () => {},
+          healthAttempts: 1,
+          healthDelayMs: 1,
+          platform: 'win32',
+        }),
+      ).toBe(0);
+
+      const pnpmCalls = mockExecFileSync.mock.calls.filter((call) => call[0] === 'pnpm');
+      expect(pnpmCalls.length).toBeGreaterThanOrEqual(2);
+      for (const call of pnpmCalls) expect(call[2]).toMatchObject({ shell: true });
+
+      const yarn = makeYarnInstall();
+      mockExecFileSync.mockReset();
+      mockExecFileSync.mockImplementation((command: string) => {
+        if (command === 'npm') return '/usr/lib/node_modules\n';
+        if (command === 'yarn') return `${yarn.yarnDir}\n`;
+        return '';
+      });
+      captureOutput();
+
+      expect(
+        await runUpdateCommand(['--yes'], {
+          currentVersion: '1.1.2',
+          fetchLatestVersion: async () => '1.1.3',
+          readInstalledVersion: () => '1.1.3',
+          packageRoot: yarn.packageRoot,
+          isTTY: true,
+          sleep: async () => {},
+          healthAttempts: 1,
+          healthDelayMs: 1,
+          platform: 'win32',
+        }),
+      ).toBe(0);
+
+      const yarnCalls = mockExecFileSync.mock.calls.filter((call) => call[0] === 'yarn');
+      expect(yarnCalls.length).toBeGreaterThanOrEqual(2);
+      for (const call of yarnCalls) expect(call[2]).toMatchObject({ shell: true });
+    });
   });
 
   it('uses the default daemon adapters for a PID-file install', async () => {
