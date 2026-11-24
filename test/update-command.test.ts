@@ -9,7 +9,7 @@
  */
 
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
-import { mkdtempSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
+import { existsSync, mkdtempSync, mkdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from 'node:fs';
 import type * as NodeFs from 'node:fs';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
@@ -91,6 +91,8 @@ interface DepOptions extends Partial<UpdateDependencies> {
   globalRoot?: string | null;
   /** Root that `pnpm root -g` reports; null makes pnpm absent. */
   pnpmRoot?: string | null;
+  /** Path that `pnpm store path` reports; defaults to empty output. */
+  pnpmStore?: string | null;
   /** Directory that `yarn global dir` reports; null makes yarn absent. */
   yarnGlobalDir?: string | null;
   /** Defaults to the latest version; null makes package.json unreadable. */
@@ -144,6 +146,7 @@ function makeDeps(options: DepOptions = {}): Harness {
     failReinstall,
     globalRoot,
     pnpmRoot,
+    pnpmStore,
     yarnGlobalDir,
     installedVersion,
     healthOk,
@@ -172,6 +175,10 @@ function makeDeps(options: DepOptions = {}): Harness {
       if (command === 'pnpm' && args[0] === 'root') {
         if (pnpmRoot === null) throw new Error('pnpm was not found on PATH');
         return pnpmRoot ?? '';
+      }
+      if (command === 'pnpm' && args[0] === 'store') {
+        if (pnpmStore === null) throw new Error('pnpm store path failed');
+        return pnpmStore ?? '';
       }
       if (command === 'yarn' && args[0] === 'global' && args[1] === 'dir') {
         if (yarnGlobalDir === null) throw new Error('yarn was not found on PATH');
@@ -330,6 +337,55 @@ function makePnpmInstall(): {
   };
 }
 
+/**
+ * The pnpm 12 global layout: `<root>/<alias>` is a stable symlink to a
+ * hash-named project directory, whose `node_modules/saros-proxy` links into
+ * the content-addressed store. `<root>/saros-proxy` does not exist.
+ */
+function makePnpm12Install(): {
+  pnpmRoot: string;
+  storeRoot: string;
+  projectDir: string;
+  alias: string;
+  packageRoot: string;
+  aliasModules: string;
+  entryPoint: string;
+} {
+  const pnpmHome = join(tempDir, 'pnpm12');
+  const pnpmRoot = join(pnpmHome, 'global', '11');
+  const storeRoot = join(pnpmHome, 'store', '11');
+  const projectDir = join(pnpmRoot, '3faea-18eaff4dc1d22cb1-0');
+  const alias = join(
+    pnpmRoot,
+    'd32241b11995b70f850e9b12c810be764706e987ac7cb4a6809d226671f343c3',
+  );
+  const packageRoot = join(
+    storeRoot,
+    'links',
+    '@',
+    'saros-proxy',
+    '1.4.0',
+    'b2badcfb21e0287e46358827c16f1a053dac249026be816be85d3e32c70bdad6',
+    'node_modules',
+    'saros-proxy',
+  );
+  mkdirSync(join(packageRoot, 'dist'), { recursive: true });
+  writeFileSync(join(packageRoot, 'dist', 'index.js'), '');
+  mkdirSync(join(projectDir, 'node_modules'), { recursive: true });
+  symlinkSync(packageRoot, join(projectDir, 'node_modules', 'saros-proxy'), symlinkType());
+  symlinkSync(projectDir, alias, symlinkType());
+  const aliasModules = join(alias, 'node_modules');
+  return {
+    pnpmRoot,
+    storeRoot,
+    projectDir,
+    alias,
+    packageRoot,
+    aliasModules,
+    entryPoint: join(aliasModules, 'saros-proxy', 'dist', 'index.js'),
+  };
+}
+
 /** A yarn 1 global layout: `<dir>/node_modules/saros-proxy` is a real dir. */
 function makeYarnInstall(): {
   yarnDir: string;
@@ -387,11 +443,20 @@ function formatExec(call: ExecCall): string {
 
 /** Discovery stand-in: each manager answers its root, throws when absent. */
 function discoveryExec(
-  roots: { npm?: string | null; pnpm?: string | null; yarn?: string | null },
+  roots: {
+    npm?: string | null;
+    pnpm?: string | null;
+    pnpmStore?: string | null;
+    yarn?: string | null;
+  },
   calls: string[] = [],
 ): (command: string, args: readonly string[]) => string {
   return (command, args) => {
     calls.push(`${command} ${args.join(' ')}`);
+    if (command === 'pnpm' && args[0] === 'store') {
+      if (roots.pnpmStore === null) throw new Error('pnpm store path failed');
+      return roots.pnpmStore ?? '';
+    }
     const value =
       command === 'npm' ? roots.npm : command === 'pnpm' ? roots.pnpm : roots.yarn;
     if (value === null) throw new Error(`${command} was not found on PATH`);
@@ -583,6 +648,106 @@ describe('detectGlobalInstall', () => {
       ),
     ).toEqual({ manager: 'pnpm', root: pnpm.pnpmRoot });
     expect(calls).toEqual(['npm root -g', 'pnpm root -g']);
+  });
+
+  it('accepts the pnpm 12 global layout through its stable alias directory', () => {
+    const pnpm = makePnpm12Install();
+    const calls: string[] = [];
+
+    expect(
+      detectGlobalInstall(
+        pnpm.packageRoot,
+        discoveryExec(
+          {
+            npm: '/usr/lib/node_modules',
+            pnpm: pnpm.pnpmRoot,
+            pnpmStore: pnpm.storeRoot,
+            yarn: null,
+          },
+          calls,
+        ),
+        'linux',
+      ),
+    ).toEqual({ manager: 'pnpm', root: pnpm.aliasModules });
+    expect(calls).toEqual(['npm root -g', 'pnpm root -g', 'pnpm store path']);
+    expect(existsSync(join(pnpm.aliasModules, 'saros-proxy', 'dist', 'index.js'))).toBe(true);
+  });
+
+  it('keeps the pnpm 12 alias entry valid after an upgrade retargets it', () => {
+    const pnpm = makePnpm12Install();
+    const nextProject = join(pnpm.pnpmRoot, '3fb68-18eaff5172641b7a-0');
+    const nextPackage = join(
+      pnpm.storeRoot,
+      'links',
+      '@',
+      'saros-proxy',
+      '1.4.1',
+      '82c9c605ab5f4e4495f642e2aa8836a7ccf379aa41af48e3c32ab1a197170178',
+      'node_modules',
+      'saros-proxy',
+    );
+    mkdirSync(join(nextPackage, 'dist'), { recursive: true });
+    writeFileSync(join(nextPackage, 'dist', 'index.js'), '');
+    mkdirSync(join(nextProject, 'node_modules'), { recursive: true });
+    symlinkSync(nextPackage, join(nextProject, 'node_modules', 'saros-proxy'), symlinkType());
+    // pnpm replaces both the hash-named project and the alias target; the
+    // alias name itself is derived from the package, not its version.
+    rmSync(pnpm.alias);
+    symlinkSync(nextProject, pnpm.alias, symlinkType());
+    rmSync(pnpm.projectDir, { recursive: true, force: true });
+
+    expect(
+      detectGlobalInstall(
+        nextPackage,
+        discoveryExec({
+          npm: '/usr/lib/node_modules',
+          pnpm: pnpm.pnpmRoot,
+          pnpmStore: pnpm.storeRoot,
+          yarn: null,
+        }),
+        'linux',
+      ),
+    ).toEqual({ manager: 'pnpm', root: pnpm.aliasModules });
+    expect(existsSync(pnpm.entryPoint)).toBe(true);
+  });
+
+  it('refuses a pnpm 12 global link to a checkout outside the store', () => {
+    const pnpm = makePnpm12Install();
+    const checkout = join(tempDir, 'checkout');
+    mkdirSync(checkout, { recursive: true });
+    const packageLink = join(pnpm.aliasModules, 'saros-proxy');
+    rmSync(packageLink);
+    symlinkSync(checkout, packageLink, symlinkType());
+
+    expect(
+      detectGlobalInstall(
+        checkout,
+        discoveryExec({
+          npm: '/usr/lib/node_modules',
+          pnpm: pnpm.pnpmRoot,
+          pnpmStore: pnpm.storeRoot,
+          yarn: null,
+        }),
+        'linux',
+      ),
+    ).toBeNull();
+  });
+
+  it('refuses the pnpm 12 layout when the store path cannot be read', () => {
+    const pnpm = makePnpm12Install();
+
+    expect(
+      detectGlobalInstall(
+        pnpm.packageRoot,
+        discoveryExec({
+          npm: '/usr/lib/node_modules',
+          pnpm: pnpm.pnpmRoot,
+          pnpmStore: null,
+          yarn: null,
+        }),
+        'linux',
+      ),
+    ).toBeNull();
   });
 
   it('detects yarn and normalizes its global dir to the node_modules root', () => {
@@ -1146,6 +1311,22 @@ describe('runUpdateCommand', () => {
 
     expect(harness.refreshes).toEqual([pnpm.entryPoint]);
     expect(harness.events).not.toContain('systemd-start');
+  });
+
+  it('repairs the unit with the pnpm 12 stable alias entry after installing', async () => {
+    const pnpm = makePnpm12Install();
+    const harness = makeDeps({
+      packageRoot: pnpm.packageRoot,
+      pnpmRoot: pnpm.pnpmRoot,
+      pnpmStore: pnpm.storeRoot,
+      daemonRunning: false,
+    });
+
+    expect(await runUpdateCommand(['--yes'], harness.deps)).toBe(0);
+
+    expect(harness.refreshes).toEqual([pnpm.entryPoint]);
+    expect(harness.refreshes[0]).toContain(pnpm.aliasModules);
+    expect(harness.refreshes[0]).not.toContain(join('store', '11', 'links'));
   });
 
   it('repairs the systemd unit after a daemon-mode install', async () => {

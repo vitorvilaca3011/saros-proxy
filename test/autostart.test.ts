@@ -9,7 +9,7 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { chmodSync, existsSync, lstatSync, mkdirSync, rmSync, readFileSync, statSync, symlinkSync, writeFileSync, mkdtempSync } from 'node:fs';
 import type * as NodeFs from 'node:fs';
-import { join } from 'node:path';
+import { join, dirname } from 'node:path';
 import { tmpdir } from 'node:os';
 import type * as NodeOs from 'node:os';
 import { restoreEnv, snapshotEnv } from './env-isolation.js';
@@ -957,6 +957,46 @@ describe('autostart — systemd method (Linux)', () => {
     const { stableEntryPath } = await import('../src/cli/autostart.js');
 
     expect(stableEntryPath(versioned)).toBe(stable);
+  });
+
+  it('keeps the pnpm 12 alias the shim launched instead of the versioned store path', async () => {
+    const real = join(
+      configHome,
+      'store',
+      '11',
+      'links',
+      '@',
+      'saros-proxy',
+      '1.4.0',
+      'b2badcfb21e0287e46358827c16f1a053dac249026be816be85d3e32c70bdad6',
+      'node_modules',
+      'saros-proxy',
+      'dist',
+      'index.js',
+    );
+    mkdirSync(dirname(real), { recursive: true });
+    writeFileSync(real, '');
+    const alias = join(
+      configHome,
+      'pnpm',
+      'global',
+      '11',
+      'd32241b11995b70f850e9b12c810be764706e987ac7cb4a6809d226671f343c3',
+      'node_modules',
+      'saros-proxy',
+      'dist',
+      'index.js',
+    );
+    mkdirSync(dirname(alias), { recursive: true });
+    symlinkSync(real, alias);
+    const { preferredEntryPath, stableEntryPath } = await import('../src/cli/autostart.js');
+
+    expect(preferredEntryPath(alias, real)).toBe(alias);
+    // The alias path is already stable; the versioned store path is not.
+    expect(stableEntryPath(alias)).toBe(alias);
+    expect(preferredEntryPath(real, real)).toBe(real);
+    expect(preferredEntryPath(undefined, real)).toBeNull();
+    expect(preferredEntryPath(join(configHome, 'other.js'), real)).toBeNull();
   });
 
   it('falls back to the resolved entry when the stable pnpm link is absent', async () => {

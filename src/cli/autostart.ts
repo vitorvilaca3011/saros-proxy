@@ -11,7 +11,7 @@
  */
 
 import { existsSync, mkdirSync, writeFileSync, rmSync, readFileSync, renameSync, realpathSync, statSync } from 'node:fs';
-import { basename, dirname, isAbsolute, join } from 'node:path';
+import { basename, dirname, isAbsolute, join, resolve } from 'node:path';
 import { homedir } from 'node:os';
 import { execFileSync } from 'node:child_process';
 import { logger } from '../logger.js';
@@ -64,9 +64,40 @@ function vbsPath(): string {
   return join(windowsStartupDir(), 'saros-proxy-daemon.vbs');
 }
 
-/** Path of the compiled entry point, relative to this module. */
+/**
+ * Path the process was launched with, when it names this module's own entry
+ * point. pnpm 12's global entry is a stable symlink owned by pnpm, and its bin
+ * shim launches `node <alias>/node_modules/saros-proxy/dist/index.js`; Node
+ * keeps that alias in `argv[1]` even though it resolves `import.meta.url` to
+ * the versioned store path. Prefer the launched path so a unit written by
+ * `autostart install` keeps pointing at the alias across upgrades. A process
+ * started another way keeps the module's real path.
+ */
+export function preferredEntryPath(
+  invoked: string | undefined,
+  moduleEntry: string,
+): string | null {
+  if (invoked === undefined) return null;
+  const candidate = resolve(invoked);
+  if (basename(candidate) !== 'index.js') return null;
+  try {
+    const target = realpathSync(candidate);
+    const own = realpathSync(moduleEntry);
+    const same =
+      process.platform === 'win32'
+        ? target.toLowerCase() === own.toLowerCase()
+        : target === own;
+    if (!same) return null;
+  } catch {
+    return null;
+  }
+  return candidate;
+}
+
+/** Path of the compiled entry point as this process should record it. */
 function rawDistEntryPath(): string {
-  return join(import.meta.dirname!, '..', '..', 'dist', 'index.js');
+  const moduleEntry = join(import.meta.dirname!, '..', '..', 'dist', 'index.js');
+  return preferredEntryPath(process.argv[1], moduleEntry) ?? moduleEntry;
 }
 
 /**
@@ -81,7 +112,8 @@ function rawDistEntryPath(): string {
  * `virtual-store-dir` keeps. An absolute store outside the prefix has no
  * versionless sibling here; this function then returns the versioned path, and
  * `warnStaleWindowsAutostart` explains that `autostart install` cannot repair
- * such an entry. Any other layout keeps the resolved path as well.
+ * such an entry. Any other layout keeps the resolved path as well; pnpm 12's
+ * alias path is already versionless, so it passes through unchanged.
  */
 export function stableEntryPath(resolved: string): string {
   if (!isVersionedStoreEntry(resolved)) return resolved;
