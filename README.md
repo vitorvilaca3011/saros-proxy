@@ -649,12 +649,15 @@ path against the running package, so a pnpm (`pnpm add -g`) or yarn 1
 refused as "not a global npm package". A checkout, an `npm link` or a
 `pnpm link` into one is still refused unless `--force` is passed.
 
-On a pnpm install the package really lives in a versioned store directory
-(`.pnpm/saros-proxy@<version>/…`), so the autostart entry written by
-`autostart install` uses the unversioned `node_modules/saros-proxy` path and
-`update` rewrites the unit's `ExecStart` to it before `systemctl start` — a
-version pinned in the unit would otherwise restart the old code after an
-update.
+On a pnpm install the package really lives in a versioned store directory —
+`.pnpm/saros-proxy@<version>/…` on pnpm 10, `<pnpm root -g>/<hash>/node_modules/
+saros-proxy` on pnpm 12, where the hash-named project is replaced on every
+install. Both leave a versionless path that the entries use instead: the
+`node_modules/saros-proxy` link on pnpm 10, and on pnpm 12 the `<root>/<alias>`
+symlink that pnpm's own bin shim launches through. `update` repairs the unit's
+`ExecStart` to that path after any successful install (and on the
+already-current and `--force` paths), because a version pinned in the unit would
+otherwise restart the old code after an update.
 
 On Linux the default is a `systemd --user` unit at
 `~/.config/systemd/user/saros-proxy.service` (honouring `$XDG_CONFIG_HOME`), enabled

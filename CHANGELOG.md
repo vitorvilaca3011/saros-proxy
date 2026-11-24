@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.4.1] - 2026-11-24
+
+### Fixed
+
+- **`update` and `autostart install` recognise pnpm 12's global layout.** pnpm
+  12 keeps a global package in `<pnpm root -g>/<hash>/node_modules/saros-proxy`
+  (the hash-named project is replaced on every install) and no longer creates
+  `<root>/saros-proxy`, so detection found nothing: a pnpm 12 install would have
+  been refused as "not a global npm, pnpm or yarn package", and `autostart
+  install` would have written a path the next install removes. Detection now
+  follows `<root>/<alias>`, the versionless symlink pnpm's own bin shim launches
+  through, and requires the package to resolve inside `pnpm store path`, so a
+  `pnpm add -g <checkout>` stays refused. The autostart entry point records the
+  path the process was launched with when it is the same file, which keeps the
+  alias in the unit instead of the store path.
+
 ## [1.4.0] - 2026-11-24
 
 ### Added
@@ -812,6 +828,7 @@ First stable release. The public surface — the `/v1/*` and `/zen/go/v1/*` rout
 - Non-root Docker user
 
 [Unreleased]: https://github.com/vitorvilaca3011/saros-proxy/compare/v1.3.4...HEAD
+[1.4.1]: https://github.com/vitorvilaca3011/saros-proxy/compare/v1.4.0...v1.4.1
 [1.4.0]: https://github.com/vitorvilaca3011/saros-proxy/compare/v1.3.4...v1.4.0
 [1.3.4]: https://github.com/vitorvilaca3011/saros-proxy/compare/v1.3.3...v1.3.4
 [1.3.3]: https://github.com/vitorvilaca3011/saros-proxy/compare/v1.3.2...v1.3.3
