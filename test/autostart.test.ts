@@ -404,6 +404,55 @@ describe('autostart — stale pnpm entries', () => {
     expect(method).toBe('vbs');
   });
 
+  it('keeps the install command when the package path is already stable', async () => {
+    writeVbs(
+      'shell.Run "node ""C:\\Users\\u\\.pnpm\\saros-proxy@1.3.3\\node_modules\\saros-proxy\\dist\\index.js"" start", 0, False',
+    );
+    const packageRoot = join(appData, 'npm-global', 'node_modules', 'saros-proxy');
+    mkdirSync(join(packageRoot, 'dist'), { recursive: true });
+    writeFileSync(join(packageRoot, 'dist', 'index.js'), '');
+    const { warnStaleWindowsAutostart } = await import('../src/cli/autostart.js');
+
+    warnStaleWindowsAutostart('1.3.4', 'win32', join(packageRoot, 'dist', 'index.js'));
+
+    expect(mockLoggerWarn).toHaveBeenCalledTimes(1);
+    const [format] = mockLoggerWarn.mock.calls[0];
+    expect(format).toContain('saros-proxy autostart install --method %s');
+  });
+
+  it('explains that autostart install cannot fix a store outside the prefix', async () => {
+    writeVbs(
+      'shell.Run "node ""C:\\pnpm\\state\\custom-store\\saros-proxy@1.3.3\\node_modules\\saros-proxy\\dist\\index.js"" start", 0, False',
+    );
+    const prefix = join(appData, 'pnpm', 'global', '5');
+    const versioned = join(
+      appData,
+      'external-store',
+      'saros-proxy@1.3.4',
+      'node_modules',
+      'saros-proxy',
+    );
+    mkdirSync(join(versioned, 'dist'), { recursive: true });
+    writeFileSync(join(versioned, 'dist', 'index.js'), '');
+    mkdirSync(join(prefix, 'node_modules'), { recursive: true });
+    symlinkSync(
+      versioned,
+      join(prefix, 'node_modules', 'saros-proxy'),
+      process.platform === 'win32' ? 'junction' : 'dir',
+    );
+    const entryPoint = join(prefix, 'node_modules', 'saros-proxy', 'dist', 'index.js');
+    const { warnStaleWindowsAutostart } = await import('../src/cli/autostart.js');
+
+    warnStaleWindowsAutostart('1.3.4', 'win32', entryPoint);
+
+    expect(mockLoggerWarn).toHaveBeenCalledTimes(1);
+    const [format, , , method] = mockLoggerWarn.mock.calls[0];
+    expect(format).toContain('no versionless package path');
+    expect(format).toContain('cannot fix it');
+    expect(format).toContain('default pnpm store');
+    expect(method).toBe('vbs');
+  });
+
   it('reads the VBS entry without a check-then-act existence probe', async () => {
     writeVbs(
       'shell.Run "node ""C:\\Users\\u\\.pnpm\\saros-proxy@1.3.3\\node_modules\\saros-proxy\\dist\\index.js"" start", 0, False',
@@ -967,7 +1016,7 @@ describe('autostart — systemd method (Linux)', () => {
     ]);
   });
 
-  it('starts a unit that already names the stable entry without a reload', async () => {
+  it('reloads an unchanged unit before starting it', async () => {
     const stableEntry = stablePnpmEntry();
     mkdirSync(join(configHome, 'systemd', 'user'), { recursive: true });
     const { buildSystemdUnit, startSystemdUnit } = await import('../src/cli/autostart.js');
@@ -975,7 +1024,10 @@ describe('autostart — systemd method (Linux)', () => {
 
     startSystemdUnit(stableEntry);
 
+    // A rollback or retry can arrive after a failed reload with the file
+    // already stable; the user manager must not keep the previous unit.
     expect(mockExecFileSync.mock.calls.map((call: unknown[]) => call[1])).toEqual([
+      ['--user', 'daemon-reload'],
       ['--user', 'start', 'saros-proxy.service'],
     ]);
   });
@@ -1163,6 +1215,44 @@ describe('autostart — systemd method (Linux)', () => {
 
     expect(readFileSync(unitPath(), 'utf-8')).toContain(stableEntry);
     expect(statSync(unitPath()).mode & 0o777).toBe(0o600);
+  });
+
+  // POSIX mode bits, same reason as the mode test above.
+  it.skipIf(process.platform === 'win32')('discards a leftover temp file with a wider mode', async () => {
+    const stableEntry = stablePnpmEntry();
+    const oldEntry = join(
+      configHome,
+      'pnpm',
+      'global',
+      '5',
+      '.pnpm',
+      'saros-proxy@1.3.3',
+      'node_modules',
+      'saros-proxy',
+      'dist',
+      'index.js',
+    );
+    mkdirSync(join(configHome, 'systemd', 'user'), { recursive: true });
+    writeFileSync(
+      unitPath(),
+      `[Service]\nExecStart="${process.execPath}" "${oldEntry}" serve\n`,
+      'utf-8',
+    );
+    chmodSync(unitPath(), 0o600);
+    const leftover = join(
+      configHome,
+      'systemd',
+      'user',
+      `.saros-proxy.service.${process.pid}.tmp`,
+    );
+    writeFileSync(leftover, 'stale', 'utf-8');
+    chmodSync(leftover, 0o666);
+    const { startSystemdUnit } = await import('../src/cli/autostart.js');
+
+    startSystemdUnit(stableEntry);
+
+    expect(statSync(unitPath()).mode & 0o777).toBe(0o600);
+    expect(existsSync(leftover)).toBe(false);
   });
 
   it('fails with a build hint instead of emitting a bare ExecStart', async () => {
