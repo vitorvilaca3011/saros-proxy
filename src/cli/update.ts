@@ -64,8 +64,10 @@ export interface ServiceOptions {
   /** Entry point of the package that must serve after the update. */
   entryPoint?: string;
   /**
-   * Entry point that may be written into an existing systemd unit. Absent for
-   * a `--force` checkout: autostart must never point systemd at a checkout.
+   * Entry point that may be written into an existing systemd unit. A `--force`
+   * update from a checkout still has the npm global root as its fallback, so
+   * it is present; only an entry point that resolves inside the checkout is
+   * dropped, because systemd must never run the checkout's code.
    */
   systemdEntryPoint?: string;
 }
@@ -300,7 +302,11 @@ function matchesPnpmInstall(
     : actual === target;
 }
 
-/** Is the running package the one npm considers global? */
+/**
+ * Is the running package the one npm considers global? A junction reported as
+ * a plain directory still counts as a link, so the same `isLinkEntry` guard
+ * that protects pnpm applies here too.
+ */
 export function isGlobalInstall(
   packageRoot: string,
   npmGlobalRoot: string,
@@ -308,15 +314,11 @@ export function isGlobalInstall(
 ): boolean {
   if (packageRoot === '' || npmGlobalRoot === '') return false;
   const expectedPath = join(npmGlobalRoot, 'saros-proxy');
-  // `npm link` leaves a symlink in the global prefix. Canonicalizing both
-  // sides would make the checkout look like the global install, and the
-  // update would replace the link (and the checkout) behind the user's back.
-  try {
-    if (lstatSync(expectedPath).isSymbolicLink()) return false;
-  } catch {
-    // Missing path: fall through to the canonical comparison (tests and a
-    // first install both reach this).
-  }
+  // `npm link` leaves a symlink (or a junction Windows reports as a
+  // directory) in the global prefix. Canonicalizing both sides would make the
+  // checkout look like the global install, and the update would replace the
+  // link (and the checkout) behind the user's back.
+  if (isLinkEntry(expectedPath)) return false;
   return samePath(packageRoot, expectedPath, platform);
 }
 
@@ -597,6 +599,23 @@ interface ResolvedGlobalInstall {
 }
 
 /**
+ * Entry point an update may write into an existing systemd unit. The detected
+ * install always names the package being updated. A `--force` fallback is the
+ * npm global root, which is normally just as good; it is dropped only when it
+ * resolves back inside the checkout that ran the command, because systemd must
+ * never start the checkout's code.
+ */
+function autostartEntryPoint(
+  entryPoint: string | undefined,
+  deps: UpdateDependencies,
+): string | undefined {
+  if (entryPoint === undefined) return undefined;
+  const checkout = canonicalPath(deps.packageRoot);
+  const fallback = canonicalPath(entryPoint);
+  return isInsidePath(fallback, checkout, deps.platform) ? undefined : entryPoint;
+}
+
+/**
  * Resolve which package manager owns the global install and where its root
  * is. Prints the reason and returns null when the caller must not touch the
  * install. A failed discovery is not fatal: `--force` falls back to npm's
@@ -638,29 +657,68 @@ function resolveGlobalInstall(
 }
 
 /**
- * After a successful install, repair autostart entries independent of the
- * restart mode: an inactive unit or a Windows login entry left on the old pnpm
- * store path starts stale code on the next boot. Systemd is rewritten only
- * when a global entry point was detected (never a checkout); existing Windows
- * entries are reported rather than rewritten blindly.
+ * After a successful install, repair the autostart entries the restart will
+ * not touch: an inactive unit or a Windows login entry left on the old pnpm
+ * store path starts stale code on the next boot. A systemd restart repairs its
+ * own unit inside `startSystemdUnit`, where a failed `daemon-reload` becomes
+ * the error that rolls the update back. A `--force` checkout passes the npm
+ * global fallback, never the checkout itself.
+ *
+ * The Windows advisory is limited to a detected global install: run from a
+ * checkout, `autostart install` would write the checkout's path into the login
+ * entry, so warning there would suggest the wrong command.
  */
 function repairAutostartAfterInstall(
   deps: UpdateDependencies,
   entryPoint: string | undefined,
   version: string,
+  mode: RestartMode,
+  detected: boolean,
 ): void {
-  if (deps.platform === 'linux' && entryPoint !== undefined) {
-    try {
-      deps.refreshSystemdUnit(entryPoint);
-    } catch (err) {
-      console.error(
-        chalk.yellow(
-          `! Could not update the systemd autostart unit: ${errorMessage(err)}`,
-        ),
-      );
-    }
+  if (deps.platform === 'linux' && entryPoint !== undefined && mode !== 'systemd') {
+    repairSystemdUnit(deps, entryPoint);
   }
-  if (deps.platform === 'win32') warnStaleWindowsAutostart(version, deps.platform);
+  if (detected) warnStaleWindowsAutostartEntry(deps, version, entryPoint);
+}
+
+/** Rewrite the installed unit, reporting a failure without failing the update. */
+function repairSystemdUnit(deps: UpdateDependencies, entryPoint: string): void {
+  try {
+    deps.refreshSystemdUnit(entryPoint);
+  } catch (err) {
+    console.error(
+      chalk.yellow(
+        `! Could not update the systemd autostart unit: ${errorMessage(err)}`,
+      ),
+    );
+  }
+}
+
+function warnStaleWindowsAutostartEntry(
+  deps: UpdateDependencies,
+  version: string,
+  entryPoint: string | undefined,
+): void {
+  if (deps.platform !== 'win32' || entryPoint === undefined) return;
+  warnStaleWindowsAutostart(version, deps.platform, entryPoint);
+}
+
+/**
+ * Already on the newest version: no install follows, but an inactive unit or a
+ * Windows login entry can still point at an older virtual store and start
+ * stale code on the next boot. Only a detected global install is repaired
+ * (neither a checkout nor a missing entry point has a global package to name),
+ * and the systemd refresh is a no-op without a unit.
+ */
+function repairAutostartWithoutInstall(
+  deps: UpdateDependencies,
+  version: string,
+): void {
+  if (deps.platform !== 'linux' && deps.platform !== 'win32') return;
+  const entryPoint = detectGlobalEntryPoint(deps);
+  if (entryPoint === null) return;
+  if (deps.platform === 'linux') repairSystemdUnit(deps, entryPoint);
+  else warnStaleWindowsAutostart(version, deps.platform, entryPoint);
 }
 
 // ---------------------------------------------------------------------------
@@ -918,7 +976,9 @@ export async function runUpdateCommand(
     install.root === ''
       ? undefined
       : join(install.root, 'saros-proxy', 'dist', 'index.js');
-  const systemdEntryPoint = resolved.detected ? entryPoint : undefined;
+  const systemdEntryPoint = resolved.detected
+    ? entryPoint
+    : autostartEntryPoint(entryPoint, deps);
   const restartOptions: ServiceOptions = {
     ...serviceOptions,
     ...(entryPoint === undefined ? {} : { entryPoint }),
@@ -981,7 +1041,26 @@ export async function runUpdateCommand(
     return 1;
   }
 
-  repairAutostartAfterInstall(deps, systemdEntryPoint, latest);
+  // Re-evaluate containment after the install: `npm install -g` replaces an
+  // `npm link` with a real package, so a fallback that resolved into the
+  // checkout before the install can now name the installed package. If the
+  // link survived, the guard still drops it.
+  const installedSystemdEntryPoint = resolved.detected
+    ? entryPoint
+    : autostartEntryPoint(entryPoint, deps);
+  if (installedSystemdEntryPoint === undefined) {
+    delete restartOptions.systemdEntryPoint;
+  } else {
+    restartOptions.systemdEntryPoint = installedSystemdEntryPoint;
+  }
+
+  repairAutostartAfterInstall(
+    deps,
+    installedSystemdEntryPoint,
+    latest,
+    mode,
+    resolved.detected,
+  );
 
   if (mode === 'none') {
     console.log(
@@ -1115,8 +1194,11 @@ function detectGlobalEntryPoint(deps: UpdateDependencies): string | null {
 /**
  * The package is already `current`, but the process serving may not be: a
  * manual install or an interrupted update leaves an old daemon behind. Restart
- * it when its `/health` reports another version (or no version at all); do
- * nothing when it matches.
+ * it when its `/health` reports another version (or no version at all).
+ *
+ * When nothing needs a restart (no daemon, or it already reports `current`),
+ * the login entries still may: an inactive unit or a Windows entry can pin an
+ * older virtual store, so they are repaired before returning.
  */
 async function restartIfDaemonIsStale(
   deps: UpdateDependencies,
@@ -1129,12 +1211,14 @@ async function restartIfDaemonIsStale(
     return refuseUnknownDaemonPort(state);
   }
   if (!state.running) {
+    repairAutostartWithoutInstall(deps, current);
     console.log(chalk.green(`✓ Already on ${current}.`));
     return 0;
   }
   const reported =
     typeof state.health?.version === 'string' ? state.health.version : null;
   if (reported === current) {
+    repairAutostartWithoutInstall(deps, current);
     console.log(chalk.green(`✓ Already on ${current}.`));
     return 0;
   }
