@@ -14,7 +14,7 @@
  */
 
 import { execFileSync } from 'node:child_process';
-import { existsSync, lstatSync, readFileSync, readlinkSync, realpathSync } from 'node:fs';
+import { existsSync, lstatSync, readFileSync, readdirSync, readlinkSync, realpathSync } from 'node:fs';
 import { dirname, join, resolve, sep } from 'node:path';
 import { setTimeout as delay } from 'node:timers/promises';
 import { fileURLToPath } from 'node:url';
@@ -332,6 +332,92 @@ interface GlobalInstallProbe {
 }
 
 /**
+ * Locate the pnpm 12 alias project whose `node_modules/saros-proxy` resolves to
+ * `packageRoot`, returning that alias's `node_modules`. No package manager
+ * runs here: a layout that does not carry the package is rejected without an
+ * extra `pnpm` call.
+ */
+function findPnpm12Modules(
+  packageRoot: string,
+  pnpmRoot: string,
+  platform: NodeJS.Platform,
+): string | null {
+  const actual = canonicalPath(packageRoot);
+  let entries: string[];
+  try {
+    entries = readdirSync(pnpmRoot);
+  } catch {
+    return null;
+  }
+  for (const entry of entries) {
+    const alias = join(pnpmRoot, entry);
+    if (!isLinkEntry(alias)) continue;
+    const modules = join(alias, 'node_modules');
+    let target: string;
+    try {
+      target = realpathSync(join(modules, 'saros-proxy'));
+    } catch {
+      continue;
+    }
+    if (samePath(target, actual, platform)) return modules;
+  }
+  return null;
+}
+
+/**
+ * pnpm 12 keeps one project directory per global package. `<root>/<alias>` is
+ * a versionless symlink that survives upgrades; it points at the current
+ * hash-named project, whose `node_modules/saros-proxy` links into the global
+ * store. `<root>/saros-proxy` no longer exists.
+ *
+ * Return the alias's `node_modules` as the effective root: callers build
+ * `<root>/saros-proxy/dist/index.js`, which then traverses the stable alias.
+ * Accept only a package that resolves inside pnpm's store. `pnpm add -g
+ * <checkout>` links the checkout from the same shape and must stay refused, or
+ * the update would replace the user's working copy.
+ */
+function matchesPnpm12Install(
+  packageRoot: string,
+  pnpmRoot: string,
+  exec: (command: string, args: readonly string[]) => string,
+  platform: NodeJS.Platform,
+): string | null {
+  const modules = findPnpm12Modules(packageRoot, pnpmRoot, platform);
+  if (modules === null) return null;
+  let store: string;
+  try {
+    store = exec('pnpm', ['store', 'path']).trim();
+  } catch {
+    return null;
+  }
+  if (store === '') return null;
+  const actual = canonicalPath(packageRoot);
+  return isInsidePath(actual, canonicalPath(store), platform) ? modules : null;
+}
+
+/**
+ * Effective global root for one discovery answer, or null when this manager
+ * does not own `packageRoot`. The pnpm 10 layout returns the reported root
+ * unchanged; the pnpm 12 layout returns the alias's `node_modules`.
+ */
+function matchedGlobalRoot(
+  discovery: GlobalDiscovery,
+  packageRoot: string,
+  root: string,
+  exec: (command: string, args: readonly string[]) => string,
+  platform: NodeJS.Platform,
+): string | null {
+  if (discovery.manager === 'npm') {
+    return isGlobalInstall(packageRoot, root, platform) ? root : null;
+  }
+  if (discovery.manager === 'pnpm') {
+    if (matchesPnpmInstall(packageRoot, root, platform)) return root;
+    return matchesPnpm12Install(packageRoot, root, exec, platform);
+  }
+  return samePath(packageRoot, join(root, 'saros-proxy'), platform) ? root : null;
+}
+
+/**
  * Ask each package manager where its global packages live and compare that
  * location with the running package. A missing binary is not an error: it
  * simply has no candidate. pnpm's global entry is normally a symlink into its
@@ -357,13 +443,10 @@ function probeGlobalInstall(
     const root = discovery.rootFromOutput(output);
     if (discovery.manager === 'npm') npmRoot = root;
     if (packageRoot === '') continue;
-    const matched =
-      discovery.manager === 'npm'
-        ? isGlobalInstall(packageRoot, root, platform)
-        : discovery.manager === 'pnpm'
-          ? matchesPnpmInstall(packageRoot, root, platform)
-          : samePath(packageRoot, join(root, 'saros-proxy'), platform);
-    if (matched) return { install: { manager: discovery.manager, root }, npmRoot, answered };
+    const matched = matchedGlobalRoot(discovery, packageRoot, root, exec, platform);
+    if (matched !== null) {
+      return { install: { manager: discovery.manager, root: matched }, npmRoot, answered };
+    }
   }
   return { install: null, npmRoot, answered };
 }
