@@ -10,7 +10,7 @@
  * macOS:    not implemented (reported as unsupported, never a silent no-op)
  */
 
-import { existsSync, mkdirSync, writeFileSync, rmSync, readFileSync, renameSync, realpathSync } from 'node:fs';
+import { existsSync, mkdirSync, writeFileSync, rmSync, readFileSync, renameSync, realpathSync, statSync } from 'node:fs';
 import { basename, dirname, isAbsolute, join } from 'node:path';
 import { homedir } from 'node:os';
 import { execFileSync } from 'node:child_process';
@@ -71,11 +71,12 @@ function rawDistEntryPath(): string {
 
 /**
  * Stable path to store in autostart entries. pnpm's real package directory
- * carries the version (`<prefix>/.pnpm/saros-proxy@1.3.4/node_modules/
- * saros-proxy/dist/index.js`); the unversioned `node_modules/saros-proxy`
- * symlink follows whichever version is installed, so a unit or registry value
- * that uses it survives the next update. Any other layout, or a missing
- * stable link, keeps the resolved path.
+ * carries the version (`<store>/saros-proxy@1.3.4/node_modules/saros-proxy/
+ * dist/index.js`), where `<store>` is `.pnpm` by default and whatever
+ * `virtual-store-dir` names otherwise; the unversioned
+ * `node_modules/saros-proxy` symlink follows whichever version is installed,
+ * so a unit or registry value that uses it survives the next update. Any
+ * other layout, or a missing stable link, keeps the resolved path.
  */
 export function stableEntryPath(resolved: string): string {
   const distDir = dirname(resolved);
@@ -84,13 +85,12 @@ export function stableEntryPath(resolved: string): string {
   const versionedDir = dirname(modulesDir);
   const storeDir = dirname(versionedDir);
   const prefix = dirname(storeDir);
-  const isPnpmStore =
+  const isVersionedStore =
     basename(resolved) === 'index.js' &&
     basename(distDir) === 'dist' &&
     basename(modulesDir) === 'node_modules' &&
-    basename(storeDir) === '.pnpm' &&
     basename(versionedDir).includes('@');
-  if (!isPnpmStore) return resolved;
+  if (!isVersionedStore) return resolved;
   const name = basename(packageDir);
   // Global installs keep the store beside node_modules; project installs keep
   // it inside node_modules. Both expose the versionless package at the latter.
@@ -267,32 +267,44 @@ function vbsStatus(): void {
 // Stale Windows entries (pnpm store paths pinned to an old version)
 // ---------------------------------------------------------------------------
 
-/** A versioned pnpm store path inside a login entry (VBS or registry value). */
+/**
+ * A versioned pnpm virtual-store path inside a login entry (VBS or registry):
+ * `<store>/saros-proxy@<version>/node_modules/saros-proxy/dist/index.js`, where
+ * `<store>` is `.pnpm` by default and anything else for a custom
+ * `virtual-store-dir`. Both captures stop before a quote or whitespace, so the
+ * warning can name the store path found inside the quoted command.
+ */
 const PNPM_STORE_ENTRY_PATTERN =
-  /\.pnpm[/\\]saros-proxy@([^/\\\s"]+)[/\\]node_modules[/\\]saros-proxy[/\\]dist[/\\]index\.js/;
+  /(?:^|[/\\"])([^/\\\s"]+[/\\]saros-proxy@([^/\\\s"]+)[/\\]node_modules[/\\]saros-proxy[/\\]dist[/\\]index\.js)/;
 
 interface StaleAutostartEntry {
   /** File or registry value that holds the stale path. */
   location: string;
+  /** Method `autostart install` must use to rewrite it. */
+  method: 'vbs' | 'registry';
   /** The versioned path found in that entry. */
   path: string;
 }
 
 function stalePnpmEntry(content: string, version: string): string | null {
   const match = PNPM_STORE_ENTRY_PATTERN.exec(content);
-  if (match === null || match[1] === version) return null;
-  return match[0];
+  if (match === null || match[2] === version) return null;
+  return match[1];
 }
 
 function staleVbsAutostart(version: string): StaleAutostartEntry | null {
   const file = vbsPath();
-  if (!existsSync(file)) return null;
+  // No existsSync first: the file can disappear between a check and this read,
+  // and a missing entry simply means there is nothing to report. Let the read
+  // answer and treat every unreadable entry as absent, as the check did.
+  let content: string;
   try {
-    const stale = stalePnpmEntry(readFileSync(file, 'utf-8'), version);
-    return stale === null ? null : { location: file, path: stale };
+    content = readFileSync(file, 'utf-8');
   } catch {
     return null;
   }
+  const stale = stalePnpmEntry(content, version);
+  return stale === null ? null : { location: file, method: 'vbs', path: stale };
 }
 
 function staleRegistryAutostart(version: string): StaleAutostartEntry | null {
@@ -305,7 +317,11 @@ function staleRegistryAutostart(version: string): StaleAutostartEntry | null {
     const stale = stalePnpmEntry(output, version);
     return stale === null
       ? null
-      : { location: `${REG_RUN_KEY}\\${REG_VALUE_NAME}`, path: stale };
+      : {
+          location: `${REG_RUN_KEY}\\${REG_VALUE_NAME}`,
+          method: 'registry',
+          path: stale,
+        };
   } catch {
     return null;
   }
@@ -314,7 +330,8 @@ function staleRegistryAutostart(version: string): StaleAutostartEntry | null {
 /**
  * Warn about a Windows login entry still pinned to a pnpm store version. An
  * update does not rewrite the registry or the Startup folder blindly; the
- * entry is reported, and `autostart install` writes the stable path.
+ * entry is reported together with the method that rewrites it, so a VBS entry
+ * is not replaced by a registry value (or the reverse) based on AV detection.
  */
 export function warnStaleWindowsAutostart(
   installedVersion: string,
@@ -325,9 +342,10 @@ export function warnStaleWindowsAutostart(
   for (const entry of entries) {
     if (entry === null) continue;
     logger.warn(
-      'Windows auto-start entry %s still points at %s; run `saros-proxy autostart install` to point it at the installed version.',
+      'Windows auto-start entry %s still points at %s; run `saros-proxy autostart install --method %s` to point it at the installed version.',
       entry.location,
       entry.path,
+      entry.method,
     );
   }
 }
@@ -579,13 +597,16 @@ function warnUnitEntryFailure(err: unknown): void {
 /**
  * Replace the unit through a sibling temporary file: a crash mid-write must
  * never leave a truncated unit, and following `realpath` keeps a unit that is
- * symlinked into a dotfiles repository intact.
+ * symlinked into a dotfiles repository intact. The rename installs a new
+ * inode, so the current file's mode is copied explicitly; otherwise a unit
+ * written as 0600 would come back readable by every local user.
  */
 function writeUnitAtomically(unitPath: string, content: string): void {
   const target = realpathSync(unitPath);
   const tempPath = join(dirname(target), `.${basename(target)}.${process.pid}.tmp`);
   try {
-    writeFileSync(tempPath, content, 'utf-8');
+    const mode = statSync(target).mode;
+    writeFileSync(tempPath, content, { encoding: 'utf-8', mode });
     renameSync(tempPath, target);
   } catch (err) {
     try {
@@ -604,8 +625,11 @@ function writeUnitAtomically(unitPath: string, content: string): void {
  * restart the old code. Only the ExecStart entry is replaced; the port and
  * every other line stay as the operator installed them. Exported so `update`
  * can repair a unit it is not about to start.
+ *
+ * Returns false when the file was rewritten but `daemon-reload` failed:
+ * systemd still holds the previous unit, and starting it would run stale code.
  */
-export function refreshSystemdUnitEntry(entryPath: string): void {
+export function refreshSystemdUnitEntry(entryPath: string): boolean {
   const unitPath = systemdUnitPath();
   // No existsSync first: the unit can disappear between a check and this read,
   // and a missing unit simply means there is nothing to repair. Let the read
@@ -614,9 +638,9 @@ export function refreshSystemdUnitEntry(entryPath: string): void {
   try {
     content = readFileSync(unitPath, 'utf-8');
   } catch (err) {
-    if ((err as NodeJS.ErrnoException).code === 'ENOENT') return;
+    if ((err as NodeJS.ErrnoException).code === 'ENOENT') return true;
     warnUnitEntryFailure(err);
-    return;
+    return true;
   }
   try {
     const entry = stableEntryPath(entryPath);
@@ -624,20 +648,22 @@ export function refreshSystemdUnitEntry(entryPath: string): void {
       /^(ExecStart=.*?)\s+"[^"]*dist[/\\]index\.js"/m,
       (_line, prefix: string) => `${prefix} "${entry}"`,
     );
-    if (updated === content) return;
+    if (updated === content) return true;
     writeUnitAtomically(unitPath, updated);
     logger.info('Updated the systemd unit entry point to %s', entry);
   } catch (err) {
     warnUnitEntryFailure(err);
-    return;
+    return true;
   }
   try {
     runSystemctl(['daemon-reload']);
+    return true;
   } catch (err) {
     logger.warn(
-      'The systemd unit was updated, but `systemctl daemon-reload` failed: %s. systemd may still have the previous unit loaded; run `saros-proxy autostart install` or `systemctl --user daemon-reload` and restart.',
+      'The systemd unit was updated, but `systemctl daemon-reload` failed: %s. systemd may still have the previous unit loaded and starting it would run the old code; run `systemctl --user daemon-reload` and `saros-proxy start`.',
       describeSystemctlError(err),
     );
+    return false;
   }
 }
 
@@ -645,10 +671,16 @@ export function refreshSystemdUnitEntry(entryPath: string): void {
  * Start the user unit (used by `update` after reinstalling). `entryPoint` is
  * the package update installed; the unit is repaired to it before starting.
  * Without one (a restart of the current package), the unit is left as
- * installed: rewriting it from a checkout would point systemd at the checkout.
+ * installed. A failed reload refuses the start: systemd would start the
+ * previous unit, and reporting that failure now is what turns it into a
+ * rollback instead of a silently stale restart.
  */
 export function startSystemdUnit(entryPoint?: string): void {
-  if (entryPoint !== undefined) refreshSystemdUnitEntry(entryPoint);
+  if (entryPoint !== undefined && !refreshSystemdUnitEntry(entryPoint)) {
+    throw new Error(
+      'systemd could not reload the rewritten unit, so it still has the previous entry loaded; refusing to start it',
+    );
+  }
   runSystemctl(['start', SYSTEMD_UNIT_NAME]);
 }
 
