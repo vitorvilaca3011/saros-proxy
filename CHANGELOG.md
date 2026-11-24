@@ -7,6 +7,44 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [1.4.0] - 2026-11-24
+
+### Added
+
+- **`update` reinstalls with the package manager that installed the package.**
+  It used to assume npm: the global prefix came from `npm root -g` and the
+  reinstall ran `npm install -g`, so a `pnpm add -g` or `yarn global add`
+  install was refused as "not a global npm package" as soon as a release
+  existed. `update` now probes `npm root -g`, `pnpm root -g` and
+  `yarn global dir`, compares canonical paths and uses the manager that owns
+  the running package for the install, the rollback, the restart entry point
+  and the messages. A link into a checkout (`npm link`, `pnpm link`) is still
+  refused unless `--force` is passed, and a custom pnpm `virtual-store-dir`
+  inside the global directory is accepted. pnpm and yarn install commands are
+  in the README, and `package.json` declares the build scripts pnpm 10 would
+  otherwise block (`esbuild`, plus `fsevents` on macOS).
+
+### Fixed
+
+- **Autostart entries no longer pin a versioned package path.** On a pnpm
+  install the real package lives in `.pnpm/saros-proxy@<version>/…`, and both
+  the systemd unit and the Windows login entry used to keep that path: after an
+  update the unit restarted the previous release (or failed once the store was
+  pruned). Entries now name the unversioned `node_modules/saros-proxy` entry
+  point, the unit is written through a temp file and `rename` (a crash cannot
+  truncate it, the file keeps its mode and a symlinked unit stays a symlink),
+  and `update` repairs the unit after any successful install — including
+  `--force` and the "already on the latest version" path — while a stale VBS or
+  registry value is reported with the exact `autostart install --method` that
+  fixes it.
+- **Starting the daemon no longer depends on a directory the install can
+  delete.** The child used to spawn with the package directory as its working
+  directory and had no `error` listener: a missing directory emitted `error`
+  asynchronously, which crashed the CLI, and the PID file could be written with
+  `undefined`. The working directory now follows the entry point, a spawn error
+  is reported as a normal start failure, and the PID is written only when the
+  process exists.
+
 ## [1.3.4] - 2026-11-16
 
 ### Added
@@ -774,6 +812,7 @@ First stable release. The public surface — the `/v1/*` and `/zen/go/v1/*` rout
 - Non-root Docker user
 
 [Unreleased]: https://github.com/vitorvilaca3011/saros-proxy/compare/v1.3.4...HEAD
+[1.4.0]: https://github.com/vitorvilaca3011/saros-proxy/compare/v1.3.4...v1.4.0
 [1.3.4]: https://github.com/vitorvilaca3011/saros-proxy/compare/v1.3.3...v1.3.4
 [1.3.3]: https://github.com/vitorvilaca3011/saros-proxy/compare/v1.3.2...v1.3.3
 [1.3.2]: https://github.com/vitorvilaca3011/saros-proxy/compare/v1.3.1...v1.3.2
