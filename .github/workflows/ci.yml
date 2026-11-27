@@ -175,15 +175,28 @@ jobs:
 
       - uses: github/codeql-action/analyze@33d7b85da1a04171e211befe2c739303b9a4c066 # v4.39.3
 
-  docker-build:
-    name: Verify Docker build
+  docker-smoke:
+    name: Docker image runs, not just builds
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 25
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+      - name: Set up Node.js
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 22
+          cache: npm
 
-      - name: Build image (no push)
-        run: docker build -t saros-proxy:ci .
+      - name: Install dependencies
+        run: npm ci
+
+      # Builds once and proves the container runs: mounted config keys,
+      # HEALTHCHECK, non-root, env-only keys. The JSON report is not decoration:
+      # without the jq guard, deleting RUN_DOCKER_SMOKE below would leave the
+      # suite skipped and this job green with zero tests executed.
+      - name: Docker smoke test
+        run: |
+          RUN_DOCKER_SMOKE=1 npx vitest run test/docker-install.test.ts \
+            --reporter=default --reporter=json --outputFile=/tmp/vitest-docker.json
+          jq -e '.numTotalTests == 1 and .numPassedTests == 1' /tmp/vitest-docker.json
