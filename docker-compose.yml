@@ -16,7 +16,6 @@ services:
     # A published port is DNAT'ed to the container interface, so 127.0.0.1
     # inside would never see host traffic. YAML `host` beats PROXY_HOST, but
     # CLI args are applied last, so this is the override that works.
-    command: ["--host", "0.0.0.0"]
     volumes:
       # Mount config from host (create config.yaml from config.example.yaml first)
       - ./config.yaml:/app/config.yaml:ro
