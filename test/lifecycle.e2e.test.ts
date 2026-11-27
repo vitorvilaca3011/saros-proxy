@@ -62,9 +62,11 @@ class MockLifecycleUpstream {
       { key: readFileSync(TLS_KEY), cert: readFileSync(TLS_CERT) },
       (req, res) => this.handle(req, res),
     );
-    await new Promise<void>((resolve) => {
-      this.server!.listen(0, '127.0.0.1', () => {
-        this.port = (this.server!.address() as { port: number }).port;
+    const server = this.server;
+    await new Promise<void>((resolve, reject) => {
+      server.once('error', reject);
+      server.listen(0, '127.0.0.1', () => {
+        this.port = (server.address() as { port: number }).port;
         resolve();
       });
     });
@@ -158,6 +160,10 @@ interface LifecycleCase {
   pidFile: string;
   logPath: string;
   port: number;
+  /** Upstream the case config points at; reused when the port is rewritten. */
+  upstreamPort: number;
+  /** Last PID `start` reported: cleanup fallback when the PID file is gone. */
+  lastPid?: number;
   env: NodeJS.ProcessEnv;
 }
 
@@ -329,6 +335,19 @@ function stateDirFor(home: string): string {
     : join(home, '.config', 'saros');
 }
 
+function writeCaseConfig(stateDir: string, port: number, upstreamPort: number): void {
+  writeFileSync(join(stateDir, 'config.yaml'), stringifyYaml({
+    port,
+    host: '127.0.0.1',
+    upstreamBaseUrl: `https://127.0.0.1:${upstreamPort}`,
+    circuitBreakerThreshold: 3,
+    circuitBreakerCooldownMs: 5_000,
+    requestTimeoutMs: 10_000,
+    allowedOrigins: ['http://127.0.0.1:*'],
+    keys: [{ label: KEY_LABEL, key: API_KEY }],
+  }), 'utf-8');
+}
+
 /**
  * One isolated installation per case: HOME/USERPROFILE, XDG_CONFIG_HOME and
  * LOCALAPPDATA all point at the temp dir, so config, pid, log and models.json
@@ -342,16 +361,7 @@ async function createCase(upstreamPort: number): Promise<LifecycleCase> {
   mkdirSync(stateDir, { recursive: true });
 
   const port = await getRandomPort();
-  writeFileSync(join(stateDir, 'config.yaml'), stringifyYaml({
-    port,
-    host: '127.0.0.1',
-    upstreamBaseUrl: `https://127.0.0.1:${upstreamPort}`,
-    circuitBreakerThreshold: 3,
-    circuitBreakerCooldownMs: 5_000,
-    requestTimeoutMs: 10_000,
-    allowedOrigins: ['http://127.0.0.1:*'],
-    keys: [{ label: KEY_LABEL, key: API_KEY }],
-  }), 'utf-8');
+  writeCaseConfig(stateDir, port, upstreamPort);
 
   const env: NodeJS.ProcessEnv = {
     ...process.env,
@@ -377,38 +387,55 @@ async function createCase(upstreamPort: number): Promise<LifecycleCase> {
     pidFile: join(stateDir, 'daemon.pid'),
     logPath: join(stateDir, 'daemon.log'),
     port,
+    upstreamPort,
     env,
   };
   activeCases.add(lifecycleCase);
   return lifecycleCase;
 }
 
-/** Kill whatever the PID file names, even when an assertion failed midway. */
-async function killDaemonFromPidFile(c: LifecycleCase): Promise<void> {
-  let raw: string;
+function readPidFileValue(c: LifecycleCase): number | null {
   try {
-    raw = readFileSync(c.pidFile, 'utf-8').trim();
+    const pid = Number(readFileSync(c.pidFile, 'utf-8').trim());
+    return Number.isInteger(pid) && pid > 0 ? pid : null;
   } catch {
-    return;
+    return null;
   }
-  const pid = Number(raw);
-  if (!Number.isInteger(pid) || pid <= 0) return;
+}
+
+/**
+ * A `stop` that removes the PID file without killing the process is the
+ * regression this suite exists for. Fall back to the last PID `start`
+ * reported, but only while something still serves this case's port: a PID
+ * recycled by the OS must never be signalled.
+ */
+async function pidFromLiveFallback(c: LifecycleCase): Promise<number | null> {
+  if (c.lastPid === undefined) return null;
+  return (await fetchHealth(c.port)) === null ? null : c.lastPid;
+}
+
+/**
+ * Kill the daemon this case started, even when an assertion failed midway.
+ * Returns false when the process survived the kill deadline: the PID file is
+ * kept and the case stays registered so `afterAll` can retry.
+ */
+async function killDaemonFromPidFile(c: LifecycleCase): Promise<boolean> {
+  const pid = readPidFileValue(c) ?? await pidFromLiveFallback(c);
+  if (pid === null) return true;
   killPid(pid);
-  await waitFor(() => !isProcessAlive(pid), 10_000);
+  if (!(await waitFor(() => !isProcessAlive(pid), 10_000))) return false;
   try {
     rmSync(c.pidFile, { force: true });
   } catch {
     // best effort: the temp dir goes away anyway
   }
+  return true;
 }
 
 async function cleanupCase(c: LifecycleCase): Promise<void> {
-  try {
-    await killDaemonFromPidFile(c);
-  } finally {
-    activeCases.delete(c);
-    await removeTempDir(c.home);
-  }
+  if (!(await killDaemonFromPidFile(c))) return;
+  activeCases.delete(c);
+  await removeTempDir(c.home);
 }
 
 // ---------------------------------------------------------------------------
@@ -422,16 +449,34 @@ interface StartedDaemon {
   result: CliResult;
 }
 
+/**
+ * Start the case's daemon and wait for `/health`. Only for cases that expect a
+ * healthy daemon: the squatter case runs `runCli` directly, so the port
+ * retry below cannot mask the conflict path.
+ */
 async function startDaemon(c: LifecycleCase): Promise<StartedDaemon> {
-  const result = await runCli(c, ['start']);
+  let result = await runCli(c, ['start']);
+  if (
+    result.code !== 0 &&
+    `${result.stdout}\n${result.stderr}`.includes('Choose a different port')
+  ) {
+    // getRandomPort released the port before the daemon bound it; retry once.
+    const port = await getRandomPort();
+    writeCaseConfig(c.stateDir, port, c.upstreamPort);
+    c.port = port;
+    result = await runCli(c, ['start']);
+  }
   expect(result.code, diagnostics(c, result)).toBe(0);
   const match = result.stdout.match(/Proxy started \(PID (\d+)\) on port (\d+)/);
   expect(match, diagnostics(c, result)).not.toBeNull();
   const pid = Number(match![1]);
   const port = Number(match![2]);
+  c.lastPid = pid;
   expect(port).toBe(c.port);
   const health = await pollHealth(port, 15_000);
   expect(health, `daemon did not answer /health\n${diagnostics(c, result)}`).not.toBeNull();
+  expect(isProcessAlive(pid), `daemon.pid names PID ${pid}, which is not alive\n${diagnostics(c, result)}`)
+    .toBe(true);
   return { pid, port, health: health!, result };
 }
 
@@ -483,6 +528,10 @@ describe('daemon lifecycle e2e (real binary)', () => {
       await cleanupCase(c);
     }
     await upstream.stop();
+    if (activeCases.size > 0) {
+      const dirs = [...activeCases].map((c) => c.stateDir).join(', ');
+      throw new Error(`daemon cleanup failed for ${activeCases.size} case(s): ${dirs}`);
+    }
   });
 
   it('start spawns a detached daemon and writes its PID', async () => {
@@ -532,7 +581,9 @@ describe('daemon lifecycle e2e (real binary)', () => {
       };
       expect(body.choices?.[0]?.message?.content).toBe(MOCK_REPLY);
 
-      // The access log records the effective upstream path, not the client one.
+      // The access log records the canonical route path (`/zen/go/v1/...`),
+      // not the client's `/v1/...`; it is not remapped to the provider's
+      // upstream prefix.
       const entry = await pollRequestComplete(c, '/zen/go/v1/chat/completions', 10_000);
       expect(entry, diagnostics(c)).not.toBeNull();
       expect(entry!.status).toBe(200);
@@ -555,13 +606,6 @@ describe('daemon lifecycle e2e (real binary)', () => {
       expect(await waitFor(() => !existsSync(c.pidFile), 10_000)).toBe(true);
       expect(await pollHealthDown(started.port, 10_000)).toBe(true);
       expect(await waitFor(() => !isProcessAlive(started.pid), 10_000)).toBe(true);
-      let killError: NodeJS.ErrnoException | null = null;
-      try {
-        process.kill(started.pid, 0);
-      } catch (err) {
-        killError = err as NodeJS.ErrnoException;
-      }
-      expect(killError?.code).toBe('ESRCH');
     } finally {
       await cleanupCase(c);
     }
@@ -591,8 +635,10 @@ describe('daemon lifecycle e2e (real binary)', () => {
         squatter.listen(c.port, '127.0.0.1', () => resolve());
       });
       const start = await runCli(c, ['start']);
+      const output = `${start.stdout}\n${start.stderr}`;
       expect(start.code, diagnostics(c, start)).not.toBe(0);
-      expect(`${start.stdout}\n${start.stderr}`).toMatch(/already in use|EADDRINUSE/i);
+      expect(output).toContain('Choose a different port');
+      expect(output).not.toContain('appears to be running');
       expect(existsSync(c.pidFile)).toBe(false);
     } finally {
       await closeServer(squatter);
