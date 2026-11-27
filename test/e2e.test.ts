@@ -1431,6 +1431,10 @@ describe('12. Request Body Limits', () => {
   it('rejects request body larger than 10MB with 413', async () => {
     const largeBody = 'x'.repeat(11 * 1024 * 1024); // ~11MB — exceeds 10MB limit
 
+    // A usage probe from an earlier case can land after mockControl.reset();
+    // compare before and after so only this request is measured.
+    const requestsBefore = allRequests().length;
+
     const res = await pf(proxy.port, '/zen/go/v1/chat/completions', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -1445,8 +1449,9 @@ describe('12. Request Body Limits', () => {
     const body = await res.json() as Record<string, unknown>;
     expect(body.error).toBe('Request body too large');
 
-    // Verify no request was forwarded to the upstream
-    expect(allRequests().length).toBe(0);
+    // Verify this request was not forwarded to the upstream
+    expect(allRequests().length).toBe(requestsBefore);
+    expect(chatRequests().length).toBe(0);
   });
 
   it('accepts request body near but under 10MB limit', async () => {
