@@ -14,7 +14,9 @@ afterEach(() => {
   vi.unstubAllGlobals();
 });
 
-describe('opencode-go catalog & affinity', () => {
+// Order is the fixture: the "before the catalog loads" cases assert cold
+// module state, which only exists before fetchCatalog runs in this file.
+describe('opencode-go catalog & affinity', { shuffle: false }, () => {
   const CATALOG = [
     { id: 'deepseek-v4-flash' },
     { id: 'glm-5' },

@@ -1,4 +1,5 @@
 import { describe, it, expect, beforeAll, beforeEach, afterEach, vi } from 'vitest';
+import type { MockInstance } from 'vitest';
 import { existsSync, readFileSync, readdirSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { join } from 'node:path';
 import {
@@ -19,6 +20,37 @@ import { loadModelsCatalog } from '../src/models-catalog.js';
 import { getSarosDir, type ProxyConfig } from '../src/config.js';
 import { getVersion } from '../src/version.js';
 import { MAX_BODY_SIZE } from '../src/constants.js';
+
+/**
+ * Mock fetch so every call resolves its own Response.
+ *
+ * A background catalog refresh shares the mocked fetch with the request under
+ * test. A single Response instance handed to both callers arrives body-less at
+ * the second one, which turns the fixture into an order-dependent failure.
+ */
+function mockFetch(...args: ConstructorParameters<typeof Response>): MockInstance<typeof fetch> {
+  return vi.spyOn(globalThis, 'fetch').mockImplementation(async () => new Response(...args));
+}
+
+/**
+ * Mock fetch with a fresh body per call. A ReadableStream is single-use, and
+ * background usage probes hit this same mock, so a shared stream would reach
+ * one of the callers already locked.
+ */
+function mockFetchFrom(
+  body: () => ConstructorParameters<typeof Response>[0],
+  init?: ResponseInit,
+): MockInstance<typeof fetch> {
+  return vi.spyOn(globalThis, 'fetch').mockImplementation(async () => new Response(body(), init));
+}
+
+/**
+ * Calls made to one upstream path. Background catalog and usage probes share
+ * the mocked fetch, so the request under test is not always call 0.
+ */
+function upstreamCallsTo(mock: MockInstance<typeof fetch>, pathSuffix: string) {
+  return mock.mock.calls.filter(([url]) => String(url).endsWith(pathSuffix));
+}
 
 describe('buildUpstreamUrl', () => {
   it('combines base URL and path', () => {
@@ -485,11 +517,9 @@ describe('createProxyApp — standard proxy pipeline', () => {
 
   it('forwards a decision-model body untouched and books its usage', async () => {
     resetTokenUsage();
-    const fetchMock = vi.spyOn(globalThis, 'fetch').mockResolvedValue(
-      new Response(
-        JSON.stringify({ probabilities: { yes: 0.7 }, usage: { input_tokens: 3, output_tokens: 0, total_tokens: 3 } }),
-        { status: 200, headers: { 'content-type': 'application/json' } },
-      ),
+    const fetchMock = mockFetch(
+      JSON.stringify({ probabilities: { yes: 0.7 }, usage: { input_tokens: 3, output_tokens: 0, total_tokens: 3 } }),
+      { status: 200, headers: { 'content-type': 'application/json' } },
     );
     const payload = { model: 'typesafe/jev', state: 'payments failing', questions: [{ text: 'will it recover' }] };
     const app = createProxyApp(makeConfig());
@@ -502,31 +532,29 @@ describe('createProxyApp — standard proxy pipeline', () => {
     await res.text();
 
     // /systemone is not a chat message: no stream_options injection, no body rewrite.
-    const sent = JSON.parse(String((fetchMock.mock.calls[0][1] as RequestInit).body)) as Record<string, unknown>;
+    const sent = JSON.parse(String((upstreamCallsTo(fetchMock, '/systemone')[0][1] as RequestInit).body)) as Record<string, unknown>;
     expect(sent).toEqual(payload);
     const recorded = Object.values(getKeyTokenUsage().keys);
     expect(recorded[0]).toMatchObject({ requests: 1, promptTokens: 3, totalTokens: 3 });
   });
 
   it('forwards successful requests and sanitizes downstream headers', async () => {
-    const fetchMock = vi.spyOn(globalThis, 'fetch').mockResolvedValue(
-      new Response('{"ok":true}', {
-        status: 200,
-        headers: {
-          'content-type': 'application/json',
-          'set-cookie': 'session=abc',
-          'x-request-id': 'upstream-123',
-          'connection': 'keep-alive',
-          'transfer-encoding': 'chunked',
-          'keep-alive': 'timeout=5',
-          'proxy-authenticate': 'Basic',
-          'proxy-authorization': 'secret',
-          'te': 'trailers',
-          'trailer': 'x-checksum',
-          'upgrade': 'h2c',
-        },
-      }),
-    );
+    const fetchMock = mockFetch('{"ok":true}', {
+      status: 200,
+      headers: {
+        'content-type': 'application/json',
+        'set-cookie': 'session=abc',
+        'x-request-id': 'upstream-123',
+        'connection': 'keep-alive',
+        'transfer-encoding': 'chunked',
+        'keep-alive': 'timeout=5',
+        'proxy-authenticate': 'Basic',
+        'proxy-authorization': 'secret',
+        'te': 'trailers',
+        'trailer': 'x-checksum',
+        'upgrade': 'h2c',
+      },
+    });
 
     const app = createProxyApp(makeConfig());
     const res = await app.request('/v1/chat/completions', {
@@ -552,17 +580,18 @@ describe('createProxyApp — standard proxy pipeline', () => {
     expect(res.headers.get('X-Proxy-Key-Label')).toBe('alpha');
     expect(res.headers.get('X-Proxy-Request-Id')).toBeTruthy();
 
-    // Upstream call: path rewritten to /zen/go/v1/, auth replaced by key
-    expect(String(fetchMock.mock.calls[0][0])).toBe('https://example.com/zen/go/v1/chat/completions');
-    const init = fetchMock.mock.calls[0][1] as RequestInit;
+    // Upstream call: path rewritten to /zen/go/v1/, auth replaced by key.
+    // Selected by URL because the background catalog refresh shares the mock.
+    const chatCall = upstreamCallsTo(fetchMock, '/zen/go/v1/chat/completions')[0];
+    expect(chatCall).toBeDefined();
+    expect(String(chatCall![0])).toBe('https://example.com/zen/go/v1/chat/completions');
+    const init = chatCall![1] as RequestInit;
     const headers = init.headers as Headers;
     expect(headers.get('authorization')).toBe('Bearer sk-alpha-key-0001');
   });
 
   it('replaces a client browser User-Agent with the opencode-go CLI identity', async () => {
-    const fetchMock = vi.spyOn(globalThis, 'fetch').mockImplementation(async () =>
-      new Response('{"ok":true}', { status: 200 }),
-    );
+    const fetchMock = mockFetch('{"ok":true}', { status: 200 });
     const app = createProxyApp(makeConfig({
       keys: [{ label: 'oc', key: 'oc_sk_' + 'a'.repeat(40), provider: 'opencode-go' }],
     }));
@@ -582,9 +611,7 @@ describe('createProxyApp — standard proxy pipeline', () => {
   });
 
   it('leaves non-streaming bodies byte-identical (no usage option injected)', async () => {
-    const fetchMock = vi.spyOn(globalThis, 'fetch').mockResolvedValue(
-      new Response('{"ok":true}', { status: 200 }),
-    );
+    const fetchMock = mockFetch('{"ok":true}', { status: 200 });
     const app = createProxyApp(makeConfig());
     const payload = JSON.stringify({ model: 'm', messages: [], stream: false });
 
@@ -594,14 +621,16 @@ describe('createProxyApp — standard proxy pipeline', () => {
       headers: { 'content-type': 'application/json' },
     })).text();
 
+    // Select the chat call by URL: a background catalog refresh may also use
+    // the same fetch mock and would otherwise occupy index 0.
+    const chatCall = upstreamCallsTo(fetchMock, '/zen/go/v1/chat/completions')[0];
+    expect(chatCall).toBeDefined();
     // Exact equality: the body was neither re-serialized nor extended.
-    expect(String((fetchMock.mock.calls[0][1] as RequestInit).body)).toBe(payload);
+    expect(String((chatCall![1] as RequestInit).body)).toBe(payload);
   });
 
   it('returns sanitized client errors for 400 without penalising keys', async () => {
-    vi.spyOn(globalThis, 'fetch').mockResolvedValue(
-      new Response(JSON.stringify({ error: { message: 'bad input' } }), { status: 400 }),
-    );
+    mockFetch(JSON.stringify({ error: { message: 'bad input' } }), { status: 400 });
     const app = createProxyApp(makeConfig());
     const res = await app.request('/v1/chat/completions', {
       method: 'POST',
@@ -620,9 +649,7 @@ describe('createProxyApp — standard proxy pipeline', () => {
   });
 
   it('falls back to the raw error string when the upstream error body has one', async () => {
-    vi.spyOn(globalThis, 'fetch').mockResolvedValue(
-      new Response('{"error": "plain string"}', { status: 400 }),
-    );
+    mockFetch('{"error": "plain string"}', { status: 400 });
     const app = createProxyApp(makeConfig());
     const res = await app.request('/v1/chat/completions', {
       method: 'POST',
@@ -634,7 +661,7 @@ describe('createProxyApp — standard proxy pipeline', () => {
   });
 
   it('uses a generic message when the upstream error body has no error field', async () => {
-    vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response('{}', { status: 400 }));
+    mockFetch('{}', { status: 400 });
     const app = createProxyApp(makeConfig());
     const res = await app.request('/v1/chat/completions', {
       method: 'POST',
@@ -646,7 +673,7 @@ describe('createProxyApp — standard proxy pipeline', () => {
   });
 
   it('uses a generic message when the upstream error body is not JSON', async () => {
-    vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response('oops not json', { status: 400 }));
+    mockFetch('oops not json', { status: 400 });
     const app = createProxyApp(makeConfig());
     const res = await app.request('/v1/chat/completions', {
       method: 'POST',
@@ -761,9 +788,7 @@ describe('createProxyApp — standard proxy pipeline', () => {
   });
 
   it('explains why every key is unavailable in the 503 body', async () => {
-    vi.spyOn(globalThis, 'fetch').mockResolvedValue(
-      new Response('{"error":"invalid key"}', { status: 401 }),
-    );
+    mockFetch('{"error":"invalid key"}', { status: 401 });
     const app = createProxyApp(makeConfig({
       keys: [{ label: 'cc', key: 'user_cc-key-0001', provider: 'commandcode' }],
     }));
@@ -797,9 +822,7 @@ describe('createProxyApp — standard proxy pipeline', () => {
   });
 
   it('reports a key retired in config as disabled_by_config', async () => {
-    vi.spyOn(globalThis, 'fetch').mockResolvedValue(
-      new Response('{"error":"invalid key"}', { status: 401 }),
-    );
+    mockFetch('{"error":"invalid key"}', { status: 401 });
     const app = createProxyApp(makeConfig({
       keys: [
         { label: 'live', key: 'user_live_key_00001', provider: 'commandcode' },
@@ -828,12 +851,13 @@ describe('createProxyApp — standard proxy pipeline', () => {
     expect(health.keys.find((key) => key.label === 'retired')?.disabledByConfig).toBe(true);
   });
   it('forwards GET requests without a body', async () => {
-    const fetchMock = vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response('{}', { status: 200 }));
+    const fetchMock = mockFetch('{}', { status: 200 });
     const app = createProxyApp(makeConfig());
     const res = await app.request('/zen/go/v1/chat/completions');
     expect(res.status).toBe(200);
-    expect(String(fetchMock.mock.calls[0][0])).toBe('https://example.com/zen/go/v1/chat/completions');
-    const init = fetchMock.mock.calls[0][1] as RequestInit;
+    const call = upstreamCallsTo(fetchMock, '/chat/completions')[0];
+    expect(String(call[0])).toBe('https://example.com/zen/go/v1/chat/completions');
+    const init = call[1] as RequestInit;
     expect(init.body).toBeUndefined();
   });
 });
@@ -926,7 +950,7 @@ describe('createProxyApp — SAROS_CAPTURE_4XX diagnostics', () => {
 
   it('truncates the captured upstream error and request body', async () => {
     process.env.SAROS_CAPTURE_4XX = '1';
-    vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response('e'.repeat(3_000), { status: 400 }));
+    mockFetch('e'.repeat(3_000), { status: 400 });
     const app = createProxyApp(makeConfig());
     const body = JSON.stringify({ model: 'm', messages: [], filler: 'x'.repeat(120_000) });
 
@@ -939,7 +963,7 @@ describe('createProxyApp — SAROS_CAPTURE_4XX diagnostics', () => {
   });
 
   it('writes nothing when the flag is off', async () => {
-    vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response('{"error":"nope"}', { status: 400 }));
+    mockFetch('{"error":"nope"}', { status: 400 });
     const app = createProxyApp(makeConfig());
 
     await (await postChat(app, '{}')).text();
@@ -1041,12 +1065,10 @@ describe('createProxyApp — streaming pipeline', () => {
   }
 
   it('streams SSE chunks and sets streaming headers', async () => {
-    vi.spyOn(globalThis, 'fetch').mockResolvedValue(
-      new Response(sseStream('data: {"type":"chat","content":"hi"}\n\n'), {
-        status: 200,
-        headers: { 'content-type': 'text/event-stream' },
-      }),
-    );
+    mockFetchFrom(() => sseStream('data: {"type":"chat","content":"hi"}\n\n'), {
+      status: 200,
+      headers: { 'content-type': 'text/event-stream' },
+    });
     const app = createProxyApp(makeConfig());
     const res = await streamRequest(app);
     expect(res.status).toBe(200);
@@ -1059,9 +1081,7 @@ describe('createProxyApp — streaming pipeline', () => {
   });
 
   it('detects SSE error markers and emits proxy_error', async () => {
-    vi.spyOn(globalThis, 'fetch').mockResolvedValue(
-      new Response(sseStream('data: {"error":"boom"}\n\n'), { status: 200 }),
-    );
+    mockFetchFrom(() => sseStream('data: {"error":"boom"}\n\n'), { status: 200 });
     const app = createProxyApp(makeConfig({ circuitBreakerThreshold: 1 }));
     const res = await streamRequest(app);
     const text = await res.text();
@@ -1075,16 +1095,15 @@ describe('createProxyApp — streaming pipeline', () => {
   });
 
   it('passes through comment events, benign data, and invalid JSON', async () => {
-    vi.spyOn(globalThis, 'fetch').mockResolvedValue(
-      new Response(
+    mockFetchFrom(
+      () =>
         sseStream(
           ': keep-alive\n\n',
           'data: {"type":"chat","content":"ok"}\n\n',
           'data: not-json\n\n',
           'data: null\n\n',
         ),
-        { status: 200 },
-      ),
+      { status: 200 },
     );
     const app = createProxyApp(makeConfig());
     const res = await streamRequest(app);
@@ -1096,7 +1115,7 @@ describe('createProxyApp — streaming pipeline', () => {
 
   it('buffers partial SSE events split across chunks', async () => {
     const encoder = new TextEncoder();
-    const upstream = new ReadableStream<Uint8Array>({
+    const makeUpstream = () => new ReadableStream<Uint8Array>({
       start(controller) {
         controller.enqueue(encoder.encode('')); // empty chunk
         controller.enqueue(encoder.encode('data: {"type":"ch'));
@@ -1104,7 +1123,7 @@ describe('createProxyApp — streaming pipeline', () => {
         controller.close();
       },
     });
-    vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response(upstream, { status: 200 }));
+    mockFetchFrom(makeUpstream, { status: 200 });
     const app = createProxyApp(makeConfig());
     const res = await streamRequest(app);
     const text = await res.text();
@@ -1112,7 +1131,7 @@ describe('createProxyApp — streaming pipeline', () => {
   });
 
   it('returns 502 when the streaming response has no body', async () => {
-    vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response(null, { status: 200 }));
+    mockFetch(null, { status: 200 });
     const app = createProxyApp(makeConfig());
     const res = await streamRequest(app);
     expect(res.status).toBe(502);
@@ -1121,12 +1140,12 @@ describe('createProxyApp — streaming pipeline', () => {
   });
 
   it('reports stream read errors with proxy_error', async () => {
-    const upstream = new ReadableStream<Uint8Array>({
+    const makeUpstream = () => new ReadableStream<Uint8Array>({
       pull() {
         throw new Error('connection reset');
       },
     });
-    vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response(upstream, { status: 200 }));
+    mockFetchFrom(makeUpstream, { status: 200 });
     const app = createProxyApp(makeConfig());
     const res = await streamRequest(app);
     const text = await res.text();
@@ -1144,7 +1163,7 @@ describe('createProxyApp — streaming pipeline', () => {
   });
 
   it('fails over streaming requests on upstream error responses', async () => {
-    vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response('oops', { status: 500 }));
+    mockFetch('oops', { status: 500 });
     const app = createProxyApp(makeConfig());
     const res = await streamRequest(app);
     expect(res.status).toBe(502);
@@ -1160,7 +1179,7 @@ describe('createProxyApp — streaming pipeline', () => {
   it('cancels the upstream stream when the client disconnects', async () => {
     let upstreamCancelled = false;
     const encoder = new TextEncoder();
-    const upstream = new ReadableStream<Uint8Array>({
+    const makeUpstream = () => new ReadableStream<Uint8Array>({
       start(controller) {
         controller.enqueue(encoder.encode('data: {"type":"chat","content":"hi"}\n\n'));
         // deliberately keep the stream open
@@ -1169,7 +1188,7 @@ describe('createProxyApp — streaming pipeline', () => {
         upstreamCancelled = true;
       },
     });
-    vi.spyOn(globalThis, 'fetch').mockResolvedValue(new Response(upstream, { status: 200 }));
+    mockFetchFrom(makeUpstream, { status: 200 });
     const app = createProxyApp(makeConfig());
     const res = await streamRequest(app);
     const reader = res.body!.getReader();
@@ -1179,20 +1198,19 @@ describe('createProxyApp — streaming pipeline', () => {
   });
 
   it('asks the upstream for streamed token usage', async () => {
-    const fetchMock = vi.spyOn(globalThis, 'fetch').mockResolvedValue(
-      new Response(
+    const fetchMock = mockFetchFrom(
+      () =>
         sseStream(
           'data: {"choices":[{"delta":{"content":"hi"}}],"usage":null}\n\n',
           'data: {"choices":[{"delta":{}}],"usage":{"prompt_tokens":5,"completion_tokens":2,"total_tokens":7}}\n\n',
         ),
-        { status: 200 },
-      ),
+      { status: 200 },
     );
     const app = createProxyApp(makeConfig());
     const res = await streamRequest(app);
     const text = await res.text();
 
-    const body = JSON.parse(String((fetchMock.mock.calls[0][1] as RequestInit).body)) as {
+    const body = JSON.parse(String((upstreamCallsTo(fetchMock, '/chat/completions')[0][1] as RequestInit).body)) as {
       stream_options?: unknown;
     };
     expect(body.stream_options).toEqual({ include_usage: true });
@@ -1202,16 +1220,15 @@ describe('createProxyApp — streaming pipeline', () => {
 
   it('books streamed usage once when the upstream repeats it', async () => {
     resetTokenUsage();
-    vi.spyOn(globalThis, 'fetch').mockResolvedValue(
-      new Response(
+    mockFetchFrom(
+      () =>
         sseStream(
           'data: {"choices":[{"delta":{"content":"hi"}}],"usage":null}\n\n',
           'data: {"choices":[{"index":0,"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":5,"completion_tokens":2,"total_tokens":7}}\n\n',
           'data: {"choices":[],"usage":{"prompt_tokens":5,"completion_tokens":2,"total_tokens":7}}\n\n',
           'data: [DONE]\n\n',
         ),
-        { status: 200 },
-      ),
+      { status: 200 },
     );
     const app = createProxyApp(makeConfig());
     await (await streamRequest(app)).text();
@@ -1230,14 +1247,13 @@ describe('createProxyApp — streaming pipeline', () => {
 
   it('books usage nested under response.usage (OpenAI Responses schema)', async () => {
     resetTokenUsage();
-    vi.spyOn(globalThis, 'fetch').mockResolvedValue(
-      new Response(
+    mockFetchFrom(
+      () =>
         sseStream(
           'event: response.output_text.delta\ndata: {"type":"response.output_text.delta","delta":"hi"}\n\n',
           'event: response.completed\ndata: {"type":"response.completed","response":{"id":"resp_1","usage":{"input_tokens":11,"output_tokens":4,"total_tokens":15}}}\n\n',
         ),
-        { status: 200, headers: { 'content-type': 'text/event-stream' } },
-      ),
+      { status: 200, headers: { 'content-type': 'text/event-stream' } },
     );
     const app = createProxyApp(makeConfig());
     const res = await app.request('/v1/responses', {
@@ -1261,18 +1277,15 @@ describe('createProxyApp — streaming pipeline', () => {
 
   it('books usage split across Anthropic message_start and message_delta', async () => {
     resetTokenUsage();
-    // Fresh Response per call: the usage-refresh probe also calls fetch, and a
-    // shared instance would arrive with its body already consumed.
-    vi.spyOn(globalThis, 'fetch').mockImplementation(async () =>
-      new Response(
+    mockFetchFrom(
+      () =>
         sseStream(
           'event: message_start\ndata: {"type":"message_start","message":{"id":"msg_1","usage":{"input_tokens":25,"output_tokens":1}}}\n\n',
           'event: content_block_delta\ndata: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"hi"}}\n\n',
           'event: message_delta\ndata: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"input_tokens":5,"output_tokens":15}}\n\n',
           'event: message_stop\ndata: {"type":"message_stop"}\n\n',
         ),
-        { status: 200, headers: { 'content-type': 'text/event-stream' } },
-      ),
+      { status: 200, headers: { 'content-type': 'text/event-stream' } },
     );
     const app = createProxyApp(makeConfig());
     const res = await app.request('/v1/messages', {
@@ -1299,16 +1312,15 @@ describe('createProxyApp — streaming pipeline', () => {
 
   it('ignores message.usage on events that are not message_start', async () => {
     resetTokenUsage();
-    vi.spyOn(globalThis, 'fetch').mockImplementation(async () =>
-      new Response(
+    mockFetchFrom(
+      () =>
         sseStream(
           // A decision stream may carry a business `message` object; only
           // Anthropic's message_start owns token usage under that key.
           'data: {"type":"decision","message":{"usage":{"input_tokens":999,"output_tokens":999}}}\n\n',
           'data: {"type":"decision.completed","usage":{"input_tokens":3,"output_tokens":0,"total_tokens":3}}\n\n',
         ),
-        { status: 200, headers: { 'content-type': 'text/event-stream' } },
-      ),
+      { status: 200, headers: { 'content-type': 'text/event-stream' } },
     );
     const app = createProxyApp(makeConfig());
     const res = await app.request('/v1/systemone', {
@@ -1330,8 +1342,8 @@ describe('createProxyApp — streaming pipeline', () => {
 
   it('books a total that never undercuts the merged prompt and completion', async () => {
     resetTokenUsage();
-    vi.spyOn(globalThis, 'fetch').mockImplementation(async () =>
-      new Response(
+    mockFetchFrom(
+      () =>
         sseStream(
           // The finish chunk carries the full triple; a later usage-only chunk
           // raises completion without repeating the total.
@@ -1339,8 +1351,7 @@ describe('createProxyApp — streaming pipeline', () => {
           'data: {"choices":[],"usage":{"completion_tokens":20}}\n\n',
           'data: [DONE]\n\n',
         ),
-        { status: 200 },
-      ),
+      { status: 200 },
     );
     const app = createProxyApp(makeConfig());
     await (await streamRequest(app)).text();
@@ -1356,8 +1367,9 @@ describe('createProxyApp — streaming pipeline', () => {
   });
 
   it('respects the client decision about streamed usage', async () => {
-    const fetchMock = vi.spyOn(globalThis, 'fetch').mockResolvedValue(
-      new Response(sseStream('data: {"choices":[{"delta":{"content":"hi"}}]}\n\n'), { status: 200 }),
+    const fetchMock = mockFetchFrom(
+      () => sseStream('data: {"choices":[{"delta":{"content":"hi"}}]}\n\n'),
+      { status: 200 },
     );
     const app = createProxyApp(makeConfig());
 
@@ -1367,8 +1379,6 @@ describe('createProxyApp — streaming pipeline', () => {
       body: JSON.stringify({ model: 'm', stream: true, stream_options: { include_usage: false } }),
       headers: { 'content-type': 'application/json' },
     })).text();
-    expect(JSON.parse(String((fetchMock.mock.calls[0][1] as RequestInit).body)).stream_options)
-      .toEqual({ include_usage: false });
 
     // Explicit true plus an extra option → both preserved, nothing re-injected.
     await (await app.request('/v1/chat/completions', {
@@ -1376,28 +1386,30 @@ describe('createProxyApp — streaming pipeline', () => {
       body: JSON.stringify({ model: 'm', stream: true, stream_options: { include_usage: true, foo: 1 } }),
       headers: { 'content-type': 'application/json' },
     })).text();
-    expect(JSON.parse(String((fetchMock.mock.calls[1][1] as RequestInit).body)).stream_options)
+
+    const chatCalls = upstreamCallsTo(fetchMock, '/chat/completions')
+      .filter(([, init]) => String((init as RequestInit).body).includes('"stream_options"'));
+    expect(chatCalls).toHaveLength(2);
+    expect(JSON.parse(String((chatCalls[0][1] as RequestInit).body)).stream_options)
+      .toEqual({ include_usage: false });
+    expect(JSON.parse(String((chatCalls[1][1] as RequestInit).body)).stream_options)
       .toEqual({ include_usage: true, foo: 1 });
   });
 
   it('merges the usage option into client-supplied stream_options', async () => {
-    const fetchMock = vi.spyOn(globalThis, 'fetch').mockResolvedValue(
-      new Response(sseStream('data: {"choices":[{"delta":{"content":"hi"}}]}\n\n'), { status: 200 }),
-    );
+    const fetchMock = mockFetchFrom(() => sseStream('data: {"choices":[{"delta":{"content":"hi"}}]}\n\n'), { status: 200 });
     const app = createProxyApp(makeConfig());
     await (await app.request('/v1/chat/completions', {
       method: 'POST',
       body: JSON.stringify({ model: 'm', stream: true, stream_options: { foo: 1 } }),
       headers: { 'content-type': 'application/json' },
     })).text();
-    expect(JSON.parse(String((fetchMock.mock.calls[0][1] as RequestInit).body)).stream_options)
+    expect(JSON.parse(String((upstreamCallsTo(fetchMock, '/chat/completions')[0][1] as RequestInit).body)).stream_options)
       .toEqual({ foo: 1, include_usage: true });
   });
 
   it('does not inject stream usage into non-chat streaming routes', async () => {
-    const fetchMock = vi.spyOn(globalThis, 'fetch').mockResolvedValue(
-      new Response(sseStream('data: {"type":"x"}\n\n'), { status: 200 }),
-    );
+    const fetchMock = mockFetchFrom(() => sseStream('data: {"type":"x"}\n\n'), { status: 200 });
     const app = createProxyApp(makeConfig());
 
     await (await app.request('/v1/responses', {
@@ -1406,8 +1418,9 @@ describe('createProxyApp — streaming pipeline', () => {
       headers: { 'content-type': 'application/json' },
     })).text();
 
-    expect(String(fetchMock.mock.calls[0][0])).toBe('https://example.com/zen/go/v1/responses');
-    const body = JSON.parse(String((fetchMock.mock.calls[0][1] as RequestInit).body)) as {
+    const call = upstreamCallsTo(fetchMock, '/responses')[0];
+    expect(String(call[0])).toBe('https://example.com/zen/go/v1/responses');
+    const body = JSON.parse(String((call[1] as RequestInit).body)) as {
       stream_options?: unknown;
     };
     expect(body.stream_options).toBeUndefined();
@@ -1486,9 +1499,7 @@ describe('createProxyApp — request limits, health, CORS, rate limit keys', () 
   });
 
   it('exposes per-key state and the last upstream error on /health', async () => {
-    vi.spyOn(globalThis, 'fetch').mockResolvedValue(
-      new Response('{"error":"invalid key"}', { status: 401 }),
-    );
+    mockFetch('{"error":"invalid key"}', { status: 401 });
     const app = createProxyApp(makeConfig({
       keys: [{ label: 'cc', key: 'user_cc-key-0001', provider: 'commandcode' }],
     }));
@@ -1632,9 +1643,7 @@ describe('network-fault resilience (no blackout lockup)', () => {
   it('still disables a key on hard auth failures (401)', async () => {
     // Fresh Response per call: a shared instance would fail body re-reads and
     // get misclassified as a network fault.
-    vi.spyOn(globalThis, 'fetch').mockImplementation(async () =>
-      new Response(JSON.stringify({ error: 'invalid api key' }), { status: 401 }),
-    );
+    mockFetch(JSON.stringify({ error: 'invalid api key' }), { status: 401 });
     const app = createProxyApp(makeConfig({ circuitBreakerThreshold: 1 }));
     const res = await app.request('/v1/chat/completions', {
       method: 'POST',
@@ -1657,9 +1666,7 @@ describe('createProxyApp — provider mapping & extra headers', () => {
   });
 
   it('pins a commandcode key for @commandcode models and injects CLI headers', async () => {
-    const fetchMock = vi.spyOn(globalThis, 'fetch').mockResolvedValue(
-      new Response('{"ok":true}', { status: 200 }),
-    );
+    const fetchMock = mockFetch('{"ok":true}', { status: 200 });
     const app = createProxyApp(makeConfig({
       keys: [{ label: 'cc', key: 'user_cc-key-0001', provider: 'commandcode' }],
     }));
@@ -1671,10 +1678,11 @@ describe('createProxyApp — provider mapping & extra headers', () => {
 
     expect(res.status).toBe(200);
     // Upstream: commandcode base + remapped provider path.
-    expect(String(fetchMock.mock.calls[0][0])).toBe(
+    const call = upstreamCallsTo(fetchMock, '/provider/v1/chat/completions')[0];
+    expect(String(call[0])).toBe(
       'https://api.commandcode.ai/provider/v1/chat/completions',
     );
-    const init = fetchMock.mock.calls[0][1] as RequestInit;
+    const init = call[1] as RequestInit;
     const headers = init.headers as Headers;
     expect(headers.get('authorization')).toBe('Bearer user_cc-key-0001');
     // Provider-specific CLI identity headers are injected upstream.
@@ -1707,9 +1715,7 @@ describe('createProxyApp — provider mapping & extra headers', () => {
   ])('relays %s to CommandCode /provider/v1 with the body and ZDR header intact', async (route, payload) => {
     // Fresh Response per call: a shared instance arrives with its body already
     // consumed if any other path (catalog warm-up, usage probe) fetches first.
-    const fetchMock = vi.spyOn(globalThis, 'fetch').mockImplementation(async () =>
-      new Response('{"ok":true}', { status: 200, headers: { 'content-type': 'application/json' } }),
-    );
+    const fetchMock = mockFetch('{"ok":true}', { status: 200, headers: { 'content-type': 'application/json' } });
     // The background catalog warm-up fetches `/provider/v1/models` on this
     // same client; seed it explicitly so the call list really contains a URL
     // that a `/provider/v1/` prefix filter would match first. Without this the
@@ -1740,9 +1746,7 @@ describe('createProxyApp — provider mapping & extra headers', () => {
   });
 
   it('never sends a key from another provider when a pin names the provider', async () => {
-    const fetchMock = vi.spyOn(globalThis, 'fetch').mockResolvedValue(
-      new Response('{"ok":true}', { status: 200 }),
-    );
+    const fetchMock = mockFetch('{"ok":true}', { status: 200 });
     const app = createProxyApp(makeConfig({
       keys: [
         { label: 'cc', key: 'user_cc-key-0001', provider: 'commandcode' },
@@ -1770,9 +1774,7 @@ describe('createProxyApp — provider mapping & extra headers', () => {
   });
 
   it('strips the provider suffix and asks for usage in one pass', async () => {
-    const fetchMock = vi.spyOn(globalThis, 'fetch').mockResolvedValue(
-      new Response(sseStream('data: {"choices":[{"delta":{"content":"hi"}}]}\n\n'), { status: 200 }),
-    );
+    const fetchMock = mockFetchFrom(() => sseStream('data: {"choices":[{"delta":{"content":"hi"}}]}\n\n'), { status: 200 });
     const app = createProxyApp(makeConfig({
       keys: [{ label: 'cc', key: 'user_cc-key-0001', provider: 'commandcode' }],
     }));
@@ -1798,9 +1800,7 @@ describe('createProxyApp — provider mapping & extra headers', () => {
   });
 
   it('forwards an unparseable body untouched', async () => {
-    const fetchMock = vi.spyOn(globalThis, 'fetch').mockResolvedValue(
-      new Response(sseStream('data: [DONE]\n\n'), { status: 200 }),
-    );
+    const fetchMock = mockFetchFrom(() => sseStream('data: [DONE]\n\n'), { status: 200 });
     const app = createProxyApp(makeConfig());
 
     await (await app.request('/v1/chat/completions', {
@@ -1809,13 +1809,11 @@ describe('createProxyApp — provider mapping & extra headers', () => {
       headers: { 'content-type': 'application/json' },
     })).text();
 
-    expect(String((fetchMock.mock.calls[0][1] as RequestInit).body)).toBe('not json at all');
+    expect(String((upstreamCallsTo(fetchMock, '/chat/completions')[0][1] as RequestInit).body)).toBe('not json at all');
   });
 
   it('handles a non-object JSON request body (JSON array)', async () => {
-    const fetchMock = vi.spyOn(globalThis, 'fetch').mockResolvedValue(
-      new Response('{}', { status: 200 }),
-    );
+    const fetchMock = mockFetch('{}', { status: 200 });
     const app = createProxyApp(makeConfig());
     const res = await app.request('/zen/go/v1/chat/completions', {
       method: 'POST',
@@ -1823,7 +1821,7 @@ describe('createProxyApp — provider mapping & extra headers', () => {
       headers: { 'content-type': 'application/json' },
     });
     expect(res.status).toBe(200);
-    expect(String(fetchMock.mock.calls[0][0])).toBe(
+    expect(String(upstreamCallsTo(fetchMock, '/chat/completions')[0][0])).toBe(
       'https://example.com/zen/go/v1/chat/completions',
     );
   });
@@ -1840,9 +1838,7 @@ describe('createProxyApp — session header', () => {
   }
 
   it('derives a stable session id when the client sends none', async () => {
-    const fetchMock = vi.spyOn(globalThis, 'fetch').mockResolvedValue(
-      new Response('{"ok":true}', { status: 200 }),
-    );
+    const fetchMock = mockFetch('{"ok":true}', { status: 200 });
     const app = createProxyApp(makeConfig());
     const payload = { model: 'm', messages: [{ role: 'user', content: 'hi' }] };
 
@@ -1854,16 +1850,16 @@ describe('createProxyApp — session header', () => {
       })).text();
     }
 
-    const first = upstreamHeaders(fetchMock.mock.calls[0]).get('x-opencode-session');
-    const second = upstreamHeaders(fetchMock.mock.calls[1]).get('x-opencode-session');
+    const chatCalls = upstreamCallsTo(fetchMock, '/chat/completions');
+    expect(chatCalls).toHaveLength(2);
+    const first = upstreamHeaders(chatCalls[0]).get('x-opencode-session');
+    const second = upstreamHeaders(chatCalls[1]).get('x-opencode-session');
     expect(first).toMatch(/^[0-9a-f]{32}$/);
     expect(second).toBe(first);
   });
 
   it('forwards a client-supplied session id untouched', async () => {
-    const fetchMock = vi.spyOn(globalThis, 'fetch').mockResolvedValue(
-      new Response('{"ok":true}', { status: 200 }),
-    );
+    const fetchMock = mockFetch('{"ok":true}', { status: 200 });
     const app = createProxyApp(makeConfig());
 
     await (await app.request('/v1/chat/completions', {
@@ -1872,13 +1868,11 @@ describe('createProxyApp — session header', () => {
       headers: { 'content-type': 'application/json', 'x-opencode-session': 'client-session-1' },
     })).text();
 
-    expect(upstreamHeaders(fetchMock.mock.calls[0]).get('x-opencode-session')).toBe('client-session-1');
+    expect(upstreamHeaders(upstreamCallsTo(fetchMock, '/chat/completions')[0]).get('x-opencode-session')).toBe('client-session-1');
   });
 
   it('adds no session header for providers that do not use one', async () => {
-    const fetchMock = vi.spyOn(globalThis, 'fetch').mockResolvedValue(
-      new Response('{"ok":true}', { status: 200 }),
-    );
+    const fetchMock = mockFetch('{"ok":true}', { status: 200 });
     const app = createProxyApp(makeConfig({
       keys: [{ label: 'cc', key: 'user_cc-key-0001', provider: 'commandcode' }],
     }));
@@ -1920,9 +1914,7 @@ describe('createProxyApp — X-Proxy-Provider header', () => {
   // (its key prefixes contradict the configured providers, so prefix inference
   // would report the opposite provider) and by the prefix-contradiction test.
   it('reports the provider of the key that served the request', async () => {
-    vi.spyOn(globalThis, 'fetch').mockImplementation(async () =>
-      new Response('{"ok":true}', { status: 200 }),
-    );
+    mockFetch('{"ok":true}', { status: 200 });
     const app = createProxyApp(mixedPool());
 
     const oc = await app.request('/v1/chat/completions', {
@@ -1947,9 +1939,7 @@ describe('createProxyApp — X-Proxy-Provider header', () => {
   it('sets the provider header on streaming responses too', async () => {
     // One Response per fetch: the usage/models warm-up consumes bodies, and a
     // shared instance would be drained before the chat call in a clean process.
-    vi.spyOn(globalThis, 'fetch').mockImplementation(async () =>
-      new Response(sseStream('data: {"choices":[]}\n\n'), { status: 200 }),
-    );
+    mockFetchFrom(() => sseStream('data: {"choices":[]}\n\n'), { status: 200 });
     const app = createProxyApp(mixedPool());
 
     const res = await app.request('/v1/chat/completions', {
@@ -1964,9 +1954,7 @@ describe('createProxyApp — X-Proxy-Provider header', () => {
   });
 
   it('derives the header from the serving key when no suffix pins the model', async () => {
-    vi.spyOn(globalThis, 'fetch').mockImplementation(async () =>
-      new Response('{"ok":true}', { status: 200 }),
-    );
+    mockFetch('{"ok":true}', { status: 200 });
     // Prefixes deliberately contradict the configured providers: a header
     // built by re-inferring from the credential would report opencode-go for
     // the sk-… key and commandcode for the user_… key — the opposite values.
@@ -1995,9 +1983,7 @@ describe('createProxyApp — X-Proxy-Provider header', () => {
   });
 
   it('routes by the configured provider even when it contradicts the key prefix', async () => {
-    const fetchMock = vi.spyOn(globalThis, 'fetch').mockImplementation(async () =>
-      new Response('{"ok":true}', { status: 200 }),
-    );
+    const fetchMock = mockFetch('{"ok":true}', { status: 200 });
     const app = createProxyApp(makeConfig({
       keys: [{ label: 'cc-sk', key: 'sk-commandcode-key-0001', provider: 'commandcode' }],
     }));
@@ -2082,9 +2068,7 @@ describe('createProxyApp — GET /debug/recent', () => {
   }
 
   it('mirrors request.complete entries in order, without credential material', async () => {
-    vi.spyOn(globalThis, 'fetch').mockImplementation(async () =>
-      new Response('{"choices":[]}', { status: 200 }),
-    );
+    mockFetch('{"choices":[]}', { status: 200 });
     const secret = 'sk-alpha-secret-000000000001';
     const app = createProxyApp(makeConfig({ keys: [{ label: 'alpha', key: secret }] }));
 
@@ -2211,9 +2195,7 @@ describe('createProxyApp — GET /debug/recent', () => {
   it('returns 404 and records nothing when SAROS_DEBUG_BUFFER=0', async () => {
     process.env.SAROS_DEBUG_BUFFER = '0';
     // One Response per fetch: the warm-up calls would drain a shared instance.
-    const fetchMock = vi.spyOn(globalThis, 'fetch').mockImplementation(async () =>
-      new Response('{"choices":[]}', { status: 200 }),
-    );
+    const fetchMock = mockFetch('{"choices":[]}', { status: 200 });
     const app = createProxyApp(makeConfig());
 
     const proxied = await postChat(app, { model: 'model-one', messages: [] });

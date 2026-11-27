@@ -13,6 +13,7 @@ import { serve } from '@hono/node-server';
 import type { AddressInfo } from 'node:net';
 
 import { createProxyApp } from '../src/proxy.js';
+import { resetModelsFetcherState } from '../src/models-fetcher.js';
 import { logger } from '../src/logger.js';
 import { getVersion } from '../src/version.js';
 import { getKeyTokenUsage, resetTokenUsage } from '../src/token-usage.js';
@@ -58,8 +59,8 @@ interface LogEntry {
 interface UpstreamControl {
   setResponse(authHeader: string, status: number, body: string, headers?: Record<string, string>): void;
   setDefaultResponse(status: number, body: string, headers?: Record<string, string>): void;
-  /** Make the first N requests fail with the given status (then fall through to normal routing). */
-  setFailNextN(n: number, status: number, body?: string): void;
+  /** Make the first N chat-completion requests fail; usage probes are unaffected. */
+  setFailNextChat(n: number, status: number, body?: string): void;
   setDelay(ms: number): void;
   setStreamError(v: boolean): void;
   setStreamChunks(chunks: string[]): void;
@@ -101,8 +102,9 @@ function createMockUpstream(): { server: Server; control: UpstreamControl } {
       return;
     }
 
-    // Fail-first-N mode
-    if (failRemaining > 0) {
+    // Fail-first-N chat mode: usage probes are background traffic, not the
+    // request the case is exercising.
+    if (failRemaining > 0 && method === 'POST' && url.includes('/chat/completions')) {
       failRemaining--;
       res.writeHead(failStatus, { 'Content-Type': 'application/json' });
       res.end(failBody);
@@ -207,7 +209,7 @@ function createMockUpstream(): { server: Server; control: UpstreamControl } {
     setDefaultResponse(status, body, headers = { 'Content-Type': 'application/json' }) {
       defaultResponse = { status, headers, body };
     },
-    setFailNextN(n, status, body) {
+    setFailNextChat(n, status, body) {
       failRemaining = n;
       failStatus = status;
       if (body !== undefined) failBody = body;
@@ -297,6 +299,24 @@ function pf(port: number, path: string, options?: RequestInit): Promise<Response
   return fetch(`http://127.0.0.1:${port}${path}`, options);
 }
 
+/** Upstream requests for one route, ignoring probes fired by maybeRefreshUsage. */
+function upstreamRequests(pathSuffix: string, method?: string): LogEntry[] {
+  return mockControl.getRequestLog().filter(
+    (entry) =>
+      entry.url.includes(pathSuffix) && (method === undefined || entry.method === method),
+  );
+}
+
+/** Chat completions only: usage refresh adds `GET /usage` probes to the log. */
+function chatRequests(): LogEntry[] {
+  return upstreamRequests('/chat/completions', 'POST');
+}
+
+/** Every request that reached the upstream mock, probes included. */
+function allRequests(): LogEntry[] {
+  return mockControl.getRequestLog();
+}
+
 // -----------------------------------------------------------------------
 // Global — mock upstream runs once for the whole suite
 // -----------------------------------------------------------------------
@@ -335,7 +355,9 @@ beforeEach(() => {
 // 1. Health & Status
 // -----------------------------------------------------------------------
 
-describe('1. Health & Status', () => {
+// Order is the fixture: shared proxy state is exercised incrementally (healthy
+// first, then a key disabled), so declaration order must be preserved.
+describe('1. Health & Status', { shuffle: false }, () => {
   let proxy: ProxyContext;
 
   beforeAll(async () => {
@@ -400,6 +422,11 @@ describe('2. Models Endpoint', () => {
     proxy = await startProxy(baseConfig(upstreamPort));
   });
   afterAll(async () => { await proxy.close(); });
+  beforeEach(() => {
+    // The route caches upstream data for MODELS_WARM_BUFFER_MS. Start every
+    // case cold so the assertions observe this case's upstream request.
+    resetModelsFetcherState();
+  });
 
   it('GET /zen/go/v1/models proxies to upstream and returns upstream data', async () => {
     const res = await pf(proxy.port, '/zen/go/v1/models');
@@ -415,7 +442,7 @@ describe('2. Models Endpoint', () => {
     expect(data.length).toBe(2);
 
     // Upstream mock IS called for this path now (proxy-through).
-    const log = mockControl.getRequestLog();
+    const log = upstreamRequests('/zen/go/v1/models', 'GET');
     expect(log.length).toBeGreaterThanOrEqual(1);
   });
 
@@ -453,33 +480,37 @@ describe('3. Non-Streaming Requests', () => {
   afterAll(async () => { await proxy.close(); });
 
   it('round-robin key rotation across multiple requests', async () => {
-    const usedKeys: string[] = [];
+    // Dedicated proxy: this case asserts the very first requests of an
+    // untouched rotation, so it cannot share a pool with other cases.
+    await withFreshProxy(baseConfig(upstreamPort), async (proxy) => {
+      const usedKeys: string[] = [];
 
-    for (let i = 0; i < 4; i++) {
-      const res = await pf(proxy.port, '/zen/go/v1/chat/completions', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          model: 'gpt-4',
-          messages: [{ role: 'user', content: `msg-${i}` }],
-          stream: false,
-        }),
-      });
-      expect(res.status).toBe(200);
-    }
+      for (let i = 0; i < 4; i++) {
+        const res = await pf(proxy.port, '/zen/go/v1/chat/completions', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            model: 'gpt-4',
+            messages: [{ role: 'user', content: `msg-${i}` }],
+            stream: false,
+          }),
+        });
+        expect(res.status).toBe(200);
+      }
 
-    const log = mockControl.getRequestLog();
-    expect(log.length).toBe(4);
+      const log = chatRequests();
+      expect(log.length).toBe(4);
 
-    for (const entry of log) {
-      usedKeys.push(entry.auth.replace('Bearer ', ''));
-    }
+      for (const entry of log) {
+        usedKeys.push(entry.auth.replace('Bearer ', ''));
+      }
 
-    // Fresh proxy → rotation: key-1, key-2, key-1, key-2
-    expect(usedKeys[0]).toBe('sk-e2e-test-1111111111111111');
-    expect(usedKeys[1]).toBe('sk-e2e-test-2222222222222222');
-    expect(usedKeys[2]).toBe('sk-e2e-test-1111111111111111');
-    expect(usedKeys[3]).toBe('sk-e2e-test-2222222222222222');
+      // Fresh proxy → rotation: key-1, key-2, key-1, key-2
+      expect(usedKeys[0]).toBe('sk-e2e-test-1111111111111111');
+      expect(usedKeys[1]).toBe('sk-e2e-test-2222222222222222');
+      expect(usedKeys[2]).toBe('sk-e2e-test-1111111111111111');
+      expect(usedKeys[3]).toBe('sk-e2e-test-2222222222222222');
+    });
   });
 
   it('POST with stream:false returns chat completion', async () => {
@@ -519,7 +550,7 @@ describe('3. Non-Streaming Requests', () => {
       }),
     });
 
-    const log = mockControl.getRequestLog();
+    const log = chatRequests();
     expect(log.length).toBe(1);
     expect(log[0].auth).not.toBe('Bearer bad-key-should-be-overridden');
     expect(log[0].auth).toMatch(/^Bearer sk-e2e-test-/);
@@ -535,7 +566,7 @@ describe('4. Failover on Errors', () => {
 
   it('429 (KeyFault) triggers retry with next key', async () => {
     await withFreshProxy(cfg(), async (proxy) => {
-      mockControl.setFailNextN(1, 429, JSON.stringify({ error: 'rate limited' }));
+      mockControl.setFailNextChat(1, 429, JSON.stringify({ error: 'rate limited' }));
 
       const res = await pf(proxy.port, '/zen/go/v1/chat/completions', {
         method: 'POST',
@@ -549,7 +580,7 @@ describe('4. Failover on Errors', () => {
 
       expect(res.status).toBe(200);
 
-      const log = mockControl.getRequestLog();
+      const log = chatRequests();
       expect(log.length).toBe(2);
       // Two different keys were used
       expect(log[0].auth).not.toBe(log[1].auth);
@@ -558,7 +589,7 @@ describe('4. Failover on Errors', () => {
 
   it('500 (ServerFault) triggers retry with next key', async () => {
     await withFreshProxy(cfg(), async (proxy) => {
-      mockControl.setFailNextN(1, 500, JSON.stringify({ error: 'internal error' }));
+      mockControl.setFailNextChat(1, 500, JSON.stringify({ error: 'internal error' }));
 
       const res = await pf(proxy.port, '/zen/go/v1/chat/completions', {
         method: 'POST',
@@ -571,7 +602,7 @@ describe('4. Failover on Errors', () => {
       });
 
       expect(res.status).toBe(200);
-      const log = mockControl.getRequestLog();
+      const log = chatRequests();
       expect(log.length).toBe(2);
       expect(log[0].auth).not.toBe(log[1].auth);
     });
@@ -613,7 +644,7 @@ describe('4. Failover on Errors', () => {
 
       expect(res.status).toBe(400);
       // Only 1 request — RequestFault does NOT trigger retry
-      expect(mockControl.getRequestLog().length).toBe(1);
+      expect(chatRequests().length).toBe(1);
 
       // Key should NOT be penalised
       const health = await (await pf(proxy.port, '/health')).json() as Record<string, unknown>;
@@ -636,13 +667,13 @@ describe('4. Failover on Errors', () => {
       });
 
       expect(res.status).toBe(404);
-      expect(mockControl.getRequestLog().length).toBe(1);
+      expect(chatRequests().length).toBe(1);
     });
   });
 
   it('401 (KeyFault) disables the key immediately and retries', async () => {
     await withFreshProxy(cfg(), async (proxy) => {
-      mockControl.setFailNextN(1, 401, JSON.stringify({ error: 'invalid key' }));
+      mockControl.setFailNextChat(1, 401, JSON.stringify({ error: 'invalid key' }));
 
       const res = await pf(proxy.port, '/zen/go/v1/chat/completions', {
         method: 'POST',
@@ -736,7 +767,7 @@ describe('5. Streaming Requests', () => {
     await collectStream(res);
 
     // The proxy asked the upstream for the usage chunk itself...
-    const sent = mockControl.getRequestLog().at(-1);
+    const sent = chatRequests().at(-1);
     const outbound = JSON.parse(sent?.body ?? '{}') as { stream_options?: unknown };
     expect(outbound.stream_options).toEqual({ include_usage: true });
 
@@ -765,7 +796,7 @@ describe('5. Streaming Requests', () => {
     });
     await collectStream(res);
 
-    const sent = mockControl.getRequestLog().at(-1);
+    const sent = chatRequests().at(-1);
     expect(sent?.headers['x-opencode-session']).toBe('dsh-session-42');
   });
 
@@ -916,7 +947,7 @@ describe('7. Circuit Breaker', () => {
         });
       }
 
-      const log = mockControl.getRequestLog();
+      const log = chatRequests();
       expect(log.length).toBe(3);
       for (const entry of log) {
         expect(entry.auth).toBe('Bearer sk-e2e-test-2222222222222222');
@@ -1065,7 +1096,7 @@ describe('Streaming connection failover', () => {
     });
 
     // Make key1 return 500, key2 succeed via normal routing
-    mockControl.setFailNextN(1, 500);
+    mockControl.setFailNextChat(1, 500);
 
     const res = await pf(ctx.port, '/zen/go/v1/chat/completions', {
       method: 'POST',
@@ -1343,7 +1374,7 @@ describe('11. Concurrent Requests', () => {
       expect(res.status).toBe(200);
     }
 
-    const log = mockControl.getRequestLog();
+    const log = chatRequests();
     expect(log.length).toBe(count);
 
     // Verify at least 2 different keys were used (rotation happened)
@@ -1400,6 +1431,10 @@ describe('12. Request Body Limits', () => {
   it('rejects request body larger than 10MB with 413', async () => {
     const largeBody = 'x'.repeat(11 * 1024 * 1024); // ~11MB — exceeds 10MB limit
 
+    // A usage probe from an earlier case can land after mockControl.reset();
+    // compare before and after so only this request is measured.
+    const requestsBefore = allRequests().length;
+
     const res = await pf(proxy.port, '/zen/go/v1/chat/completions', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -1414,8 +1449,9 @@ describe('12. Request Body Limits', () => {
     const body = await res.json() as Record<string, unknown>;
     expect(body.error).toBe('Request body too large');
 
-    // Verify no request was forwarded to the upstream
-    expect(mockControl.getRequestLog().length).toBe(0);
+    // Verify this request was not forwarded to the upstream
+    expect(allRequests().length).toBe(requestsBefore);
+    expect(chatRequests().length).toBe(0);
   });
 
   it('accepts request body near but under 10MB limit', async () => {
@@ -1434,7 +1470,7 @@ describe('12. Request Body Limits', () => {
     expect(res.status).toBe(200);
 
     // Verify the request was forwarded
-    const log = mockControl.getRequestLog();
+    const log = chatRequests();
     const matchingLogs = log.filter((entry) => entry.body.includes('yyyyy'));
     expect(matchingLogs.length).toBe(1);
   }, 30000);
@@ -1472,7 +1508,7 @@ describe('13. reasoning_effort sanitization', () => {
     });
 
     expect(res.status).toBe(200);
-    const forwarded = mockControl.getRequestLog().filter((entry) => entry.method === 'POST');
+    const forwarded = chatRequests();
     expect(forwarded.length).toBe(1);
     expect(JSON.parse(forwarded[0].body)).toMatchObject({
       model: 'ds-v4-flash',
