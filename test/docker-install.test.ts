@@ -1,16 +1,21 @@
 /**
  * docker-install.test.ts — Smoke test for the Docker install path.
  *
- * Validates the documented Docker flow:
+ * Validates the image artifact, not the README `docker compose up` path:
  *   1. Build the Docker image (`docker build`) exactly once
- *   2. Run a container with a random port mapping and a temp config mount
- *   3. Verify /health responds and loads exactly the mounted config's keys
- *   4. Verify the image HEALTHCHECK reaches `healthy`
- *   5. Verify the process runs as a non-root user
- *   6. Run a second container whose keys come only from OPENCODE_GO_KEYS
- *   7. Cleanup: stop + remove both containers, remove image, remove temp dir
+ *   2. Run it with a random port, a mounted config and an explicit 0.0.0.0
+ *      bind, then verify /health reports exactly the mounted key's label
+ *   3. Verify the image HEALTHCHECK reaches `healthy`
+ *   4. Verify the process runs as a non-root user
+ *   5. Run a second container without a mount, keys only from
+ *      OPENCODE_GO_KEYS plus PROXY_HOST=0.0.0.0, and verify both labels
+ *   6. Cleanup: stop + remove both containers, image and temp dir
+ *
+ * The README `docker compose up` path is not covered here: it still binds
+ * loopback and is fixed in a separate change.
  *
  * Gated behind RUN_DOCKER_SMOKE=1 because it requires Docker and is slow.
+ * Under CI, a missing Docker binary fails the test instead of skipping.
  *
  * Run: RUN_DOCKER_SMOKE=1 npx vitest run test/docker-install.test.ts
  *      (On Windows PowerShell: $env:RUN_DOCKER_SMOKE="1"; npx vitest run test/docker-install.test.ts)
@@ -56,6 +61,27 @@ async function docker(
   return { stdout: stdout.toString(), stderr: stderr.toString() };
 }
 
+async function describeContainer(name: string): Promise<string> {
+  try {
+    const { stdout, stderr } = await docker(['logs', '--tail', '50', name], 10_000);
+    return [stdout, stderr].map((s) => s.trim()).filter(Boolean).join('\n') || '<no logs>';
+  } catch {
+    return '<no logs>';
+  }
+}
+
+async function describeHealthLog(name: string): Promise<string> {
+  try {
+    const { stdout } = await docker(
+      ['inspect', '--format', '{{json .State.Health.Log}}', name],
+      10_000,
+    );
+    return stdout.trim() || '<no health log>';
+  } catch {
+    return '<no health log>';
+  }
+}
+
 function randomSuffix(): string {
   return Math.random().toString(36).slice(2, 10);
 }
@@ -73,7 +99,7 @@ function getRandomPort(): Promise<number> {
 
 interface HealthBody {
   status?: string;
-  keyCount?: number;
+  keys?: { label: string }[];
 }
 
 async function pollHealth(port: number, timeoutMs: number): Promise<HealthBody | null> {
@@ -94,8 +120,9 @@ async function pollHealth(port: number, timeoutMs: number): Promise<HealthBody |
 }
 
 /**
- * Docker runs the first check after `start-period` (10s) and then every
- * `interval` (30s), so two retries already cover ~100s.
+ * Docker Engine >=25 probes every `StartInterval` (5s by default) during the
+ * start period, then every `interval` (30s). With start-period=10s that is
+ * roughly 5s, 10s, 40s, 70s and 100s, so 120s covers the 30s cadence.
  */
 async function waitForHealthyStatus(containerName: string, timeoutMs: number): Promise<string> {
   const start = Date.now();
@@ -120,12 +147,12 @@ async function removeContainer(name: string): Promise<void> {
   try {
     await docker(['stop', name], 30_000);
   } catch {
-    // Container may already be gone (--rm) or may never have started.
+    // The container may never have started or may already be gone.
   }
   try {
     await docker(['rm', '-f', name], 10_000);
   } catch {
-    // --rm removes it after stop; this is best effort.
+    // Best effort: a failed rm must not mask the test failure.
   }
 }
 
@@ -149,6 +176,9 @@ describe.skipIf(SKIP_DOCKER_SMOKE)('Docker Install Smoke Test', () => {
       // 0. Verify Docker is available
       const dockerOk = await isDockerAvailable();
       if (!dockerOk) {
+        if (process.env.CI) {
+          expect(dockerOk, 'docker is required in CI').toBe(true);
+        }
         console.warn('Docker not available — skipping docker-install test');
         return;
       }
@@ -196,7 +226,6 @@ describe.skipIf(SKIP_DOCKER_SMOKE)('Docker Install Smoke Test', () => {
           [
             'run',
             '-d',
-            '--rm',
             '--name',
             containerName,
             '-p',
@@ -209,19 +238,21 @@ describe.skipIf(SKIP_DOCKER_SMOKE)('Docker Install Smoke Test', () => {
         );
         expect(runResult.stdout.trim()).toMatch(/^[a-f0-9]{12,}$/);
 
-        // 5. /health must report the mounted config's keys, not a default
+        // 5. /health must report the mounted config's key, not a default
         const health = await pollHealth(port, 90_000);
-        expect(health, 'proxy did not answer /health on the published port').not.toBeNull();
         expect(
-          health?.keyCount,
-          'mounted config.yaml was not loaded (keyCount differs)',
-        ).toBe(cfg.keys.length);
+          health,
+          `proxy did not answer /health on port ${port}\n${await describeContainer(containerName)}`,
+        ).not.toBeNull();
+        expect(health?.keys?.map((k) => k.label)).toEqual(['docker-smoke']);
 
         // 6. The image HEALTHCHECK itself must reach healthy
         const healthStatus = await waitForHealthyStatus(containerName, 120_000);
         expect(
           healthStatus,
-          `HEALTHCHECK never became healthy (final status: ${healthStatus})`,
+          `HEALTHCHECK never became healthy (final status: ${healthStatus})\n` +
+            `${await describeHealthLog(containerName)}\n` +
+            `${await describeContainer(containerName)}`,
         ).toBe('healthy');
 
         // 7. The container process must not run as root
@@ -236,7 +267,6 @@ describe.skipIf(SKIP_DOCKER_SMOKE)('Docker Install Smoke Test', () => {
           [
             'run',
             '-d',
-            '--rm',
             '--name',
             envContainerName,
             '-p',
@@ -254,11 +284,9 @@ describe.skipIf(SKIP_DOCKER_SMOKE)('Docker Install Smoke Test', () => {
         const envHealth = await pollHealth(envPort, 90_000);
         expect(
           envHealth,
-          'env-only container did not answer /health',
+          `env-only proxy did not answer /health on port ${envPort}\n${await describeContainer(envContainerName)}`,
         ).not.toBeNull();
-        expect(envHealth?.keyCount, 'OPENCODE_GO_KEYS was not applied').toBe(
-          envKeys.split(',').length,
-        );
+        expect(envHealth?.keys?.map((k) => k.label)).toEqual(['home', 'work']);
       } finally {
         // 9. Cleanup: both containers first, then image and temp dir
         await removeContainer(envContainerName);
@@ -269,7 +297,11 @@ describe.skipIf(SKIP_DOCKER_SMOKE)('Docker Install Smoke Test', () => {
           console.warn(`Failed to remove image ${imageTag}:`, err);
         }
         if (existsSync(tempDir)) {
-          rmSync(tempDir, { recursive: true, force: true, maxRetries: 3 });
+          try {
+            rmSync(tempDir, { recursive: true, force: true, maxRetries: 3 });
+          } catch (err) {
+            console.warn(`Failed to remove temp dir ${tempDir}:`, err);
+          }
         }
       }
     },
