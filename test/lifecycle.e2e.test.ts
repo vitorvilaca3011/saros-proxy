@@ -64,8 +64,14 @@ class MockLifecycleUpstream {
     );
     const server = this.server;
     await new Promise<void>((resolve, reject) => {
-      server.once('error', reject);
+      const onListenError = (err: Error): void => reject(err);
+      server.once('error', onListenError);
       server.listen(0, '127.0.0.1', () => {
+        server.off('error', onListenError);
+        // A post-listen error must stay visible instead of disappearing.
+        server.on('error', (err: Error) => {
+          console.error(`mock lifecycle upstream error: ${err.message}`);
+        });
         this.port = (server.address() as { port: number }).port;
         resolve();
       });
@@ -411,7 +417,8 @@ function readPidFileValue(c: LifecycleCase): number | null {
  */
 async function pidFromLiveFallback(c: LifecycleCase): Promise<number | null> {
   if (c.lastPid === undefined) return null;
-  return (await fetchHealth(c.port)) === null ? null : c.lastPid;
+  const health = await fetchHealth(c.port);
+  return health?.status === 'ok' ? c.lastPid : null;
 }
 
 /**
@@ -658,6 +665,7 @@ describe('daemon lifecycle e2e (real binary)', () => {
       expect(match, diagnostics(c, restart)).not.toBeNull();
       const newPid = Number(match![1]);
       const newPort = Number(match![2]);
+      c.lastPid = newPid;
       expect(newPid).not.toBe(started.pid);
       expect(newPort).toBe(c.port);
       expect(readFileSync(c.pidFile, 'utf-8').trim()).toBe(String(newPid));
