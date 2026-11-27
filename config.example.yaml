@@ -2,6 +2,7 @@
 # Copy this file to config.yaml and customize.
 
 port: 3000
+# Compose passes `--host 0.0.0.0` (CLI wins over this file); loopback stays for direct host runs.
 host: 127.0.0.1
 
 # Upstream API base URL (must be HTTPS)

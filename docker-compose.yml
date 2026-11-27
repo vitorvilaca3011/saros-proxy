@@ -1,5 +1,9 @@
 version: "3.9"
 
+# Configuration precedence (loadConfig in src/config.ts):
+# CLI args > config.yaml > environment variables > defaults.
+# The mounted ./config.yaml below therefore wins over the env vars for every
+# field it sets, including `keys`.
 services:
   proxy:
     build:
@@ -8,12 +12,17 @@ services:
     container_name: saros
     ports:
       - "3000:3000"
+    # A published port is DNAT'ed to the container interface, so 127.0.0.1
+    # inside would never see host traffic. YAML `host` beats PROXY_HOST, but
+    # CLI args are applied last, so this is the override that works.
+    command: ["--host", "0.0.0.0"]
     volumes:
       # Mount config from host (create config.yaml from config.example.yaml first)
       - ./config.yaml:/app/config.yaml:ro
     environment:
       - NODE_ENV=production
-      # Override config via env vars when needed (takes precedence over YAML)
+      # Env vars only fill fields the mounted config.yaml leaves unset (see the
+      # precedence note at the top of this file).
       # - PROXY_PORT=3000
       # - PROXY_HOST=0.0.0.0
       # - UPSTREAM_BASE_URL=https://opencode.ai
