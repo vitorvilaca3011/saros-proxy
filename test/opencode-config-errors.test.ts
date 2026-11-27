@@ -34,6 +34,7 @@ vi.mock('node:fs', async (importOriginal) => {
 const { updateOpencodeConfig, syncModelsToOpencodeConfig } = await import(
   '../src/cli/opencode-config.js'
 );
+const { loadModelsCatalog } = await import('../src/models-catalog.js');
 const mockedFs = vi.mocked(fs);
 
 describe('opencode-config error paths', () => {
@@ -42,6 +43,10 @@ describe('opencode-config error paths', () => {
   beforeEach(() => {
     tmpDir = mkdtempSync(`${tmpdir()}${sep}opencode-config-err-`);
     mockHomeRef.current = tmpDir;
+    // The bundled catalog is read once per process and cached. Warm it here:
+    // otherwise its one-time readFileSync would consume a queued per-test mock
+    // that belongs to the opencode config read.
+    loadModelsCatalog();
   });
 
   afterEach(async () => {

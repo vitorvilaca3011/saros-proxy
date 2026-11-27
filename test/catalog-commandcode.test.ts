@@ -64,7 +64,9 @@ describe('resolveClientVersion (fresh module per case)', () => {
   }
 });
 
-describe('commandcode model catalog & affinity', () => {
+// Order is the fixture: the "before the catalog loads" cases assert cold
+// module state, which only exists before fetchCatalog runs in this file.
+describe('commandcode model catalog & affinity', { shuffle: false }, () => {
   const CATALOG = [
     { id: 'deepseek/deepseek-v4-flash', name: 'DeepSeek V4 Flash' },
     { id: 'claude-opus-5', name: 'Claude Opus 5', context_length: 200_000 },

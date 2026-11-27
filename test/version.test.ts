@@ -20,9 +20,6 @@ const mockReadFileSync = vi.hoisted(() => vi.fn());
 vi.mock('node:fs', async (importOriginal) => {
   const actual = await importOriginal<typeof NodeFs>();
   actualReadRef.fn = actual.readFileSync as (...args: unknown[]) => unknown;
-  mockReadFileSync.mockImplementation((...args: unknown[]) =>
-    actualReadRef.fn!(...args),
-  );
   return { ...actual, readFileSync: mockReadFileSync };
 });
 

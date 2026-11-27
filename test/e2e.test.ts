@@ -13,6 +13,7 @@ import { serve } from '@hono/node-server';
 import type { AddressInfo } from 'node:net';
 
 import { createProxyApp } from '../src/proxy.js';
+import { resetModelsFetcherState } from '../src/models-fetcher.js';
 import { logger } from '../src/logger.js';
 import { getVersion } from '../src/version.js';
 import { getKeyTokenUsage, resetTokenUsage } from '../src/token-usage.js';
@@ -335,7 +336,9 @@ beforeEach(() => {
 // 1. Health & Status
 // -----------------------------------------------------------------------
 
-describe('1. Health & Status', () => {
+// Order is the fixture: shared proxy state is exercised incrementally (healthy
+// first, then a key disabled), so declaration order must be preserved.
+describe('1. Health & Status', { shuffle: false }, () => {
   let proxy: ProxyContext;
 
   beforeAll(async () => {
@@ -400,6 +403,11 @@ describe('2. Models Endpoint', () => {
     proxy = await startProxy(baseConfig(upstreamPort));
   });
   afterAll(async () => { await proxy.close(); });
+  beforeEach(() => {
+    // The route caches upstream data for MODELS_WARM_BUFFER_MS. Start every
+    // case cold so the assertions observe this case's upstream request.
+    resetModelsFetcherState();
+  });
 
   it('GET /zen/go/v1/models proxies to upstream and returns upstream data', async () => {
     const res = await pf(proxy.port, '/zen/go/v1/models');
@@ -444,7 +452,9 @@ describe('2. Models Endpoint', () => {
 // 3. Non-Streaming Requests
 // -----------------------------------------------------------------------
 
-describe('3. Non-Streaming Requests', () => {
+// Order is the fixture: the rotation case asserts the first requests of a
+// fresh proxy, so it must run before any other case consumes the pool.
+describe('3. Non-Streaming Requests', { shuffle: false }, () => {
   let proxy: ProxyContext;
 
   beforeAll(async () => {
