@@ -1,7 +1,7 @@
 /**
  * docker-install.test.ts — Smoke test for the Docker install path.
  *
- * Validates the image artifact, not the README `docker compose up` path:
+ * Validates the image artifact and the README `docker compose up` path:
  *   1. Build the Docker image (`docker build`) exactly once
  *   2. Run it with a random port, a mounted config and an explicit 0.0.0.0
  *      bind, then verify /health reports exactly the mounted key's label
@@ -9,13 +9,19 @@
  *   4. Verify the process runs as a non-root user
  *   5. Run a second container without a mount, keys only from
  *      OPENCODE_GO_KEYS plus PROXY_HOST=0.0.0.0, and verify both labels
- *   6. Cleanup: stop + remove both containers, image and temp dir
+ *   6. Run `docker compose up -d` from a copy of the repository compose file,
+ *      with config.yaml taken from config.example.yaml and its
+ *      `host: 127.0.0.1` unchanged: serving the published port proves the
+ *      service's `--host 0.0.0.0` command overrides the YAML
+ *   7. Cleanup: compose down, stop + remove both containers, image and temp dir
  *
- * The README `docker compose up` path is not covered here: it still binds
- * loopback and is fixed in a separate change.
+ * Both README install paths (plain `docker run` and `docker compose up`) are
+ * covered. The Compose `test` profile (`docker compose run --rm test`) stays
+ * out: it runs the unit suite, not an install path.
  *
- * Gated behind RUN_DOCKER_SMOKE=1 because it requires Docker and is slow.
- * Under CI, a missing Docker binary fails the test instead of skipping.
+ * Gated behind RUN_DOCKER_SMOKE=1 because it requires Docker (with the Compose
+ * plugin) and is slow. Under CI, a missing Docker binary or Compose plugin
+ * fails the test instead of skipping.
  *
  * Run: RUN_DOCKER_SMOKE=1 npx vitest run test/docker-install.test.ts
  *      (On Windows PowerShell: $env:RUN_DOCKER_SMOKE="1"; npx vitest run test/docker-install.test.ts)
@@ -23,11 +29,18 @@
 
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { execFile } from 'node:child_process';
-import { writeFileSync, existsSync, mkdtempSync, rmSync } from 'node:fs';
+import {
+  writeFileSync,
+  readFileSync,
+  existsSync,
+  mkdirSync,
+  mkdtempSync,
+  rmSync,
+} from 'node:fs';
 import { promisify } from 'node:util';
 import { join, sep } from 'node:path';
 import { tmpdir } from 'node:os';
-import { stringify as stringifyYaml } from 'yaml';
+import { parse as parseYaml, stringify as stringifyYaml } from 'yaml';
 import { createServer } from 'node:http';
 import type { AddressInfo } from 'node:net';
 
@@ -45,6 +58,15 @@ const execFileAsync = promisify(execFile);
 async function isDockerAvailable(): Promise<boolean> {
   try {
     await execFileAsync('docker', ['--version'], { timeout: 10_000 });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function isComposeAvailable(): Promise<boolean> {
+  try {
+    await execFileAsync('docker', ['compose', 'version'], { timeout: 10_000 });
     return true;
   } catch {
     return false;
@@ -156,6 +178,73 @@ async function removeContainer(name: string): Promise<void> {
   }
 }
 
+async function describeCompose(projectName: string, composePath: string): Promise<string> {
+  try {
+    const { stdout, stderr } = await docker(
+      ['compose', '-p', projectName, '-f', composePath, 'logs', '--no-color', '--tail', '50'],
+      20_000,
+    );
+    return [stdout, stderr].map((s) => s.trim()).filter(Boolean).join('\n') || '<no logs>';
+  } catch {
+    return '<no logs>';
+  }
+}
+
+interface ComposeService {
+  build?: unknown;
+  image?: string;
+  container_name?: string;
+  ports?: string[];
+}
+
+interface ComposeFile {
+  services: Record<string, ComposeService>;
+}
+
+/**
+ * Copy the repository compose file into the fixture directory, rewriting only
+ * the fields that make it runnable in a test: the proxy `build` becomes the
+ * image this file already built (a second build would eat the CI budget), the
+ * published port becomes a free random one on host loopback, and fixed
+ * container names are dropped because they collide across runs. Every other
+ * field, including the `--host 0.0.0.0` command, is the file the README ships.
+ */
+function writeComposeFixture(composeDir: string, imageTag: string, publishedPort: number): string {
+  const compose = parseYaml(readFileSync('docker-compose.yml', 'utf-8')) as ComposeFile;
+  const proxy = compose.services.proxy;
+  delete proxy.build;
+  proxy.image = imageTag;
+  proxy.ports = [`127.0.0.1:${publishedPort}:3000`];
+  delete proxy.container_name;
+  delete compose.services.test?.container_name;
+
+  const composePath = join(composeDir, 'docker-compose.yml');
+  writeFileSync(composePath, stringifyYaml(compose), 'utf-8');
+  return composePath;
+}
+
+/**
+ * Write config.yaml from config.example.yaml for the compose run. Only the key
+ * placeholders change; `host: 127.0.0.1` stays as shipped because the point of
+ * the test is that the compose `--host 0.0.0.0` command makes the published
+ * port reachable.
+ */
+function writeComposeConfig(composeDir: string): void {
+  const example = readFileSync('config.example.yaml', 'utf-8');
+  const config = example
+    .replace('key: sk-abc123...', 'key: sk-compose-aaaaaaaaaaaa')
+    .replace('key: sk-def456...', 'key: sk-compose-bbbbbbbbbbbb');
+
+  const parsed = parseYaml(config) as { host?: string; keys?: { key: string }[] };
+  expect(parsed.host, 'the example config must keep its loopback host').toBe('127.0.0.1');
+  expect(
+    parsed.keys?.every((entry) => entry.key.length >= 20),
+    'config.example.yaml key placeholders must be replaced with valid keys',
+  ).toBe(true);
+
+  writeFileSync(join(composeDir, 'config.yaml'), config, 'utf-8');
+}
+
 // ---------------------------------------------------------------------------
 // Tests — all gated by SKIP_DOCKER_SMOKE
 // ---------------------------------------------------------------------------
@@ -189,6 +278,9 @@ describe.skipIf(SKIP_DOCKER_SMOKE)('Docker Install Smoke Test', () => {
       const imageTag = `saros-proxy-smoke:${suffix}`;
       const containerName = `saros-smoke-${suffix}`;
       const envContainerName = `${containerName}-env`;
+      const composeProject = `saros-compose-${suffix}`;
+      const composeDir = join(tempDir, 'compose');
+      const composePath = join(composeDir, 'docker-compose.yml');
       try {
         const port = await getRandomPort();
         const envPort = await getRandomPort();
@@ -287,8 +379,49 @@ describe.skipIf(SKIP_DOCKER_SMOKE)('Docker Install Smoke Test', () => {
           `env-only proxy did not answer /health on port ${envPort}\n${await describeContainer(envContainerName)}`,
         ).not.toBeNull();
         expect(envHealth?.keys?.map((k) => k.label)).toEqual(['home', 'work']);
+
+        // 9. The compose phase needs the Compose plugin, not just Docker.
+        const composeOk = await isComposeAvailable();
+        if (!composeOk) {
+          if (process.env.CI) {
+            expect(composeOk, 'docker compose is required for the smoke test').toBe(true);
+          }
+          console.warn('docker compose not available — skipping the compose smoke test');
+          return;
+        }
+
+        // 10. The compose file shipped to users must serve its published port.
+        // config.yaml comes from config.example.yaml with host 127.0.0.1
+        // untouched: reaching /health proves the service's `--host 0.0.0.0`
+        // command overrides the YAML (CLI > YAML).
+        const composePort = await getRandomPort();
+        mkdirSync(composeDir, { recursive: true });
+        writeComposeFixture(composeDir, imageTag, composePort);
+        writeComposeConfig(composeDir);
+
+        await docker(
+          ['compose', '-p', composeProject, '-f', composePath, 'up', '-d'],
+          120_000,
+        );
+
+        const composeHealth = await pollHealth(composePort, 90_000);
+        expect(
+          composeHealth,
+          `compose proxy did not answer /health on port ${composePort}\n` +
+            `${await describeCompose(composeProject, composePath)}`,
+        ).not.toBeNull();
+        expect(composeHealth?.keys?.map((k) => k.label)).toEqual(['account1', 'account2']);
       } finally {
-        // 9. Cleanup: both containers first, then image and temp dir
+        // 11. Compose project first (its containers and network), then the
+        // standalone containers, image and temp dir.
+        try {
+          await docker(
+            ['compose', '-p', composeProject, '-f', composePath, 'down', '-v', '--remove-orphans'],
+            120_000,
+          );
+        } catch (err) {
+          console.warn(`Failed to bring compose project ${composeProject} down:`, err);
+        }
         await removeContainer(envContainerName);
         await removeContainer(containerName);
         try {

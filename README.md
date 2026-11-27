@@ -254,7 +254,9 @@ npm run docker:build
 npm run docker:run
 ```
 
-The proxy is now at `http://127.0.0.1:3000`.
+The proxy is now at `http://127.0.0.1:3000`. The Compose service passes
+`--host 0.0.0.0` to the container so the published port is reachable;
+`config.yaml` stays on `127.0.0.1` for running the proxy directly on the host.
 
 #### Run tests in Docker
 
@@ -286,15 +288,28 @@ docker compose run --rm test
 
 #### Configuration with Docker
 
-Mount a custom `config.yaml` or use environment variables:
+The Compose service mounts `./config.yaml`, and a YAML file wins over
+environment variables for every field it sets. Precedence is
+CLI args > `config.yaml` > environment > defaults (`loadConfig` in
+`src/config.ts`), so `OPENCODE_GO_KEYS` only takes effect when the mounted file
+has no `keys` (or an empty list):
 
 ```bash
-# Using env vars (no config.yaml needed)
-docker compose run --rm -e OPENCODE_GO_KEYS="home:sk-xxx,work:sk-yyy" proxy
+# Mounted config without keys (or with keys: []): the env var supplies them.
+# --service-ports publishes the service's 127.0.0.1:3000:3000 mapping.
+docker compose run --rm --service-ports -e OPENCODE_GO_KEYS="home:sk-xxx,work:sk-yyy" proxy
 
-# Or edit docker-compose.yml to set env vars, then:
-docker compose up proxy
+# No mount at all: run the image directly. PROXY_HOST is required because the
+# default bind is loopback-only.
+docker build -t saros-proxy .
+docker run --rm -p 127.0.0.1:3000:3000 \
+  -e OPENCODE_GO_KEYS="home:sk-xxx,work:sk-yyy" \
+  -e PROXY_HOST=0.0.0.0 \
+  saros-proxy
 ```
+
+With a mounted `config.yaml`, edit that file instead: the env vars above are
+ignored for fields it defines.
 
 ---
 
