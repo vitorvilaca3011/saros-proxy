@@ -292,16 +292,17 @@ The Compose service mounts `./config.yaml`, and a YAML file wins over
 environment variables for every field it sets. Precedence is
 CLI args > `config.yaml` > environment > defaults (`loadConfig` in
 `src/config.ts`), so `OPENCODE_GO_KEYS` only takes effect when the mounted file
-has no `keys`:
+has no `keys` (or an empty list):
 
 ```bash
-# Mounted config without keys: the env var supplies them.
-docker compose run --rm -e OPENCODE_GO_KEYS="home:sk-xxx,work:sk-yyy" proxy
+# Mounted config without keys (or with keys: []): the env var supplies them.
+# --service-ports publishes the service's 127.0.0.1:3000:3000 mapping.
+docker compose run --rm --service-ports -e OPENCODE_GO_KEYS="home:sk-xxx,work:sk-yyy" proxy
 
 # No mount at all: run the image directly. PROXY_HOST is required because the
 # default bind is loopback-only.
 docker build -t saros-proxy .
-docker run --rm -p 3000:3000 \
+docker run --rm -p 127.0.0.1:3000:3000 \
   -e OPENCODE_GO_KEYS="home:sk-xxx,work:sk-yyy" \
   -e PROXY_HOST=0.0.0.0 \
   saros-proxy

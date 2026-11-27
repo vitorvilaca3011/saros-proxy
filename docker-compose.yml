@@ -11,7 +11,8 @@ services:
       dockerfile: Dockerfile
     container_name: saros
     ports:
-      - "3000:3000"
+      # Host loopback only: the container needs 0.0.0.0 for the published-port DNAT, but the proxy has no auth; use "3000:3000" to expose it deliberately.
+      - "127.0.0.1:3000:3000"
     # A published port is DNAT'ed to the container interface, so 127.0.0.1
     # inside would never see host traffic. YAML `host` beats PROXY_HOST, but
     # CLI args are applied last, so this is the override that works.

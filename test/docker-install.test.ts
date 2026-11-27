@@ -19,8 +19,9 @@
  * covered. The Compose `test` profile (`docker compose run --rm test`) stays
  * out: it runs the unit suite, not an install path.
  *
- * Gated behind RUN_DOCKER_SMOKE=1 because it requires Docker and is slow.
- * Under CI, a missing Docker binary fails the test instead of skipping.
+ * Gated behind RUN_DOCKER_SMOKE=1 because it requires Docker (with the Compose
+ * plugin) and is slow. Under CI, a missing Docker binary or Compose plugin
+ * fails the test instead of skipping.
  *
  * Run: RUN_DOCKER_SMOKE=1 npx vitest run test/docker-install.test.ts
  *      (On Windows PowerShell: $env:RUN_DOCKER_SMOKE="1"; npx vitest run test/docker-install.test.ts)
@@ -57,6 +58,15 @@ const execFileAsync = promisify(execFile);
 async function isDockerAvailable(): Promise<boolean> {
   try {
     await execFileAsync('docker', ['--version'], { timeout: 10_000 });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function isComposeAvailable(): Promise<boolean> {
+  try {
+    await execFileAsync('docker', ['compose', 'version'], { timeout: 10_000 });
     return true;
   } catch {
     return false;
@@ -195,16 +205,16 @@ interface ComposeFile {
  * Copy the repository compose file into the fixture directory, rewriting only
  * the fields that make it runnable in a test: the proxy `build` becomes the
  * image this file already built (a second build would eat the CI budget), the
- * published port becomes a free random one, and fixed container names are
- * dropped because they collide across runs. Every other field, including the
- * `--host 0.0.0.0` command, is the file the README ships.
+ * published port becomes a free random one on host loopback, and fixed
+ * container names are dropped because they collide across runs. Every other
+ * field, including the `--host 0.0.0.0` command, is the file the README ships.
  */
 function writeComposeFixture(composeDir: string, imageTag: string, publishedPort: number): string {
   const compose = parseYaml(readFileSync('docker-compose.yml', 'utf-8')) as ComposeFile;
   const proxy = compose.services.proxy;
   delete proxy.build;
   proxy.image = imageTag;
-  proxy.ports = [`${publishedPort}:3000`];
+  proxy.ports = [`127.0.0.1:${publishedPort}:3000`];
   delete proxy.container_name;
   delete compose.services.test?.container_name;
 
@@ -370,7 +380,17 @@ describe.skipIf(SKIP_DOCKER_SMOKE)('Docker Install Smoke Test', () => {
         ).not.toBeNull();
         expect(envHealth?.keys?.map((k) => k.label)).toEqual(['home', 'work']);
 
-        // 9. The compose file shipped to users must serve its published port.
+        // 9. The compose phase needs the Compose plugin, not just Docker.
+        const composeOk = await isComposeAvailable();
+        if (!composeOk) {
+          if (process.env.CI) {
+            expect(composeOk, 'docker compose is required for the smoke test').toBe(true);
+          }
+          console.warn('docker compose not available — skipping the compose smoke test');
+          return;
+        }
+
+        // 10. The compose file shipped to users must serve its published port.
         // config.yaml comes from config.example.yaml with host 127.0.0.1
         // untouched: reaching /health proves the service's `--host 0.0.0.0`
         // command overrides the YAML (CLI > YAML).
@@ -392,7 +412,7 @@ describe.skipIf(SKIP_DOCKER_SMOKE)('Docker Install Smoke Test', () => {
         ).not.toBeNull();
         expect(composeHealth?.keys?.map((k) => k.label)).toEqual(['account1', 'account2']);
       } finally {
-        // 10. Compose project first (its containers and network), then the
+        // 11. Compose project first (its containers and network), then the
         // standalone containers, image and temp dir.
         try {
           await docker(
