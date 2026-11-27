@@ -1,10 +1,10 @@
 import { defineConfig } from 'vitest/config';
 
 /**
- * Config for the heavy process-spawning E2E suites (install smoke + full
- * binary model E2E). Kept separate from vitest.config.ts so the fast unit
- * suite stays the default `npx vitest run`, while these files remain runnable
- * explicitly via npm scripts and CI jobs.
+ * Config for the heavy process-spawning E2E suites (install smoke, full
+ * binary model E2E, daemon lifecycle). Kept separate from vitest.config.ts so
+ * the fast unit suite stays the default `npx vitest run`, while these files
+ * remain runnable explicitly via npm scripts and CI jobs.
  */
 export default defineConfig({
   test: {
@@ -18,6 +18,7 @@ export default defineConfig({
       'test/install.e2e.test.ts',
       'test/model-e2e.test.ts',
       'test/live-model.e2e.test.ts',
+      'test/lifecycle.e2e.test.ts',
     ],
   },
 });

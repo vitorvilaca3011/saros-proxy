@@ -36,6 +36,7 @@ export default defineConfig({
       'test/install.e2e.test.ts',
       'test/model-e2e.test.ts',
       'test/live-model.e2e.test.ts',
+      'test/lifecycle.e2e.test.ts',
     ],
     // Use vmThreads pool: the default 'forks' pool causes the test process to
     // hang on Windows (tinypool fork workers don't shut down cleanly, keeping

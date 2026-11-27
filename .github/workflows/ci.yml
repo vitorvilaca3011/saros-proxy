@@ -113,6 +113,34 @@ jobs:
       - name: Model E2E (real binary)
         run: npx vitest run --config vitest.e2e.config.ts test/model-e2e.test.ts
 
+  daemon-lifecycle:
+    name: Daemon lifecycle E2E (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Set up Node.js
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Build
+        run: npm run build
+
+      # Drives `start`/`status`/`stop`/`restart` as real detached processes in
+      # an isolated HOME: PID file, daemon.log, traffic, port conflicts.
+      - name: Daemon lifecycle E2E (real binary)
+        run: npx vitest run --config vitest.e2e.config.ts test/lifecycle.e2e.test.ts
+
   security:
     name: Security scans
     runs-on: ubuntu-latest
