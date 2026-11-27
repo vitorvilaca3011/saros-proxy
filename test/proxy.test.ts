@@ -33,6 +33,18 @@ function mockFetch(...args: ConstructorParameters<typeof Response>): MockInstanc
 }
 
 /**
+ * Mock fetch with a fresh body per call. A ReadableStream is single-use, and
+ * background usage probes hit this same mock, so a shared stream would reach
+ * one of the callers already locked.
+ */
+function mockFetchFrom(
+  body: () => ConstructorParameters<typeof Response>[0],
+  init?: ResponseInit,
+): MockInstance<typeof fetch> {
+  return vi.spyOn(globalThis, 'fetch').mockImplementation(async () => new Response(body(), init));
+}
+
+/**
  * Calls made to one upstream path. Background catalog and usage probes share
  * the mocked fetch, so the request under test is not always call 0.
  */
@@ -1053,7 +1065,7 @@ describe('createProxyApp — streaming pipeline', () => {
   }
 
   it('streams SSE chunks and sets streaming headers', async () => {
-    mockFetch(sseStream('data: {"type":"chat","content":"hi"}\n\n'), {
+    mockFetchFrom(() => sseStream('data: {"type":"chat","content":"hi"}\n\n'), {
       status: 200,
       headers: { 'content-type': 'text/event-stream' },
     });
@@ -1069,7 +1081,7 @@ describe('createProxyApp — streaming pipeline', () => {
   });
 
   it('detects SSE error markers and emits proxy_error', async () => {
-    mockFetch(sseStream('data: {"error":"boom"}\n\n'), { status: 200 });
+    mockFetchFrom(() => sseStream('data: {"error":"boom"}\n\n'), { status: 200 });
     const app = createProxyApp(makeConfig({ circuitBreakerThreshold: 1 }));
     const res = await streamRequest(app);
     const text = await res.text();
@@ -1083,13 +1095,14 @@ describe('createProxyApp — streaming pipeline', () => {
   });
 
   it('passes through comment events, benign data, and invalid JSON', async () => {
-    mockFetch(
-      sseStream(
-        ': keep-alive\n\n',
-        'data: {"type":"chat","content":"ok"}\n\n',
-        'data: not-json\n\n',
-        'data: null\n\n',
-      ),
+    mockFetchFrom(
+      () =>
+        sseStream(
+          ': keep-alive\n\n',
+          'data: {"type":"chat","content":"ok"}\n\n',
+          'data: not-json\n\n',
+          'data: null\n\n',
+        ),
       { status: 200 },
     );
     const app = createProxyApp(makeConfig());
@@ -1102,7 +1115,7 @@ describe('createProxyApp — streaming pipeline', () => {
 
   it('buffers partial SSE events split across chunks', async () => {
     const encoder = new TextEncoder();
-    const upstream = new ReadableStream<Uint8Array>({
+    const makeUpstream = () => new ReadableStream<Uint8Array>({
       start(controller) {
         controller.enqueue(encoder.encode('')); // empty chunk
         controller.enqueue(encoder.encode('data: {"type":"ch'));
@@ -1110,7 +1123,7 @@ describe('createProxyApp — streaming pipeline', () => {
         controller.close();
       },
     });
-    mockFetch(upstream, { status: 200 });
+    mockFetchFrom(makeUpstream, { status: 200 });
     const app = createProxyApp(makeConfig());
     const res = await streamRequest(app);
     const text = await res.text();
@@ -1127,12 +1140,12 @@ describe('createProxyApp — streaming pipeline', () => {
   });
 
   it('reports stream read errors with proxy_error', async () => {
-    const upstream = new ReadableStream<Uint8Array>({
+    const makeUpstream = () => new ReadableStream<Uint8Array>({
       pull() {
         throw new Error('connection reset');
       },
     });
-    mockFetch(upstream, { status: 200 });
+    mockFetchFrom(makeUpstream, { status: 200 });
     const app = createProxyApp(makeConfig());
     const res = await streamRequest(app);
     const text = await res.text();
@@ -1166,7 +1179,7 @@ describe('createProxyApp — streaming pipeline', () => {
   it('cancels the upstream stream when the client disconnects', async () => {
     let upstreamCancelled = false;
     const encoder = new TextEncoder();
-    const upstream = new ReadableStream<Uint8Array>({
+    const makeUpstream = () => new ReadableStream<Uint8Array>({
       start(controller) {
         controller.enqueue(encoder.encode('data: {"type":"chat","content":"hi"}\n\n'));
         // deliberately keep the stream open
@@ -1175,7 +1188,7 @@ describe('createProxyApp — streaming pipeline', () => {
         upstreamCancelled = true;
       },
     });
-    mockFetch(upstream, { status: 200 });
+    mockFetchFrom(makeUpstream, { status: 200 });
     const app = createProxyApp(makeConfig());
     const res = await streamRequest(app);
     const reader = res.body!.getReader();
@@ -1185,11 +1198,12 @@ describe('createProxyApp — streaming pipeline', () => {
   });
 
   it('asks the upstream for streamed token usage', async () => {
-    const fetchMock = mockFetch(
-      sseStream(
-        'data: {"choices":[{"delta":{"content":"hi"}}],"usage":null}\n\n',
-        'data: {"choices":[{"delta":{}}],"usage":{"prompt_tokens":5,"completion_tokens":2,"total_tokens":7}}\n\n',
-      ),
+    const fetchMock = mockFetchFrom(
+      () =>
+        sseStream(
+          'data: {"choices":[{"delta":{"content":"hi"}}],"usage":null}\n\n',
+          'data: {"choices":[{"delta":{}}],"usage":{"prompt_tokens":5,"completion_tokens":2,"total_tokens":7}}\n\n',
+        ),
       { status: 200 },
     );
     const app = createProxyApp(makeConfig());
@@ -1206,13 +1220,14 @@ describe('createProxyApp — streaming pipeline', () => {
 
   it('books streamed usage once when the upstream repeats it', async () => {
     resetTokenUsage();
-    mockFetch(
-      sseStream(
-        'data: {"choices":[{"delta":{"content":"hi"}}],"usage":null}\n\n',
-        'data: {"choices":[{"index":0,"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":5,"completion_tokens":2,"total_tokens":7}}\n\n',
-        'data: {"choices":[],"usage":{"prompt_tokens":5,"completion_tokens":2,"total_tokens":7}}\n\n',
-        'data: [DONE]\n\n',
-      ),
+    mockFetchFrom(
+      () =>
+        sseStream(
+          'data: {"choices":[{"delta":{"content":"hi"}}],"usage":null}\n\n',
+          'data: {"choices":[{"index":0,"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":5,"completion_tokens":2,"total_tokens":7}}\n\n',
+          'data: {"choices":[],"usage":{"prompt_tokens":5,"completion_tokens":2,"total_tokens":7}}\n\n',
+          'data: [DONE]\n\n',
+        ),
       { status: 200 },
     );
     const app = createProxyApp(makeConfig());
@@ -1232,11 +1247,12 @@ describe('createProxyApp — streaming pipeline', () => {
 
   it('books usage nested under response.usage (OpenAI Responses schema)', async () => {
     resetTokenUsage();
-    mockFetch(
-      sseStream(
-        'event: response.output_text.delta\ndata: {"type":"response.output_text.delta","delta":"hi"}\n\n',
-        'event: response.completed\ndata: {"type":"response.completed","response":{"id":"resp_1","usage":{"input_tokens":11,"output_tokens":4,"total_tokens":15}}}\n\n',
-      ),
+    mockFetchFrom(
+      () =>
+        sseStream(
+          'event: response.output_text.delta\ndata: {"type":"response.output_text.delta","delta":"hi"}\n\n',
+          'event: response.completed\ndata: {"type":"response.completed","response":{"id":"resp_1","usage":{"input_tokens":11,"output_tokens":4,"total_tokens":15}}}\n\n',
+        ),
       { status: 200, headers: { 'content-type': 'text/event-stream' } },
     );
     const app = createProxyApp(makeConfig());
@@ -1261,15 +1277,14 @@ describe('createProxyApp — streaming pipeline', () => {
 
   it('books usage split across Anthropic message_start and message_delta', async () => {
     resetTokenUsage();
-    // Fresh Response per call: the usage-refresh probe also calls fetch, and a
-    // shared instance would arrive with its body already consumed.
-    mockFetch(
-      sseStream(
-        'event: message_start\ndata: {"type":"message_start","message":{"id":"msg_1","usage":{"input_tokens":25,"output_tokens":1}}}\n\n',
-        'event: content_block_delta\ndata: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"hi"}}\n\n',
-        'event: message_delta\ndata: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"input_tokens":5,"output_tokens":15}}\n\n',
-        'event: message_stop\ndata: {"type":"message_stop"}\n\n',
-      ),
+    mockFetchFrom(
+      () =>
+        sseStream(
+          'event: message_start\ndata: {"type":"message_start","message":{"id":"msg_1","usage":{"input_tokens":25,"output_tokens":1}}}\n\n',
+          'event: content_block_delta\ndata: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"hi"}}\n\n',
+          'event: message_delta\ndata: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"input_tokens":5,"output_tokens":15}}\n\n',
+          'event: message_stop\ndata: {"type":"message_stop"}\n\n',
+        ),
       { status: 200, headers: { 'content-type': 'text/event-stream' } },
     );
     const app = createProxyApp(makeConfig());
@@ -1297,13 +1312,14 @@ describe('createProxyApp — streaming pipeline', () => {
 
   it('ignores message.usage on events that are not message_start', async () => {
     resetTokenUsage();
-    mockFetch(
-      sseStream(
-        // A decision stream may carry a business `message` object; only
-        // Anthropic's message_start owns token usage under that key.
-        'data: {"type":"decision","message":{"usage":{"input_tokens":999,"output_tokens":999}}}\n\n',
-        'data: {"type":"decision.completed","usage":{"input_tokens":3,"output_tokens":0,"total_tokens":3}}\n\n',
-      ),
+    mockFetchFrom(
+      () =>
+        sseStream(
+          // A decision stream may carry a business `message` object; only
+          // Anthropic's message_start owns token usage under that key.
+          'data: {"type":"decision","message":{"usage":{"input_tokens":999,"output_tokens":999}}}\n\n',
+          'data: {"type":"decision.completed","usage":{"input_tokens":3,"output_tokens":0,"total_tokens":3}}\n\n',
+        ),
       { status: 200, headers: { 'content-type': 'text/event-stream' } },
     );
     const app = createProxyApp(makeConfig());
@@ -1326,14 +1342,15 @@ describe('createProxyApp — streaming pipeline', () => {
 
   it('books a total that never undercuts the merged prompt and completion', async () => {
     resetTokenUsage();
-    mockFetch(
-      sseStream(
-        // The finish chunk carries the full triple; a later usage-only chunk
-        // raises completion without repeating the total.
-        'data: {"choices":[{"index":0,"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":100,"completion_tokens":5,"total_tokens":105}}\n\n',
-        'data: {"choices":[],"usage":{"completion_tokens":20}}\n\n',
-        'data: [DONE]\n\n',
-      ),
+    mockFetchFrom(
+      () =>
+        sseStream(
+          // The finish chunk carries the full triple; a later usage-only chunk
+          // raises completion without repeating the total.
+          'data: {"choices":[{"index":0,"delta":{},"finish_reason":"stop"}],"usage":{"prompt_tokens":100,"completion_tokens":5,"total_tokens":105}}\n\n',
+          'data: {"choices":[],"usage":{"completion_tokens":20}}\n\n',
+          'data: [DONE]\n\n',
+        ),
       { status: 200 },
     );
     const app = createProxyApp(makeConfig());
@@ -1350,8 +1367,9 @@ describe('createProxyApp — streaming pipeline', () => {
   });
 
   it('respects the client decision about streamed usage', async () => {
-    const fetchMock = vi.spyOn(globalThis, 'fetch').mockImplementation(async () =>
-      new Response(sseStream('data: {"choices":[{"delta":{"content":"hi"}}]}\n\n'), { status: 200 }),
+    const fetchMock = mockFetchFrom(
+      () => sseStream('data: {"choices":[{"delta":{"content":"hi"}}]}\n\n'),
+      { status: 200 },
     );
     const app = createProxyApp(makeConfig());
 
@@ -1379,7 +1397,7 @@ describe('createProxyApp — streaming pipeline', () => {
   });
 
   it('merges the usage option into client-supplied stream_options', async () => {
-    const fetchMock = mockFetch(sseStream('data: {"choices":[{"delta":{"content":"hi"}}]}\n\n'), { status: 200 });
+    const fetchMock = mockFetchFrom(() => sseStream('data: {"choices":[{"delta":{"content":"hi"}}]}\n\n'), { status: 200 });
     const app = createProxyApp(makeConfig());
     await (await app.request('/v1/chat/completions', {
       method: 'POST',
@@ -1391,7 +1409,7 @@ describe('createProxyApp — streaming pipeline', () => {
   });
 
   it('does not inject stream usage into non-chat streaming routes', async () => {
-    const fetchMock = mockFetch(sseStream('data: {"type":"x"}\n\n'), { status: 200 });
+    const fetchMock = mockFetchFrom(() => sseStream('data: {"type":"x"}\n\n'), { status: 200 });
     const app = createProxyApp(makeConfig());
 
     await (await app.request('/v1/responses', {
@@ -1756,7 +1774,7 @@ describe('createProxyApp — provider mapping & extra headers', () => {
   });
 
   it('strips the provider suffix and asks for usage in one pass', async () => {
-    const fetchMock = mockFetch(sseStream('data: {"choices":[{"delta":{"content":"hi"}}]}\n\n'), { status: 200 });
+    const fetchMock = mockFetchFrom(() => sseStream('data: {"choices":[{"delta":{"content":"hi"}}]}\n\n'), { status: 200 });
     const app = createProxyApp(makeConfig({
       keys: [{ label: 'cc', key: 'user_cc-key-0001', provider: 'commandcode' }],
     }));
@@ -1782,7 +1800,7 @@ describe('createProxyApp — provider mapping & extra headers', () => {
   });
 
   it('forwards an unparseable body untouched', async () => {
-    const fetchMock = mockFetch(sseStream('data: [DONE]\n\n'), { status: 200 });
+    const fetchMock = mockFetchFrom(() => sseStream('data: [DONE]\n\n'), { status: 200 });
     const app = createProxyApp(makeConfig());
 
     await (await app.request('/v1/chat/completions', {
@@ -1921,7 +1939,7 @@ describe('createProxyApp — X-Proxy-Provider header', () => {
   it('sets the provider header on streaming responses too', async () => {
     // One Response per fetch: the usage/models warm-up consumes bodies, and a
     // shared instance would be drained before the chat call in a clean process.
-    mockFetch(sseStream('data: {"choices":[]}\n\n'), { status: 200 });
+    mockFetchFrom(() => sseStream('data: {"choices":[]}\n\n'), { status: 200 });
     const app = createProxyApp(mixedPool());
 
     const res = await app.request('/v1/chat/completions', {

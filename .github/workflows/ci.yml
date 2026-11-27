@@ -61,9 +61,14 @@ jobs:
           fail_ci_if_error: false
 
   unit-shuffle:
-    name: Unit tests in shuffled order
+    name: Unit tests in shuffled order (seed ${{ matrix.seed }})
     runs-on: ubuntu-latest
     timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        # Two fixed permutations for determinism; change the seed to explore another.
+        seed: [7331, 5]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 
@@ -76,9 +81,8 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
-      # Seed fixed for determinism; another seed explores another permutation.
       - name: Run unit tests in shuffled order
-        run: npx vitest run --sequence.shuffle --sequence.seed=7331
+        run: npx vitest run --sequence.shuffle --sequence.seed=${{ matrix.seed }}
 
   install-smoke:
     name: Install smoke (${{ matrix.os }})
