@@ -191,6 +191,12 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
-      # Builds once and proves the container runs: mounted config keys, HEALTHCHECK, non-root, env-only keys.
+      # Builds once and proves the container runs: mounted config keys,
+      # HEALTHCHECK, non-root, env-only keys. The JSON report is not decoration:
+      # without the jq guard, deleting RUN_DOCKER_SMOKE below would leave the
+      # suite skipped and this job green with zero tests executed.
       - name: Docker smoke test
-        run: RUN_DOCKER_SMOKE=1 npx vitest run test/docker-install.test.ts
+        run: |
+          RUN_DOCKER_SMOKE=1 npx vitest run test/docker-install.test.ts \
+            --reporter=default --reporter=json --outputFile=/tmp/vitest-docker.json
+          jq -e '.numTotalTests == 1 and .numPassedTests == 1' /tmp/vitest-docker.json
