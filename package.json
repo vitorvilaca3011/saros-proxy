@@ -26,6 +26,7 @@
     "test:source": "vitest run test/source-install.test.ts",
     "test:install": "npm run build && vitest run --config vitest.e2e.config.ts test/install.e2e.test.ts",
     "test:model-e2e": "npm run build && vitest run --config vitest.e2e.config.ts test/model-e2e.test.ts",
+    "test:lifecycle": "npm run build && vitest run --config vitest.e2e.config.ts test/lifecycle.e2e.test.ts",
     "test:docker": "vitest run test/docker-install.test.ts",
     "docker:build": "docker compose build proxy",
     "docker:run": "docker compose up proxy",
